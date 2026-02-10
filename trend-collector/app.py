@@ -9,11 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_db, save_trends, get_latest_trends
 
-from google_trends import fetch_google_trends
-from youtube_trends import fetch_youtube_trends
-from reddit_trends import fetch_reddit_trends
-from bing_trends import fetch_bing_trends
-from tiktok_trends import fetch_tiktok_trends
+from collectors.google_trends import fetch_google_trends
+from collectors.youtube_trends import fetch_youtube_trends
+from collectors.reddit_trends import fetch_reddit_trends
+from collectors.bing_trends import fetch_bing_trends
+from collectors.tiktok_trends import fetch_tiktok_trends
 
 # 6 hours in seconds
 COLLECTION_INTERVAL_SECONDS = 6 * 60 * 60
