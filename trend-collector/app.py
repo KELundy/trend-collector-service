@@ -7,7 +7,7 @@ import os  # NEW: needed to print the public URL
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from collectors.database import init_db, save_trends, get_latest_trends
+from database import init_db, save_trends, get_latest_trends
 
 from google_trends import fetch_google_trends
 from youtube_trends import fetch_youtube_trends
