@@ -42,7 +42,7 @@ function showSystemHealth() {
 // IMPORTANT: Replace <YOUR-REPL-URL> with your actual Replit URL.
 // Example: https://homebridge-saas.kevin4165.repl.co
 
-const BASE_URL = "https://<YOUR-REPL-URL>";
+const BASE_URL = "https://trend-collector-service-2-xxxxx.onrender.com";
 
 async function fetchTrends() {
   const output = document.getElementById("trendsOutput");
