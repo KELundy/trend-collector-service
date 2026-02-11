@@ -39,9 +39,7 @@ function showSystemHealth() {
 // TREND COLLECTOR API CALLS
 // -------------------------------
 
-// IMPORTANT: Replace <YOUR-REPL-URL> with your actual Replit URL.
-// Example: https://homebridge-saas.kevin4165.repl.co
-
+// IMPORTANT: Replace <YOUR-REPL-URL> with your actual backend URL if needed.
 const BASE_URL = "https://trend-collector-service-2-xxxxx.onrender.com";
 
 async function fetchTrends() {
@@ -126,13 +124,59 @@ document.getElementById("deadlinesList").innerHTML = `
 `;
 
 // -------------------------------
-// DEFAULT VIEW
+// CONTENT QUEUE: LOAD TABLE
 // -------------------------------
 
-showDashboard();
-// ===============================
-// CONTENT MODAL LOGIC
-// ===============================
+function loadQueue() {
+  const tableBody = document.getElementById("queueTableBody");
+  if (!tableBody) return;
+
+  tableBody.innerHTML = "Loading...";
+
+  fetch(`${BASE_URL}/queue/list`)
+    .then(res => res.json())
+    .then(data => {
+      if (!data.items || !Array.isArray(data.items) || data.items.length === 0) {
+        tableBody.innerHTML = "<tr><td colspan='6'>No items found.</td></tr>";
+        return;
+      }
+
+      tableBody.innerHTML = "";
+
+      data.items.forEach(item => {
+        const tr = document.createElement("tr");
+
+        tr.innerHTML = `
+          <td>${item.created_at}</td>
+          <td style="cursor:pointer; color:#0077cc; text-decoration:underline;">
+            ${item.headline}
+            <div class="preview-text" style="font-size:12px; color:#666; margin-top:4px;">
+              ${item.post ? item.post.substring(0, 160) + "..." : ""}
+            </div>
+          </td>
+          <td>${item.niche || ""}</td>
+          <td>${item.status || ""}</td>
+          <td>${(item.hashtags || []).join(", ")}</td>
+          <td>
+            <button class="btn-secondary" onclick="event.stopPropagation(); publishItem(${item.id})">
+              Publish
+            </button>
+          </td>
+        `;
+
+        // Clicking the row opens the content detail modal
+        tr.addEventListener("click", () => openModal(item));
+        tableBody.appendChild(tr);
+      });
+    })
+    .catch(() => {
+      tableBody.innerHTML = "<tr><td colspan='6'>Error loading queue.</td></tr>";
+    });
+}
+
+// -------------------------------
+// CONTENT MODAL LOGIC (DETAIL VIEW)
+// -------------------------------
 
 function openModal(item) {
   document.getElementById("modalHeadline").textContent = item.headline || "";
@@ -152,45 +196,49 @@ function closeModal() {
   document.getElementById("contentModal").style.display = "none";
 }
 
-// ===============================
-// QUEUE TABLE CLICK HANDLER
-// ===============================
+// -------------------------------
+// PUBLISH MODAL LOGIC
+// -------------------------------
 
-function loadQueue() {
-  const tableBody = document.getElementById("queueTableBody");
-  tableBody.innerHTML = "Loading...";
-
-  fetch(`${BASE_URL}/queue/list`)
+function publishItem(id) {
+  fetch(`${BASE_URL}/queue/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id })
+  })
     .then(res => res.json())
     .then(data => {
-      if (!data.items) {
-        tableBody.innerHTML = "No items found.";
+      if (data.status !== "ok") {
+        alert("Error publishing item.");
         return;
       }
 
-      tableBody.innerHTML = "";
+      document.getElementById("publishFormatted").textContent = data.formatted;
+      document.getElementById("publishModal").style.display = "flex";
 
-      data.items.forEach(item => {
-        const tr = document.createElement("tr");
-
-        tr.innerHTML = `
-          <td>${item.created_at}</td>
-          <td style="cursor:pointer; color:#0077cc; text-decoration:underline;">
-            ${item.headline}
-            <div class="preview-text" style="font-size:12px; color:#666; margin-top:4px;">
-              ${item.post ? item.post.substring(0, 160) + "..." : ""}
-            </div>
-          </td>
-          <td>${item.niche}</td>
-          <td>${item.status}</td>
-          <td>${(item.hashtags || []).join(", ")}</td>
-        `;
-
-        tr.addEventListener("click", () => openModal(item));
-        tableBody.appendChild(tr);
-      });
+      // Refresh queue so status updates to "published"
+      loadQueue();
     })
-    .catch(() => {
-      tableBody.innerHTML = "Error loading queue.";
-    });
+    .catch(() => alert("Error publishing item."));
+}
+
+function closePublishModal() {
+  document.getElementById("publishModal").style.display = "none";
+}
+
+function copyPublishContent() {
+  const text = document.getElementById("publishFormatted").textContent;
+  navigator.clipboard.writeText(text);
+  alert("Copied!");
+}
+
+// -------------------------------
+// DEFAULT VIEW + INITIAL LOAD
+// -------------------------------
+
+showDashboard();
+
+// If the queue table exists on this page, load it on startup
+if (document.getElementById("queueTableBody")) {
+  loadQueue();
 }
