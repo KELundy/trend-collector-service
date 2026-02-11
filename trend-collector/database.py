@@ -137,4 +137,4 @@ def get_content_queue():
         })
 
     return results
-    ]
+    
