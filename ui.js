@@ -40,7 +40,7 @@ function showSystemHealth() {
 // -------------------------------
 
 // IMPORTANT: Replace <YOUR-REPL-URL> with your actual backend URL if needed.
-const BASE_URL = "https://trend-collector-service-2-xxxxx.onrender.com";
+const BASE_URL = "https://trend-collector-service-2.onrender.com";
 
 async function fetchTrends() {
   const output = document.getElementById("trendsOutput");
