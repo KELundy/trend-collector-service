@@ -19,7 +19,7 @@ def init_db():
         )
     """)
 
-    # NEW: Content Queue table
+    # Content Queue table
     c.execute("""
         CREATE TABLE IF NOT EXISTS content_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +31,7 @@ def init_db():
             call_to_action TEXT,
             script30 TEXT,
             thumbnail_idea TEXT,
-            hashtags TEXT,  -- stored as JSON
+            hashtags TEXT,
             status TEXT DEFAULT 'draft'
         )
     """)
@@ -116,7 +116,8 @@ def get_content_queue():
 
     c.execute("""
         SELECT id, created_at, trend, niche, headline,
-               status, hashtags
+               post, call_to_action, script30, thumbnail_idea,
+               hashtags, status
         FROM content_queue
         ORDER BY created_at DESC
     """)
@@ -132,17 +133,18 @@ def get_content_queue():
             "trend": r[2],
             "niche": r[3],
             "headline": r[4],
-            "status": r[5],
-            "hashtags": json.loads(r[6]) if r[6] else []
+            "post": r[5] or "",
+            "call_to_action": r[6] or "",
+            "script30": r[7] or "",
+            "thumbnailIdea": r[8] or "",
+            "hashtags": json.loads(r[9]) if r[9] else [],
+            "status": r[10]
         })
 
     return results
 
 
 def update_content_status(item_id: int, new_status: str):
-    """
-    Update the status of a content_queue item.
-    """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
