@@ -277,3 +277,4 @@ async def queue_add(request: Request):
 def queue_list():
     items = get_content_queue()
     return {"status": "ok", "items": items}
+
