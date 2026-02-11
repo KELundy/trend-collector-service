@@ -3,11 +3,18 @@ import time
 from datetime import datetime
 from typing import Dict, Any, List
 import os
+import json
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import init_db, save_trends, get_latest_trends
+from database import (
+    init_db,
+    save_trends,
+    get_latest_trends,
+    add_content_to_queue,
+    get_content_queue
+)
 
 from collectors.google_trends import fetch_google_trends
 from collectors.youtube_trends import fetch_youtube_trends
@@ -15,10 +22,6 @@ from collectors.reddit_trends import fetch_reddit_trends
 from collectors.bing_trends import fetch_bing_trends
 from collectors.tiktok_trends import fetch_tiktok_trends
 
-
-# ============================================================
-# CONFIG
-# ============================================================
 
 COLLECTION_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -38,7 +41,7 @@ app.add_middleware(
 
 
 # ============================================================
-# TREND COLLECTION LOGIC
+# TREND COLLECTION
 # ============================================================
 
 def collect_all_trends() -> Dict[str, List[str]]:
@@ -86,7 +89,7 @@ def on_startup():
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.get("/health")
@@ -99,7 +102,7 @@ def health_check() -> Dict[str, Any]:
 
 
 # ============================================================
-# MANUAL TREND COLLECTION
+# TRENDS
 # ============================================================
 
 @app.post("/collect")
@@ -112,10 +115,6 @@ def collect_now() -> Dict[str, Any]:
     }
 
 
-# ============================================================
-# GET STORED TRENDS
-# ============================================================
-
 @app.get("/trends")
 def get_trends(limit: int = 50) -> Dict[str, Any]:
     trends = get_latest_trends(limit=limit)
@@ -127,7 +126,7 @@ def get_trends(limit: int = 50) -> Dict[str, Any]:
 
 
 # ============================================================
-# CLARITY ENGINE (EXISTING)
+# CLARITY ENGINE
 # ============================================================
 
 def analyze_situation(text: str) -> dict:
@@ -197,16 +196,11 @@ async def clarity(request: Request):
 
 
 # ============================================================
-# NEW: CONTENT ENGINE ENDPOINT
+# CONTENT ENGINE
 # ============================================================
 
 @app.post("/generate-content")
 async def generate_content(request: Request):
-    """
-    Generates marketing content based on trend signals.
-    This is the first real "engine" component.
-    """
-
     body = await request.json()
     trend = body.get("trend") or "Adult child in Denver dealing with an inherited home after a parent’s health crisis."
     niche = body.get("niche") or "probate real estate"
@@ -261,8 +255,25 @@ async def generate_content(request: Request):
         "niche": niche,
         "headline": headline,
         "post": post,
-        "callToAction": cta,
+        "call_to_action": cta,
         "script30": script30,
         "thumbnailIdea": thumbnailIdea,
         "hashtags": hashtags,
     }
+
+
+# ============================================================
+# CONTENT QUEUE (NEW)
+# ============================================================
+
+@app.post("/queue/add")
+async def queue_add(request: Request):
+    item = await request.json()
+    add_content_to_queue(item)
+    return {"status": "ok", "message": "Content added to queue."}
+
+
+@app.get("/queue/list")
+def queue_list():
+    items = get_content_queue()
+    return {"status": "ok", "items": items}
