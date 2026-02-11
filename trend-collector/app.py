@@ -16,6 +16,10 @@ from collectors.bing_trends import fetch_bing_trends
 from collectors.tiktok_trends import fetch_tiktok_trends
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 COLLECTION_INTERVAL_SECONDS = 6 * 60 * 60
 
 app = FastAPI(
@@ -32,6 +36,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ============================================================
+# TREND COLLECTION LOGIC
+# ============================================================
 
 def collect_all_trends() -> Dict[str, List[str]]:
     sources_and_functions = {
@@ -77,6 +85,10 @@ def on_startup():
     print("[Startup] Scheduler thread started.")
 
 
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
 @app.get("/health")
 def health_check() -> Dict[str, Any]:
     return {
@@ -85,6 +97,10 @@ def health_check() -> Dict[str, Any]:
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+
+# ============================================================
+# MANUAL TREND COLLECTION
+# ============================================================
 
 @app.post("/collect")
 def collect_now() -> Dict[str, Any]:
@@ -96,6 +112,10 @@ def collect_now() -> Dict[str, Any]:
     }
 
 
+# ============================================================
+# GET STORED TRENDS
+# ============================================================
+
 @app.get("/trends")
 def get_trends(limit: int = 50) -> Dict[str, Any]:
     trends = get_latest_trends(limit=limit)
@@ -106,9 +126,9 @@ def get_trends(limit: int = 50) -> Dict[str, Any]:
     }
 
 
-# -----------------------------
-# REAL CLARITY ENGINE BACKEND
-# -----------------------------
+# ============================================================
+# CLARITY ENGINE (EXISTING)
+# ============================================================
 
 def analyze_situation(text: str) -> dict:
     t = text.lower()
@@ -118,7 +138,6 @@ def analyze_situation(text: str) -> dict:
     choices = []
     confidence = 0.0
 
-    # Issue detection
     if any(word in t for word in ["fall", "fell", "slipped"]):
         issue = "A fall has created a safety and care decision."
         constraints.append("Immediate safety concerns")
@@ -174,4 +193,76 @@ async def clarity(request: Request):
     return {
         "status": "ok",
         "output": result
+    }
+
+
+# ============================================================
+# NEW: CONTENT ENGINE ENDPOINT
+# ============================================================
+
+@app.post("/generate-content")
+async def generate_content(request: Request):
+    """
+    Generates marketing content based on trend signals.
+    This is the first real "engine" component.
+    """
+
+    body = await request.json()
+    trend = body.get("trend") or "Adult child in Denver dealing with an inherited home after a parent’s health crisis."
+    niche = body.get("niche") or "probate real estate"
+
+    headline = "What To Do With an Inherited Home in Denver (Without Breaking Your Family)"
+
+    post = (
+        "If you’ve just inherited a home in Denver after a parent’s health crisis or passing, "
+        "you’re not alone—and you’re not supposed to have all the answers.\n\n"
+        "The real tension usually isn’t about the house. It’s about grief, guilt, and siblings who "
+        "see the situation differently. Before you rush into a quick sale or let the home sit vacant, "
+        "you need a clear, step-by-step plan that protects the estate, honors your parent, and keeps "
+        "the family intact.\n\n"
+        "At The HomeBridge Group, we specialize in guiding The Responsible One—the person who quietly "
+        "takes on everything—through inherited property decisions in Denver. From timelines and repairs "
+        "to legal coordination and selling strategies, we help you turn a stressful inheritance into a "
+        "thoughtful transition."
+    )
+
+    cta = (
+        "If you’re staring at an inherited home and a stack of unanswered questions, start with a "
+        "20-minute call. No pressure, no sales pitch—just clarity on your options in Denver’s real market."
+    )
+
+    script30 = (
+        "If you’ve just inherited a home in Denver after a parent’s health crisis or passing, you’re "
+        "probably carrying more than anyone can see.\n\n"
+        "The house, the paperwork, the siblings, the decisions—none of it is simple. At The HomeBridge "
+        "Group, we work with the person who ends up responsible for all of it. In about 20 minutes, we "
+        "can walk you through your real options for the property, the timeline, and the family.\n\n"
+        "If that’s you, and you’re tired of feeling like you have to figure it out alone, reach out. "
+        "You don’t have to carry this by yourself."
+    )
+
+    thumbnailIdea = (
+        "A calm, well-lit Denver home exterior at dusk with subtle overlay text: "
+        "'Inherited Home? Start Here.' No people—just stability and guidance."
+    )
+
+    hashtags = [
+        "#DenverRealEstate",
+        "#InheritedHome",
+        "#ProbateRealEstate",
+        "#SeniorTransition",
+        "#TheResponsibleOne",
+        "#HomeBridgeGroup",
+    ]
+
+    return {
+        "status": "ok",
+        "trend": trend,
+        "niche": niche,
+        "headline": headline,
+        "post": post,
+        "callToAction": cta,
+        "script30": script30,
+        "thumbnailIdea": thumbnailIdea,
+        "hashtags": hashtags,
     }
