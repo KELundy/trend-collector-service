@@ -130,3 +130,67 @@ document.getElementById("deadlinesList").innerHTML = `
 // -------------------------------
 
 showDashboard();
+// ===============================
+// CONTENT MODAL LOGIC
+// ===============================
+
+function openModal(item) {
+  document.getElementById("modalHeadline").textContent = item.headline || "";
+  document.getElementById("modalNiche").textContent = item.niche || "";
+  document.getElementById("modalStatus").textContent = item.status || "";
+
+  document.getElementById("modalPost").textContent = item.post || "";
+  document.getElementById("modalCTA").textContent = item.call_to_action || "";
+  document.getElementById("modalScript").textContent = item.script30 || "";
+  document.getElementById("modalThumb").textContent = item.thumbnailIdea || "";
+  document.getElementById("modalTags").textContent = (item.hashtags || []).join(", ");
+
+  document.getElementById("contentModal").style.display = "flex";
+}
+
+function closeModal() {
+  document.getElementById("contentModal").style.display = "none";
+}
+
+// ===============================
+// QUEUE TABLE CLICK HANDLER
+// ===============================
+
+function loadQueue() {
+  const tableBody = document.getElementById("queueTableBody");
+  tableBody.innerHTML = "Loading...";
+
+  fetch(`${BASE_URL}/queue/list`)
+    .then(res => res.json())
+    .then(data => {
+      if (!data.items) {
+        tableBody.innerHTML = "No items found.";
+        return;
+      }
+
+      tableBody.innerHTML = "";
+
+      data.items.forEach(item => {
+        const tr = document.createElement("tr");
+
+        tr.innerHTML = `
+          <td>${item.created_at}</td>
+          <td style="cursor:pointer; color:#0077cc; text-decoration:underline;">
+            ${item.headline}
+            <div class="preview-text" style="font-size:12px; color:#666; margin-top:4px;">
+              ${item.post ? item.post.substring(0, 160) + "..." : ""}
+            </div>
+          </td>
+          <td>${item.niche}</td>
+          <td>${item.status}</td>
+          <td>${(item.hashtags || []).join(", ")}</td>
+        `;
+
+        tr.addEventListener("click", () => openModal(item));
+        tableBody.appendChild(tr);
+      });
+    })
+    .catch(() => {
+      tableBody.innerHTML = "Error loading queue.";
+    });
+}
