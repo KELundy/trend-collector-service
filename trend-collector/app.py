@@ -322,3 +322,60 @@ async def queue_status(request: Request):
 
     update_content_status(item_id_int, new_status)
     return {"status": "ok"}
+    # ============================================================
+# PUBLISH ENDPOINT
+# ============================================================
+
+@app.post("/queue/publish")
+async def queue_publish(request: Request):
+    """
+    Publish a content_queue item.
+    Returns a formatted block of content and updates status to 'published'.
+    """
+    data = await request.json()
+    item_id = data.get("id")
+
+    if item_id is None:
+        return {"status": "error", "message": "'id' is required."}
+
+    try:
+        item_id_int = int(item_id)
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "Invalid 'id' value."}
+
+    # Fetch the item
+    items = get_content_queue()
+    item = next((i for i in items if i["id"] == item_id_int), None)
+
+    if not item:
+        return {"status": "error", "message": "Item not found."}
+
+    # Update status to published
+    update_content_status(item_id_int, "published")
+
+    # Format content for publishing
+    formatted = f"""
+HEADLINE:
+{item['headline']}
+
+POST:
+{item['post']}
+
+CALL TO ACTION:
+{item['call_to_action']}
+
+30-SECOND SCRIPT:
+{item['script30']}
+
+THUMBNAIL IDEA:
+{item['thumbnailIdea']}
+
+HASHTAGS:
+{', '.join(item['hashtags'])}
+"""
+
+    return {
+        "status": "ok",
+        "formatted": formatted.strip(),
+        "item": item
+    }
