@@ -277,7 +277,23 @@ async def queue_add(request: Request):
 @app.get("/queue/list")
 def queue_list():
     items = get_content_queue()
-    return {"status": "ok", "items": items}
+
+    formatted = []
+    for item in items:
+        formatted.append({
+            "id": item["id"],
+            "created_at": item["created_at"],
+            "headline": item["headline"],
+            "post": item["post"],                     # ⭐ REQUIRED FOR PREVIEW
+            "call_to_action": item["call_to_action"],
+            "script30": item["script30"],
+            "thumbnailIdea": item["thumbnailIdea"],
+            "hashtags": item["hashtags"],
+            "niche": item["niche"],
+            "status": item["status"]
+        })
+
+    return {"status": "ok", "items": formatted}
 
 
 @app.post("/queue/status")
