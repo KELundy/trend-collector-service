@@ -137,4 +137,19 @@ def get_content_queue():
         })
 
     return results
-    
+
+
+def update_content_status(item_id: int, new_status: str):
+    """
+    Update the status of a content_queue item.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    c.execute(
+        "UPDATE content_queue SET status = ? WHERE id = ?",
+        (new_status, item_id)
+    )
+
+    conn.commit()
+    conn.close()
