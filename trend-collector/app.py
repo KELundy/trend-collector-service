@@ -13,7 +13,8 @@ from database import (
     save_trends,
     get_latest_trends,
     add_content_to_queue,
-    get_content_queue
+    get_content_queue,
+    update_content_status,
 )
 
 from collectors.google_trends import fetch_google_trends
@@ -263,7 +264,7 @@ async def generate_content(request: Request):
 
 
 # ============================================================
-# CONTENT QUEUE (NEW)
+# CONTENT QUEUE
 # ============================================================
 
 @app.post("/queue/add")
@@ -278,3 +279,30 @@ def queue_list():
     items = get_content_queue()
     return {"status": "ok", "items": items}
 
+
+@app.post("/queue/status")
+async def queue_status(request: Request):
+    """
+    Update the status of a content_queue item.
+    Expects JSON: { "id": <int>, "status": "ready" }
+    """
+    data = await request.json()
+    item_id = data.get("id")
+    new_status = data.get("status")
+
+    if item_id is None or new_status is None:
+        return {
+            "status": "error",
+            "message": "Both 'id' and 'status' are required."
+        }
+
+    try:
+        item_id_int = int(item_id)
+    except (TypeError, ValueError):
+        return {
+            "status": "error",
+            "message": "Invalid 'id' value."
+        }
+
+    update_content_status(item_id_int, new_status)
+    return {"status": "ok"}
