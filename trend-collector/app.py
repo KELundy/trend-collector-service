@@ -203,52 +203,32 @@ async def clarity(request: Request):
 @app.post("/generate-content")
 async def generate_content(request: Request):
     body = await request.json()
-    trend = body.get("trend") or "Adult child in Denver dealing with an inherited home after a parent’s health crisis."
-    niche = body.get("niche") or "probate real estate"
 
-    headline = "What To Do With an Inherited Home in Denver (Without Breaking Your Family)"
+    # Extract trend and niche exactly as sent by the frontend
+    trend = body.get("trend")
+    niche = body.get("niche")
 
-    post = (
-        "If you’ve just inherited a home in Denver after a parent’s health crisis or passing, "
-        "you’re not alone—and you’re not supposed to have all the answers.\n\n"
-        "The real tension usually isn’t about the house. It’s about grief, guilt, and siblings who "
-        "see the situation differently. Before you rush into a quick sale or let the home sit vacant, "
-        "you need a clear, step-by-step plan that protects the estate, honors your parent, and keeps "
-        "the family intact.\n\n"
-        "At The HomeBridge Group, we specialize in guiding The Responsible One—the person who quietly "
-        "takes on everything—through inherited property decisions in Denver. From timelines and repairs "
-        "to legal coordination and selling strategies, we help you turn a stressful inheritance into a "
-        "thoughtful transition."
-    )
+    # Validate: trend must exist
+    if not trend or not str(trend).strip():
+        return {
+            "status": "error",
+            "message": "Trend is required but was not provided by the frontend."
+        }
 
-    cta = (
-        "If you’re staring at an inherited home and a stack of unanswered questions, start with a "
-        "20-minute call. No pressure, no sales pitch—just clarity on your options in Denver’s real market."
-    )
+    # Validate: niche must exist
+    if not niche or not str(niche).strip():
+        return {
+            "status": "error",
+            "message": "Niche is required but was not provided by the frontend."
+        }
 
-    script30 = (
-        "If you’ve just inherited a home in Denver after a parent’s health crisis or passing, you’re "
-        "probably carrying more than anyone can see.\n\n"
-        "The house, the paperwork, the siblings, the decisions—none of it is simple. At The HomeBridge "
-        "Group, we work with the person who ends up responsible for all of it. In about 20 minutes, we "
-        "can walk you through your real options for the property, the timeline, and the family.\n\n"
-        "If that’s you, and you’re tired of feeling like you have to figure it out alone, reach out. "
-        "You don’t have to carry this by yourself."
-    )
-
-    thumbnailIdea = (
-        "A calm, well-lit Denver home exterior at dusk with subtle overlay text: "
-        "'Inherited Home? Start Here.' No people—just stability and guidance."
-    )
-
-    hashtags = [
-        "#DenverRealEstate",
-        "#InheritedHome",
-        "#ProbateRealEstate",
-        "#SeniorTransition",
-        "#TheResponsibleOne",
-        "#HomeBridgeGroup",
-    ]
+    # TODO: Replace this static content with your real AI generation logic
+    headline = f"Content for: {trend}"
+    post = f"This is placeholder content generated for the trend: {trend} and niche: {niche}."
+    cta = "This is a placeholder call to action."
+    script30 = "This is a placeholder 30-second script."
+    thumbnailIdea = "Placeholder thumbnail idea."
+    hashtags = ["#DenverRealEstate", "#HomeBridgeGroup"]
 
     return {
         "status": "ok",
@@ -261,7 +241,6 @@ async def generate_content(request: Request):
         "thumbnailIdea": thumbnailIdea,
         "hashtags": hashtags,
     }
-
 
 # ============================================================
 # CONTENT QUEUE
