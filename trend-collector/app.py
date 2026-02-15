@@ -215,21 +215,21 @@ async def generate_content(request: Request):
             "message": "Trend is required but was not provided by the frontend."
         }
 
-   # Validate: niche must exist
-if not niche or not str(niche).strip():
-    return {
-        "status": "error",
-        "message": "Niche is required but was not provided by the frontend."
-    }
+    # Validate: niche must exist
+    if not niche or not str(niche).strip():
+        return {
+            "status": "error",
+            "message": "Niche is required but was not provided by the frontend."
+        }
 
-# --- REAL CLAUDE GENERATION LOGIC ---
-from anthropic import Anthropic
-import json
-import os
+    # --- REAL CLAUDE GENERATION LOGIC ---
+    from anthropic import Anthropic
+    import json
+    import os
 
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-prompt = f"""
+    prompt = f"""
 You are an expert real estate content strategist writing for Kevin Lundy of HomeBridge Group in Denver.
 You write with clarity, emotional intelligence, and the Obvious Adams principle.
 Avoid the words “navigate” and “transitions.”
@@ -259,27 +259,26 @@ Return ONLY valid JSON in this structure:
 }}
 """
 
-response = client.messages.create(
-    model="claude-3-sonnet-20240229",
-    max_tokens=800,
-    messages=[{"role": "user", "content": prompt}]
-)
+    response = client.messages.create(
+        model="claude-3-sonnet-20240229",
+        max_tokens=800,
+        messages=[{"role": "user", "content": prompt}]
+    )
 
-text = response.content[0].text
-data = json.loads(text)
+    text = response.content[0].text
+    data = json.loads(text)
 
-return {
-    "status": "ok",
-    "trend": trend,
-    "niche": niche,
-    "headline": data["headline"],
-    "post": data["post"],
-    "call_to_action": data["cta"],
-    "script30": data["script"],
-    "thumbnailIdea": data["thumbnail"],
-    "hashtags": data["hashtags"],
-}
-
+    return {
+        "status": "ok",
+        "trend": trend,
+        "niche": niche,
+        "headline": data["headline"],
+        "post": data["post"],
+        "call_to_action": data["cta"],
+        "script30": data["script"],
+        "thumbnailIdea": data["thumbnail"],
+        "hashtags": data["hashtags"],
+    }
 # ============================================================
 # CONTENT QUEUE
 # ============================================================
