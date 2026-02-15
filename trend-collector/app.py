@@ -215,32 +215,70 @@ async def generate_content(request: Request):
             "message": "Trend is required but was not provided by the frontend."
         }
 
-    # Validate: niche must exist
-    if not niche or not str(niche).strip():
-        return {
-            "status": "error",
-            "message": "Niche is required but was not provided by the frontend."
-        }
-
-    # TODO: Replace this static content with your real AI generation logic
-    headline = f"Content for: {trend}"
-    post = f"This is placeholder content generated for the trend: {trend} and niche: {niche}."
-    cta = "This is a placeholder call to action."
-    script30 = "This is a placeholder 30-second script."
-    thumbnailIdea = "Placeholder thumbnail idea."
-    hashtags = ["#DenverRealEstate", "#HomeBridgeGroup"]
-
+   # Validate: niche must exist
+if not niche or not str(niche).strip():
     return {
-        "status": "ok",
-        "trend": trend,
-        "niche": niche,
-        "headline": headline,
-        "post": post,
-        "call_to_action": cta,
-        "script30": script30,
-        "thumbnailIdea": thumbnailIdea,
-        "hashtags": hashtags,
+        "status": "error",
+        "message": "Niche is required but was not provided by the frontend."
     }
+
+# --- REAL CLAUDE GENERATION LOGIC ---
+from anthropic import Anthropic
+import json
+import os
+
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+prompt = f"""
+You are an expert real estate content strategist writing for Kevin Lundy of HomeBridge Group in Denver.
+You write with clarity, emotional intelligence, and the Obvious Adams principle.
+Avoid the words “navigate” and “transitions.”
+Use “plan” or “choices” instead of “pathways.”
+Tone: supportive, calm, grounded, responsible, and never salesy.
+
+Trend: {trend}
+Niche: {niche}
+
+Generate:
+1. A compelling headline
+2. A thumbnail idea
+3. 5–7 hashtags relevant to Denver real estate and the niche
+4. A short-form social post (100–150 words)
+5. A call to action that feels earned, not pushy
+6. A 30-second video script
+
+Return ONLY valid JSON in this structure:
+
+{{
+  "headline": "...",
+  "thumbnail": "...",
+  "hashtags": ["...", "..."],
+  "post": "...",
+  "cta": "...",
+  "script": "..."
+}}
+"""
+
+response = client.messages.create(
+    model="claude-3-sonnet-20240229",
+    max_tokens=800,
+    messages=[{"role": "user", "content": prompt}]
+)
+
+text = response.content[0].text
+data = json.loads(text)
+
+return {
+    "status": "ok",
+    "trend": trend,
+    "niche": niche,
+    "headline": data["headline"],
+    "post": data["post"],
+    "call_to_action": data["cta"],
+    "script30": data["script"],
+    "thumbnailIdea": data["thumbnail"],
+    "hashtags": data["hashtags"],
+}
 
 # ============================================================
 # CONTENT QUEUE
