@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime
 import json
+from typing import Dict, Any
 
 DB_NAME = "trends.db"
 
@@ -44,15 +45,44 @@ def init_db():
 # TREND STORAGE
 # -----------------------------
 
-def save_trends(source, topics):
+def save_trends(trends: Dict[str, Any]):
+    """
+    Save a full trends dictionary from collect_all_trends() into the trends table.
+
+    Expected structure:
+    {
+        "google": [...],
+        "youtube": [...],
+        "reddit": [...],
+        "bing": [...],
+        "tiktok": [...],
+        "timestamp": "2026-02-16T..."
+    }
+    """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    for topic in topics:
-        c.execute(
-            "INSERT INTO trends (source, topic) VALUES (?, ?)",
-            (source, topic)
-        )
+    for source, items in trends.items():
+        if source == "timestamp":
+            continue  # don't store the timestamp as a trend source
+
+        # items is expected to be a list of trend objects or strings
+        for item in items:
+            if isinstance(item, dict):
+                # Try to pull a meaningful text field
+                topic = (
+                    item.get("topic")
+                    or item.get("title")
+                    or item.get("query")
+                    or json.dumps(item)
+                )
+            else:
+                topic = str(item)
+
+            c.execute(
+                "INSERT INTO trends (source, topic) VALUES (?, ?)",
+                (source, topic)
+            )
 
     conn.commit()
     conn.close()
