@@ -88,7 +88,18 @@ def save_trends(trends: Dict[str, Any]):
     conn.close()
 
 
-def get_latest_trends(limit=50):
+def get_latest_trends(limit=200):
+    """
+    Return trends grouped by source, matching the structure the frontend expects:
+    {
+        "google": [...],
+        "youtube": [...],
+        "reddit": [...],
+        "bing": [...],
+        "tiktok": [...],
+        "timestamp": "..."
+    }
+    """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
@@ -102,11 +113,24 @@ def get_latest_trends(limit=50):
     rows = c.fetchall()
     conn.close()
 
-    return [
-        {"source": r[0], "topic": r[1], "collected_at": r[2]}
-        for r in rows
-    ]
+    # Build grouped structure
+    grouped = {
+        "google": [],
+        "youtube": [],
+        "reddit": [],
+        "bing": [],
+        "tiktok": [],
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
+    for source, topic, collected_at in rows:
+        if source in grouped:
+            grouped[source].append({
+                "topic": topic,
+                "collected_at": collected_at
+            })
+
+    return grouped
 
 # -----------------------------
 # CONTENT QUEUE STORAGE
