@@ -134,7 +134,7 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
 
     try:
       response = client.messages.create(
-    model="claude-3-sonnet-20240229",
+    model="claude-3-haiku-20240307",
     max_tokens=900,
     temperature=0.7,
     messages=[
