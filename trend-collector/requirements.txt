@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
 httpx
-anthropic>=1.20.0
+anthropic==0.82.0
