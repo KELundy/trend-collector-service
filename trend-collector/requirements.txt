@@ -1,4 +1,6 @@
 fastapi
-uvicorn[standard]
-httpx>=0.24.1
+uvicorn
 anthropic>=0.39.0
+httpx>=0.24.1
+pydantic
+python-dotenv
