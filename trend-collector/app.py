@@ -205,6 +205,45 @@ async def latest_trends():
     """Return the most recently collected trends."""
     return get_latest_trends()
 
+# ---------------------------------------------------------
+# TRENDS BY NICHE ENDPOINT
+# ---------------------------------------------------------
+@app.get("/trends/by-niche")
+async def trends_by_niche(niche: str):
+    """
+    Return trends filtered by niche, grouped by source.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    c.execute("""
+        SELECT source, topic, collected_at
+        FROM trends
+        WHERE niche = ?
+        ORDER BY collected_at DESC
+        LIMIT 200
+    """, (niche,))
+
+    rows = c.fetchall()
+    conn.close()
+
+    grouped = {
+        "google": [],
+        "youtube": [],
+        "reddit": [],
+        "bing": [],
+        "tiktok": [],
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    for source, topic, collected_at in rows:
+        if source in grouped:
+            grouped[source].append({
+                "topic": topic,
+                "collected_at": collected_at
+            })
+
+    return grouped
 
 # ---------------------------------------------------------
 # CONTENT QUEUE ENDPOINTS
