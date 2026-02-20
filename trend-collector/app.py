@@ -144,12 +144,17 @@ def collect_all_trends() -> Dict[str, Any]:
             continue
 
         for item in items:
-            topic = (
-                item.get("topic")
-                or item.get("title")
-                or item.get("query")
-                or json.dumps(item)
-            )
+           # Normalize topic into a string
+if isinstance(item, dict):
+    topic = (
+        item.get("topic")
+        or item.get("title")
+        or item.get("query")
+        or json.dumps(item)
+    )
+else:
+    # Item is already a string
+    topic = str(item)
 
             # 3. Classify topic into niches
             niches = classify_topic_to_niches(topic)
