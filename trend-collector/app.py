@@ -21,8 +21,8 @@ from database import (
     get_content_queue,
     update_content_status,
 )
+
 from database import migrate_add_niche_column
-migrate_add_niche_column()
 
 from collectors.google_trends import fetch_google_trends
 from collectors.youtube_trends import fetch_youtube_trends
@@ -191,10 +191,12 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
 
+    print("[Startup] Running DB migrations...")
+    migrate_add_niche_column()
+
     print("[Startup] Starting background trend collector thread...")
     thread = threading.Thread(target=trend_collection_worker, daemon=True)
     thread.start()
-
 
 # ---------------------------------------------------------
 # TREND ENDPOINTS
