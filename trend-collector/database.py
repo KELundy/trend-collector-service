@@ -45,31 +45,19 @@ def init_db():
 # TREND STORAGE
 # -----------------------------
 
-def save_trends(trends: Dict[str, Any]):
+def save_trends(trends: Dict[str, Any], niche: str):
     """
-    Save a full trends dictionary from collect_all_trends() into the trends table.
-
-    Expected structure:
-    {
-        "google": [...],
-        "youtube": [...],
-        "reddit": [...],
-        "bing": [...],
-        "tiktok": [...],
-        "timestamp": "2026-02-16T..."
-    }
+    Save a full trends dictionary from collect_all_trends(), but with niche classification applied.
     """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
     for source, items in trends.items():
         if source == "timestamp":
-            continue  # don't store the timestamp as a trend source
+            continue
 
-        # items is expected to be a list of trend objects or strings
         for item in items:
             if isinstance(item, dict):
-                # Try to pull a meaningful text field
                 topic = (
                     item.get("topic")
                     or item.get("title")
@@ -80,8 +68,8 @@ def save_trends(trends: Dict[str, Any]):
                 topic = str(item)
 
             c.execute(
-                "INSERT INTO trends (source, topic) VALUES (?, ?)",
-                (source, topic)
+                "INSERT INTO trends (source, topic, niche) VALUES (?, ?, ?)",
+                (source, topic, niche)
             )
 
     conn.commit()
