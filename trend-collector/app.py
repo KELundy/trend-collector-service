@@ -31,6 +31,35 @@ from collectors.bing_trends import fetch_bing_trends
 from collectors.tiktok_trends import fetch_tiktok_trends
 
 # ---------------------------------------------------------
+# CLAUDE CLASSIFICATION HELPER
+# ---------------------------------------------------------
+from anthropic import Anthropic
+
+anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+def classify_topic_to_niches(topic: str) -> list[str]:
+    """
+    Send a trend topic to Claude and return a list of niches it belongs to.
+    """
+    prompt = f"""
+    You are a real estate niche classifier. Given a trend topic, return a JSON list
+    of real estate niches it belongs to. No explanation, only JSON.
+
+    Trend topic: "{topic}"
+    """
+
+    response = anthropic_client.messages.create(
+        model="claude-3-sonnet-20240229",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        return json.loads(response.content[0].text)
+    except Exception:
+        return []
+
+# ---------------------------------------------------------
 # TREND COLLECTION LOGIC (WITH CLASSIFICATION)
 # ---------------------------------------------------------
 def collect_all_trends() -> Dict[str, Any]:
