@@ -21,6 +21,8 @@ from database import (
     get_content_queue,
     update_content_status,
 )
+from database import migrate_add_niche_column
+migrate_add_niche_column()
 
 from collectors.google_trends import fetch_google_trends
 from collectors.youtube_trends import fetch_youtube_trends
