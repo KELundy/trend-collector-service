@@ -143,19 +143,35 @@ def collect_all_trends() -> Dict[str, Any]:
         if source == "timestamp":
             continue
 
-        for item in items:
-           # Normalize topic into a string
-if isinstance(item, dict):
-    topic = (
-        item.get("topic")
-        or item.get("title")
-        or item.get("query")
-        or json.dumps(item)
-    )
-else:
-    # Item is already a string
-    topic = str(item)
+               for item in items:
+            # Normalize topic into a string
+            if isinstance(item, dict):
+                topic = (
+                    item.get("topic")
+                    or item.get("title")
+                    or item.get("query")
+                    or json.dumps(item)
+                )
+            else:
+                # Item is already a string
+                topic = str(item)
 
+            # 3. Classify topic into niches
+            niches = classify_topic_to_niches(topic)
+
+            # 4. Store topic under each niche
+            for niche in niches:
+                if niche not in classified:
+                    classified[niche] = {
+                        "google": [],
+                        "youtube": [],
+                        "reddit": [],
+                        "bing": [],
+                        "tiktok": [],
+                        "timestamp": raw["timestamp"]
+                    }
+
+                classified[niche][source].append({"topic": topic})
             # 3. Classify topic into niches
             niches = classify_topic_to_niches(topic)
 
