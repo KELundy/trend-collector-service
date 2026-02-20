@@ -30,6 +30,59 @@ from collectors.reddit_trends import fetch_reddit_trends
 from collectors.bing_trends import fetch_bing_trends
 from collectors.tiktok_trends import fetch_tiktok_trends
 
+# ---------------------------------------------------------
+# TREND COLLECTION LOGIC (WITH CLASSIFICATION)
+# ---------------------------------------------------------
+def collect_all_trends() -> Dict[str, Any]:
+    """
+    Collect global trends, classify each topic into niches using Claude,
+    and return a dictionary grouped by niche.
+    """
+
+    # 1. Collect raw global trends
+    raw = {
+        "google": fetch_google_trends(),
+        "youtube": fetch_youtube_trends(),
+        "reddit": fetch_reddit_trends(),
+        "bing": fetch_bing_trends(),
+        "tiktok": fetch_tiktok_trends(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    # 2. Build a niche-grouped structure
+    classified = {}
+
+    for source, items in raw.items():
+        if source == "timestamp":
+            continue
+
+        for item in items:
+            topic = (
+                item.get("topic")
+                or item.get("title")
+                or item.get("query")
+                or json.dumps(item)
+            )
+
+            # 3. Classify topic into niches
+            niches = classify_topic_to_niches(topic)
+
+            # 4. Store topic under each niche
+            for niche in niches:
+                if niche not in classified:
+                    classified[niche] = {
+                        "google": [],
+                        "youtube": [],
+                        "reddit": [],
+                        "bing": [],
+                        "tiktok": [],
+                        "timestamp": raw["timestamp"]
+                    }
+
+                classified[niche][source].append({"topic": topic})
+
+    return classified
+
 # NEW: Content Engine router
 from content_engine import router as content_engine_router
 
