@@ -176,8 +176,10 @@ def trend_collection_worker():
     while True:
         try:
             print("[Trend Collector] Collecting trends...")
-            trends = collect_all_trends()
-            save_trends(trends)
+           classified = collect_all_trends()
+
+for niche, niche_trends in classified.items():
+    save_trends(niche_trends, niche)
             print("[Trend Collector] Trends saved.")
         except Exception as e:
             print(f"[Trend Collector] Error: {e}")
