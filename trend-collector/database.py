@@ -197,3 +197,33 @@ def update_content_status(item_id: int, new_status: str):
 
     conn.commit()
     conn.close()
+
+def update_content_status(item_id: int, new_status: str):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    c.execute(
+        "UPDATE content_queue SET status = ? WHERE id = ?",
+        (new_status, item_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------
+# MIGRATION: ADD NICHE COLUMN TO TRENDS TABLE
+# ---------------------------------------------------------
+def migrate_add_niche_column():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    # Check if the column already exists
+    c.execute("PRAGMA table_info(trends)")
+    columns = [col[1] for col in c.fetchall()]
+
+    if "niche" not in columns:
+        c.execute("ALTER TABLE trends ADD COLUMN niche TEXT")
+
+    conn.commit()
+    conn.close()
