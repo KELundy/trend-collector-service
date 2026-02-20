@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 import os
 import json
 import sys
+import sqlite3
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
