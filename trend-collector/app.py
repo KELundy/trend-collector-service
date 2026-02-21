@@ -51,7 +51,7 @@ def classify_topic_to_niches(topic: str) -> list[str]:
     """
 
     response = anthropic_client.messages.create(
-        model="claude-3-sonnet-20240229",
+        model="claude-sonnet-4-6",
         max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
