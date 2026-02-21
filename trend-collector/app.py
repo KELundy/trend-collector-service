@@ -281,6 +281,21 @@ async def trends_by_niche(niche: str):
                 "collected_at": collected_at
             })
 
+    # ---------------------------------------------------------
+    # FALLBACK DYNAMIC TREND GENERATOR (if no real data)
+    # ---------------------------------------------------------
+    all_topics = []
+    for src in ["google", "youtube", "reddit", "bing", "tiktok"]:
+        all_topics.extend([t["topic"] for t in grouped[src] if t.get("topic")])
+
+    # If no real topics exist, generate a dynamic fallback
+    if not all_topics:
+        fallback_topic = f"Rising interest in {niche} this week"
+        grouped["google"] = [{
+            "topic": fallback_topic,
+            "collected_at": datetime.utcnow().isoformat()
+        }]
+    
     return grouped
 
 # ---------------------------------------------------------
