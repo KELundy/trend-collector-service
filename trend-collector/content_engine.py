@@ -48,12 +48,21 @@ def _get_anthropic_client() -> Anthropic:
     return Anthropic(api_key=api_key)
 
 
-def _build_prompt(trend_situation: str, niche: str, persona: Optional[str]) -> str:
+def _build_prompt(
+    trend_situation: str,
+    niche: str,
+    persona: Optional[str],
+    tone: Optional[str] = None,
+    length: Optional[str] = None
+) -> str:
     persona_text = (
         f"The target persona is: {persona}.\n"
         if persona
         else "The target persona is a typical homeowner or decision-maker in this niche.\n"
     )
+
+    tone_text = f"Tone preference: {tone}.\n" if tone else ""
+    length_text = f"Desired content length: {length}.\n" if length else ""
 
     return f"""
 You are a senior marketing strategist and copywriter for a real estate professional.
@@ -62,7 +71,7 @@ Niche: {niche}
 Situation / Trend:
 {trend_situation}
 
-{persona_text}
+{persona_text}{tone_text}{length_text}
 Your job is to create a complete content package for short-form video and social media.
 
 Return content that fits these exact fields (do NOT label them, just write the content for each in order):
@@ -127,10 +136,12 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
     prompt = _build_prompt(
-        trend_situation=payload.trend_situation,
-        niche=payload.niche,
-        persona=payload.persona,
-    )
+    trend_situation=payload.trend_situation,
+    niche=payload.niche,
+    persona=payload.persona,
+    tone=getattr(payload, "tone", None),
+    length=getattr(payload, "length", None),
+)
 
     try:
       response = client.messages.create(
