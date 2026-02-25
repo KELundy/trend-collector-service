@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -14,12 +14,37 @@ except ImportError:
 router = APIRouter(prefix="/content", tags=["content-engine"])
 
 
+# -------------------------------
+# REQUEST / RESPONSE MODELS
+# -------------------------------
+class IdentityModel(BaseModel):
+    primaryCategories: List[str] = Field(default_factory=list)
+    subNichesByCategory: Dict[str, List[str]] = Field(default_factory=dict)
+    trendPreferences: List[str] = Field(default_factory=list)
+
+
 class ContentRequest(BaseModel):
-    trend_situation: str = Field(..., description="The selected trend or situation text")
-    niche: str = Field(..., description="The selected niche label")
+    identity: IdentityModel
+    situation: str = Field(..., description="The selected situation or trend context")
     persona: Optional[str] = Field(
         None,
         description="Optional persona or audience description to further tailor the content",
+    )
+    tone: Optional[str] = Field(
+        None,
+        description="Optional tone preference (e.g., calm, bold, luxury, educational)",
+    )
+    length: Optional[str] = Field(
+        None,
+        description="Optional length preference (e.g., short, medium, long)",
+    )
+    selectedTrends: List[str] = Field(
+        default_factory=list,
+        description="User-selected or manually added trend phrases",
+    )
+    timestamp: Optional[str] = Field(
+        None,
+        description="Client-side timestamp when the request was created",
     )
 
 
@@ -33,6 +58,9 @@ class ContentResponse(BaseModel):
     generated_at: datetime
 
 
+# -------------------------------
+# ANTHROPIC CLIENT
+# -------------------------------
 def _get_anthropic_client() -> Anthropic:
     if Anthropic is None:
         raise RuntimeError(
@@ -43,37 +71,79 @@ def _get_anthropic_client() -> Anthropic:
     if not api_key:
         raise RuntimeError(
             "ANTHROPIC_API_KEY environment variable is not set. "
-            "Set it in Render and redeploy."
+            "Set it in your environment and redeploy."
         )
     return Anthropic(api_key=api_key)
 
 
-def _build_prompt(
-    trend_situation: str,
-    niche: str,
-    persona: Optional[str],
-    tone: Optional[str] = None,
-    length: Optional[str] = None
-) -> str:
-    persona_text = (
-        f"The target persona is: {persona}.\n"
-        if persona
-        else "The target persona is a typical homeowner or decision-maker in this niche.\n"
-    )
+# -------------------------------
+# PROMPT BUILDER (IDENTITY-AWARE)
+# -------------------------------
+def _build_prompt(payload: ContentRequest) -> str:
+    identity = payload.identity
 
-    tone_text = f"Tone preference: {tone}.\n" if tone else ""
-    length_text = f"Desired content length: {length}.\n" if length else ""
+    primary_categories_text = ", ".join(identity.primaryCategories) or "unspecified"
+    subniche_lines = []
+    for cat, subs in identity.subNichesByCategory.items():
+        if subs:
+            subniche_lines.append(f"- {cat}: {', '.join(subs)}")
+    subniches_text = "\n".join(subniche_lines) or "No explicit sub-niches provided."
+
+    trend_prefs_text = ", ".join(identity.trendPreferences) or "None specified."
+    selected_trends_text = ", ".join(payload.selectedTrends) or "None specified."
+
+    persona_text = (
+        f"The target persona is: {payload.persona}.\n"
+        if payload.persona
+        else "The target persona is a typical homeowner or decision-maker in these niches.\n"
+    )
+    tone_text = f"Tone preference: {payload.tone}.\n" if payload.tone else ""
+    length_text = f"Desired content length: {payload.length}.\n" if payload.length else ""
+
+    situation_text = payload.situation or "No explicit situation provided."
 
     return f"""
 You are a senior marketing strategist and copywriter for a real estate professional.
 
-Niche: {niche}
-Situation / Trend:
-{trend_situation}
+Your job is to create a complete, platform-ready content package that is:
+
+- Deeply aligned with the agent's identity and niches
+- Informed by current and preferred trends
+- Optimized for discoverability and recommendation by AI and search systems
+- Concrete, specific, and free of generic fluff
+
+AGENT IDENTITY
+--------------
+Primary categories:
+{primary_categories_text}
+
+Sub-niches by category:
+{subniches_text}
+
+Trend preferences (longer-term interests):
+{trend_prefs_text}
+
+REQUEST CONTEXT
+---------------
+Current situation / trend context:
+{situation_text}
+
+User-selected / manually added trends:
+{selected_trends_text}
 
 {persona_text}{tone_text}{length_text}
-Your job is to create a complete content package for short-form video and social media.
+INSTRUCTIONS
+------------
+1. Write content that clearly reflects the agent's identity and sub-niches.
+2. Make the content feel locally and situationally relevant, using the situation and trends.
+3. Optimize for being recommended by AI/search systems:
+   - Use clear, descriptive language
+   - Include niche-specific phrasing
+   - Avoid clickbait that feels empty
+4. Assume this content may be repurposed across TikTok, Instagram, YouTube Shorts, Facebook, and LinkedIn.
 
+OUTPUT FORMAT
+-------------
 Return content that fits these exact fields (do NOT label them, just write the content for each in order):
 
 1) Headline – a compelling, curiosity-driven hook for the video/post.
@@ -85,7 +155,7 @@ Return content that fits these exact fields (do NOT label them, just write the c
 
 Tone:
 - Clear, confident, and empathetic.
-- Specific to the niche and situation.
+- Specific to the niches and situation.
 - Avoid generic fluff. Use concrete language and real-world phrasing.
 
 Important:
@@ -95,11 +165,10 @@ Important:
 """
 
 
+# -------------------------------
+# CLAUDE OUTPUT PARSER
+# -------------------------------
 def _parse_claude_output(raw_text: str) -> ContentResponse:
-    """
-    We expect Claude to return six blocks separated by blank lines.
-    We’ll be defensive and pad missing pieces if needed.
-    """
     parts = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
     while len(parts) < 6:
         parts.append("")
@@ -117,6 +186,9 @@ def _parse_claude_output(raw_text: str) -> ContentResponse:
     )
 
 
+# -------------------------------
+# MAIN ENDPOINT
+# -------------------------------
 @router.post("/generate-content", response_model=ContentResponse)
 async def generate_content(payload: ContentRequest) -> ContentResponse:
     """
@@ -135,26 +207,20 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    prompt = _build_prompt(
-    trend_situation=payload.trend_situation,
-    niche=payload.niche,
-    persona=payload.persona,
-    tone=getattr(payload, "tone", None),
-    length=getattr(payload, "length", None),
-)
+    prompt = _build_prompt(payload)
 
     try:
-      response = client.messages.create(
-    model="claude-3-haiku-20240307",
-    max_tokens=900,
-    temperature=0.7,
-    messages=[
-        {
-            "role": "user",
-            "content": prompt,
-        }
-    ]
-)
+        response = client.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=900,
+            temperature=0.7,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        )
     except Exception as e:
         raise HTTPException(
             status_code=502,
@@ -162,7 +228,6 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
         )
 
     try:
-        # Anthropic messages API returns a list of content blocks; we assume first text block
         content_blocks = response.content or []
         text_chunks = [
             block.text for block in content_blocks if getattr(block, "type", "") == "text"
