@@ -5,6 +5,9 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+# -------------------------------
+# ANTHROPIC CLIENT IMPORT
+# -------------------------------
 try:
     from anthropic import Anthropic
 except ImportError:
@@ -59,7 +62,7 @@ class ContentResponse(BaseModel):
 
 
 # -------------------------------
-# ANTHROPIC CLIENT
+# ANTHROPIC CLIENT HELPER
 # -------------------------------
 def _get_anthropic_client() -> Anthropic:
     if Anthropic is None:
@@ -83,7 +86,8 @@ def _build_prompt(payload: ContentRequest) -> str:
     identity = payload.identity
 
     primary_categories_text = ", ".join(identity.primaryCategories) or "unspecified"
-    subniche_lines = []
+
+    subniche_lines: List[str] = []
     for cat, subs in identity.subNichesByCategory.items():
         if subs:
             subniche_lines.append(f"- {cat}: {', '.join(subs)}")
@@ -230,7 +234,9 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
     try:
         content_blocks = response.content or []
         text_chunks = [
-            block.text for block in content_blocks if getattr(block, "type", "") == "text"
+            block.text
+            for block in content_blocks
+            if getattr(block, "type", "") == "text"
         ]
         raw_text = "\n\n".join(text_chunks).strip()
         if not raw_text:
