@@ -148,14 +148,23 @@ INSTRUCTIONS
 
 OUTPUT FORMAT
 -------------
-Return content that fits these exact fields (do NOT label them, just write the content for each in order):
+Write six sections of content, each separated by two blank lines.
 
-1) Headline – a compelling, curiosity-driven hook for the video/post.
-2) Thumbnail idea – a short visual concept or text that could appear on a thumbnail.
-3) Hashtags – a concise set of relevant hashtags, separated by spaces.
-4) Post – a short-form social post (for Instagram/FB/LinkedIn) that stands on its own.
-5) CTA – a clear, specific call to action that feels natural and not pushy.
-6) Script – a short-form video script (30–60 seconds), written as spoken dialogue.
+Do NOT use labels, brackets, headings, or placeholders.
+Do NOT write things like [HEADLINE], [POST], or [SCRIPT].
+Do NOT number the sections.
+Do NOT describe what you are doing.
+
+Write the sections in this exact order, but without numbers or labels:
+
+A compelling headline.
+A short thumbnail idea.
+A set of hashtags (space-separated).
+A short-form social post.
+A clear, specific call to action.
+A 30–60 second spoken script written as natural dialogue.
+
+Each section must contain real content — never placeholders.
 
 Tone:
 - Clear, confident, and empathetic.
