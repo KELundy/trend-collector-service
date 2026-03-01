@@ -320,6 +320,41 @@ async def queue_update_status(payload: Dict[str, Any]):
     status = payload.get("status")
     return update_content_status(item_id, status)
 
+# ---------------------------------------------------------
+# PUBLISH ENDPOINT
+# ---------------------------------------------------------
+@app.post("/publish")
+async def publish_item(payload: Dict[str, Any]):
+    """
+    Publish a content item by inserting it into the published table.
+    """
+    try:
+        # Insert into SQLite
+        conn = sqlite3.connect("content.db")
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO published (headline, thumbnailIdea, hashtags, post, cta, script, generated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            payload.get("headline"),
+            payload.get("thumbnailIdea"),
+            payload.get("hashtags"),
+            payload.get("post"),
+            payload.get("cta"),
+            payload.get("script"),
+            payload.get("generated_at")
+        ))
+
+        conn.commit()
+        new_id = cursor.lastrowid
+        conn.close()
+
+        return { "success": True, "id": new_id }
+
+    except Exception as e:
+        return { "success": False, "error": str(e) }
+
 
 # ---------------------------------------------------------
 # NEW: CONTENT ENGINE ROUTES
