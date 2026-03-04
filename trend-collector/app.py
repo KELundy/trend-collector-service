@@ -33,6 +33,16 @@ from collectors.bing_trends import fetch_bing_trends
 from collectors.tiktok_trends import fetch_tiktok_trends
 
 # ---------------------------------------------------------
+# AUTH — NEW ADDITION (line 1 of 3)
+# ---------------------------------------------------------
+from auth import router as auth_router, init_users_table
+
+# ---------------------------------------------------------
+# CONTENT ENGINE ROUTER
+# ---------------------------------------------------------
+from content_engine import router as content_engine_router
+
+# ---------------------------------------------------------
 # CLAUDE CLASSIFICATION HELPER
 # ---------------------------------------------------------
 from anthropic import Anthropic
@@ -40,37 +50,26 @@ from anthropic import Anthropic
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 def classify_topic_to_niches(topic: str) -> list[str]:
-    """
-    Send a trend topic to Claude and return a list of niches it belongs to.
-    """
     prompt = f"""
     You are a real estate niche classifier. Given a trend topic, return a JSON list
     of real estate niches it belongs to. No explanation, only JSON.
 
     Trend topic: "{topic}"
     """
-
     response = anthropic_client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
-
     try:
         return json.loads(response.content[0].text)
     except Exception:
         return []
 
 # ---------------------------------------------------------
-# TREND COLLECTION LOGIC (WITH CLASSIFICATION)
+# TREND COLLECTION LOGIC
 # ---------------------------------------------------------
 def collect_all_trends() -> Dict[str, Any]:
-    """
-    Collect global trends, classify each topic into niches using Claude,
-    and return a dictionary grouped by niche.
-    """
-
-    # 1. Collect raw global trends
     raw = {
         "google": fetch_google_trends(),
         "youtube": fetch_youtube_trends(),
@@ -80,7 +79,6 @@ def collect_all_trends() -> Dict[str, Any]:
         "timestamp": datetime.utcnow().isoformat(),
     }
 
-    # 2. Build a niche-grouped structure
     classified = {}
 
     for source, items in raw.items():
@@ -88,17 +86,18 @@ def collect_all_trends() -> Dict[str, Any]:
             continue
 
         for item in items:
-            topic = (
-                item.get("topic")
-                or item.get("title")
-                or item.get("query")
-                or json.dumps(item)
-            )
+            if isinstance(item, dict):
+                topic = (
+                    item.get("topic")
+                    or item.get("title")
+                    or item.get("query")
+                    or json.dumps(item)
+                )
+            else:
+                topic = str(item)
 
-            # 3. Classify topic into niches
             niches = classify_topic_to_niches(topic)
 
-            # 4. Store topic under each niche
             for niche in niches:
                 if niche not in classified:
                     classified[niche] = {
@@ -109,16 +108,26 @@ def collect_all_trends() -> Dict[str, Any]:
                         "tiktok": [],
                         "timestamp": raw["timestamp"]
                     }
-
                 classified[niche][source].append({"topic": topic})
 
     return classified
 
-# NEW: Content Engine router
-from content_engine import router as content_engine_router
+
+def trend_collection_worker():
+    """Background worker that collects trends every 6 hours."""
+    while True:
+        try:
+            print("[Trend Collector] Collecting trends...")
+            classified = collect_all_trends()
+            for niche, niche_trends in classified.items():
+                save_trends(niche_trends, niche)
+            print("[Trend Collector] Trends saved.")
+        except Exception as e:
+            print(f"[Trend Collector] Error: {e}")
+        time.sleep(6 * 60 * 60)
 
 
-COLLECTION_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
+COLLECTION_INTERVAL_SECONDS = 6 * 60 * 60
 
 app = FastAPI(
     title="Trend Collector + Content Engine Service",
@@ -126,14 +135,33 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS — allow frontend to call backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict this later
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------
+# STARTUP
+# ---------------------------------------------------------
+@app.on_event("startup")
+async def startup_event():
+    print("[Startup] Initializing database...")
+    init_db()
+
+    # AUTH — NEW ADDITION (line 2 of 3)
+    print("[Startup] Initializing users table...")
+    init_users_table()
+
+    print("[Startup] Running DB migrations...")
+    migrate_add_niche_column()
+
+    print("[Startup] Starting background trend collector thread...")
+    thread = threading.Thread(target=trend_collection_worker, daemon=True)
+    thread.start()
 
 
 # ---------------------------------------------------------
@@ -149,111 +177,17 @@ async def health():
 
 
 # ---------------------------------------------------------
-# TREND COLLECTION LOGIC
-# ---------------------------------------------------------
-def collect_all_trends() -> Dict[str, Any]:
-    """
-    Collect global trends, classify each topic into niches using Claude,
-    and return a dictionary grouped by niche.
-    """
-
-    # 1. Collect raw global trends
-    raw = {
-        "google": fetch_google_trends(),
-        "youtube": fetch_youtube_trends(),
-        "reddit": fetch_reddit_trends(),
-        "bing": fetch_bing_trends(),
-        "tiktok": fetch_tiktok_trends(),
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-    # 2. Build a niche-grouped structure
-    classified = {}
-
-    for source, items in raw.items():
-        if source == "timestamp":
-            continue
-
-        for item in items:
-            # Normalize topic into a string
-            if isinstance(item, dict):
-                topic = (
-                    item.get("topic")
-                    or item.get("title")
-                    or item.get("query")
-                    or json.dumps(item)
-                )
-            else:
-                # Item is already a string
-                topic = str(item)
-
-            # 3. Classify topic into niches
-            niches = classify_topic_to_niches(topic)
-
-            # 4. Store topic under each niche
-            for niche in niches:
-                if niche not in classified:
-                    classified[niche] = {
-                        "google": [],
-                        "youtube": [],
-                        "reddit": [],
-                        "bing": [],
-                        "tiktok": [],
-                        "timestamp": raw["timestamp"]
-                    }
-
-                classified[niche][source].append({"topic": topic})
-
-
-    return classified
-
-
-def trend_collection_worker():
-    """Background worker that collects trends every X hours."""
-    while True:
-        try:
-            print("[Trend Collector] Collecting trends...")
-            classified = collect_all_trends()
-            for niche, niche_trends in classified.items():
-                save_trends(niche_trends, niche)
-            print("[Trend Collector] Trends saved.")
-        except Exception as e:
-            print(f"[Trend Collector] Error: {e}")
-        time.sleep(COLLECTION_INTERVAL_SECONDS)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize DB and start background trend collector."""
-    print("[Startup] Initializing database...")
-    init_db()
-
-    print("[Startup] Running DB migrations...")
-    migrate_add_niche_column()
-
-    print("[Startup] Starting background trend collector thread...")
-    thread = threading.Thread(target=trend_collection_worker, daemon=True)
-    thread.start()
-
-# ---------------------------------------------------------
 # TREND ENDPOINTS
 # ---------------------------------------------------------
 @app.get("/trends/latest")
 async def latest_trends():
-    """Return the most recently collected trends."""
     return get_latest_trends()
 
-# ---------------------------------------------------------
-# TRENDS BY NICHE ENDPOINT
-# ---------------------------------------------------------
+
 @app.get("/trends/by-niche")
 async def trends_by_niche(niche: str):
-    """
-    Return trends filtered by niche, grouped by source.
-    """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-
     c.execute("""
         SELECT source, topic, collected_at
         FROM trends
@@ -261,78 +195,60 @@ async def trends_by_niche(niche: str):
         ORDER BY collected_at DESC
         LIMIT 200
     """, (niche,))
-
     rows = c.fetchall()
     conn.close()
 
     grouped = {
-        "google": [],
-        "youtube": [],
-        "reddit": [],
-        "bing": [],
-        "tiktok": [],
+        "google": [], "youtube": [], "reddit": [],
+        "bing": [], "tiktok": [],
         "timestamp": datetime.utcnow().isoformat()
     }
 
     for source, topic, collected_at in rows:
         if source in grouped:
-            grouped[source].append({
-                "topic": topic,
-                "collected_at": collected_at
-            })
+            grouped[source].append({"topic": topic, "collected_at": collected_at})
 
-    # ---------------------------------------------------------
-    # FALLBACK DYNAMIC TREND GENERATOR (if no real data)
-    # ---------------------------------------------------------
     all_topics = []
     for src in ["google", "youtube", "reddit", "bing", "tiktok"]:
         all_topics.extend([t["topic"] for t in grouped[src] if t.get("topic")])
 
-    # If no real topics exist, generate a dynamic fallback
     if not all_topics:
-        fallback_topic = f"Rising interest in {niche} this week"
         grouped["google"] = [{
-            "topic": fallback_topic,
+            "topic": f"Rising interest in {niche} this week",
             "collected_at": datetime.utcnow().isoformat()
         }]
-    
+
     return grouped
+
 
 # ---------------------------------------------------------
 # CONTENT QUEUE ENDPOINTS
 # ---------------------------------------------------------
 @app.post("/queue/add")
 async def queue_add(item: Dict[str, Any]):
-    """Add generated content to the queue."""
     return add_content_to_queue(item)
 
 
 @app.get("/queue/list")
 async def queue_list():
-    """Return all queued content."""
     return get_content_queue()
 
 
 @app.post("/queue/update-status")
 async def queue_update_status(payload: Dict[str, Any]):
-    """Update the status of a queued content item."""
     item_id = payload.get("id")
     status = payload.get("status")
     return update_content_status(item_id, status)
+
 
 # ---------------------------------------------------------
 # PUBLISH ENDPOINT
 # ---------------------------------------------------------
 @app.post("/publish")
 async def publish_item(payload: Dict[str, Any]):
-    """
-    Publish a content item by inserting it into the published table.
-    """
     try:
-        # Insert into SQLite
         conn = sqlite3.connect("content.db")
         cursor = conn.cursor()
-
         cursor.execute("""
             INSERT INTO published (headline, thumbnailIdea, hashtags, post, cta, script, generated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -345,25 +261,24 @@ async def publish_item(payload: Dict[str, Any]):
             payload.get("script"),
             payload.get("generated_at")
         ))
-
         conn.commit()
         new_id = cursor.lastrowid
         conn.close()
-
-        return { "success": True, "id": new_id }
-
+        return {"success": True, "id": new_id}
     except Exception as e:
-        return { "success": False, "error": str(e) }
+        return {"success": False, "error": str(e)}
 
 
 # ---------------------------------------------------------
-# NEW: CONTENT ENGINE ROUTES
+# ROUTERS — AUTH + CONTENT ENGINE
+# AUTH — NEW ADDITION (line 3 of 3)
 # ---------------------------------------------------------
+app.include_router(auth_router)
 app.include_router(content_engine_router)
 
 
 # ---------------------------------------------------------
-# ROOT ENDPOINT
+# ROOT
 # ---------------------------------------------------------
 @app.get("/")
 async def root():
