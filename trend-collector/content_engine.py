@@ -154,14 +154,19 @@ Trend preferences: {trend_prefs}
 STYLE GUIDANCE
 ──────────────
 {tone_text}{length_text}{avoid_text}{prefer_text}
-CRITICAL IDENTITY RULES
-───────────────────────
-1. The agent's name ({agent_name}) must appear naturally in the content — in the post,
-   CTA, or script — the way a skilled copywriter would reference it. Not robotically.
-2. {f"The brokerage name ({brokerage}) must appear somewhere in the content — in the post footer, CTA, or script — as a natural disclosure, not a forced mention." if brokerage else ""}
-3. {f"The market ({market}) must be referenced specifically — not generically. Say '{market}' not 'your local area'." }
-4. Content must feel written FOR this specific agent, not as a generic template.
-5. Content must feel locally and situationally relevant — specific to this niche and moment.
+CRITICAL IDENTITY RULES — THESE ARE MANDATORY, NOT OPTIONAL
+─────────────────────────────────────────────────────────────
+1. AGENT NAME IN POST: The agent's name ({agent_name}) MUST appear in the
+   social post (section 4) — naturally, as a first-person reference or sign-off.
+   Example: "— {agent_name}" or "I'm {agent_name} and..." or "Reach out to {agent_name}".
+   Also include in the CTA (section 5) and Script (section 6).
+
+2. BROKERAGE IN POST: {f'The brokerage ({brokerage}) MUST appear in the social post (section 4) as a footer disclosure line. Format it like: "{agent_name} | {brokerage}" or "— {agent_name}, {brokerage}". This is a legal requirement, not optional.' if brokerage else 'Include agent name as a sign-off in the post.'}
+
+3. MARKET SPECIFICITY: {f"Always say '{market}' specifically — never 'your local area', 'the local market', or generic geography. '{market}' must appear at least once in the post or script."}
+
+4. Content must feel written FOR {agent_name} specifically, not a generic template.
+5. Content must feel locally relevant to {market} and situationally timely.
 6. Optimize for AI and search recommendation: clear, descriptive, niche-specific language.
 7. Avoid clickbait. Avoid fluff. Use concrete, real-world phrasing.
 
