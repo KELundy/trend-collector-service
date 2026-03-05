@@ -223,3 +223,72 @@ def list_users(current_user=Depends(get_current_user)):
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "email": r[1], "agent_name": r[2], "brokerage": r[3], "is_active": bool(r[4]), "created_at": r[5]} for r in rows]
+
+
+# ─────────────────────────────────────────────
+# PROFILE UPDATE
+# ─────────────────────────────────────────────
+class ProfileUpdateRequest(BaseModel):
+    agent_name: str
+    brokerage:  Optional[str] = ""
+    email:      str
+    phone:      Optional[str] = ""
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password:     str
+
+@router.post("/profile")
+def update_profile(body: ProfileUpdateRequest, current_user=Depends(get_current_user)):
+    if not body.agent_name or not body.email:
+        raise HTTPException(status_code=400, detail="Name and email are required.")
+
+    conn = sqlite3.connect(DB_NAME)
+    c    = conn.cursor()
+
+    # Add phone column if it doesn't exist yet
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+
+    # Check email not taken by another user
+    c.execute("SELECT id FROM users WHERE email = ? AND id != ?", (body.email.lower().strip(), current_user["id"]))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=409, detail="That email is already in use by another account.")
+
+    c.execute("""
+        UPDATE users SET agent_name=?, brokerage=?, email=?, phone=? WHERE id=?
+    """, (body.agent_name.strip(), body.brokerage or "", body.email.lower().strip(), body.phone or "", current_user["id"]))
+    conn.commit()
+    conn.close()
+
+    updated = get_user_by_id(current_user["id"])
+    return {
+        "success": True,
+        "user": {
+            "id":         updated["id"],
+            "email":      updated["email"],
+            "agent_name": updated["agent_name"],
+            "brokerage":  updated["brokerage"],
+            "phone":      updated.get("phone", ""),
+        }
+    }
+
+
+@router.post("/change-password")
+def change_password(body: PasswordChangeRequest, current_user=Depends(get_current_user)):
+    if not bcrypt.checkpw(body.current_password.encode(), current_user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="Current password is incorrect.")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters.")
+
+    new_hash = bcrypt.hashpw(body.new_password.encode(), bcrypt.gensalt()).decode()
+    conn = sqlite3.connect(DB_NAME)
+    c    = conn.cursor()
+    c.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, current_user["id"]))
+    conn.commit()
+    conn.close()
+    return {"success": True}
