@@ -15,7 +15,7 @@ from pydantic import BaseModel, EmailStr
 router = APIRouter(prefix="/auth", tags=["auth"])
 security = HTTPBearer()
 
-DB_NAME = "trends.db"
+DB_NAME = "/data/homebridge.db"
 JWT_SECRET = os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
 JWT_EXPIRY_DAYS = 30
 
