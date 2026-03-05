@@ -3,14 +3,14 @@ from datetime import datetime
 import json
 from typing import Dict, Any
 
-DB_NAME = "trends.db"
+# ── Persistent disk path — survives Render redeploys
+DB_NAME = "/data/homebridge.db"
 
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    # Existing trends table
     c.execute("""
         CREATE TABLE IF NOT EXISTS trends (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,7 +20,6 @@ def init_db():
         )
     """)
 
-    # Content Queue table
     c.execute("""
         CREATE TABLE IF NOT EXISTS content_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,9 +45,6 @@ def init_db():
 # -----------------------------
 
 def save_trends(trends: Dict[str, Any], niche: str):
-    """
-    Save a full trends dictionary from collect_all_trends(), but with niche classification applied.
-    """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
@@ -77,17 +73,6 @@ def save_trends(trends: Dict[str, Any], niche: str):
 
 
 def get_latest_trends(limit=200):
-    """
-    Return trends grouped by source, matching the structure the frontend expects:
-    {
-        "google": [...],
-        "youtube": [...],
-        "reddit": [...],
-        "bing": [...],
-        "tiktok": [...],
-        "timestamp": "..."
-    }
-    """
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
@@ -101,7 +86,6 @@ def get_latest_trends(limit=200):
     rows = c.fetchall()
     conn.close()
 
-    # Build grouped structure
     grouped = {
         "google": [],
         "youtube": [],
@@ -119,6 +103,7 @@ def get_latest_trends(limit=200):
             })
 
     return grouped
+
 
 # -----------------------------
 # CONTENT QUEUE STORAGE
@@ -189,41 +174,21 @@ def get_content_queue():
 def update_content_status(item_id: int, new_status: str):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-
-    c.execute(
-        "UPDATE content_queue SET status = ? WHERE id = ?",
-        (new_status, item_id)
-    )
-
-    conn.commit()
-    conn.close()
-
-def update_content_status(item_id: int, new_status: str):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-
-    c.execute(
-        "UPDATE content_queue SET status = ? WHERE id = ?",
-        (new_status, item_id)
-    )
-
+    c.execute("UPDATE content_queue SET status = ? WHERE id = ?", (new_status, item_id))
     conn.commit()
     conn.close()
 
 
-# ---------------------------------------------------------
-# MIGRATION: ADD NICHE COLUMN TO TRENDS TABLE
-# ---------------------------------------------------------
+# -----------------------------
+# MIGRATIONS
+# -----------------------------
+
 def migrate_add_niche_column():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-
-    # Check if the column already exists
     c.execute("PRAGMA table_info(trends)")
     columns = [col[1] for col in c.fetchall()]
-
     if "niche" not in columns:
         c.execute("ALTER TABLE trends ADD COLUMN niche TEXT")
-
     conn.commit()
     conn.close()
