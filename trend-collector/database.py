@@ -572,3 +572,456 @@ def _score_next_action(f, i, p, c, fb, ib, pb, cb) -> str:
 
     gaps.sort(key=lambda x: -x[0])
     return gaps[0][1]
+
+
+# ─────────────────────────────────────────────
+# COMPLIANCE REPORT PDF GENERATOR
+# ─────────────────────────────────────────────
+
+def generate_compliance_pdf(
+    user_id: int,
+    agent_name: str,
+    brokerage: str,
+    email: str,
+    setup: dict,
+    date_from: str = "",
+    date_to:   str = "",
+) -> bytes:
+    """
+    Generate a compliance audit report PDF.
+    Returns raw PDF bytes ready to stream.
+    """
+    import io
+    import json
+    from datetime import datetime
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable, KeepTogether,
+    )
+    from reportlab.lib import colors
+
+    # ── DESIGN TOKENS ──
+    INK        = colors.HexColor("#0f0f0d")
+    INK_2      = colors.HexColor("#3d3d38")
+    INK_3      = colors.HexColor("#787870")
+    INK_4      = colors.HexColor("#b0afa6")
+    BLUE       = colors.HexColor("#1749c9")
+    BLUE_DIM   = colors.HexColor("#eef2fb")
+    GREEN      = colors.HexColor("#15803d")
+    GREEN_DIM  = colors.HexColor("#f0fdf4")
+    AMBER      = colors.HexColor("#b45309")
+    AMBER_DIM  = colors.HexColor("#fffbeb")
+    RED        = colors.HexColor("#b91c1c")
+    RED_DIM    = colors.HexColor("#fef2f2")
+    BG         = colors.HexColor("#f5f4f0")
+    WHITE      = colors.white
+    BORDER     = colors.HexColor("#e8e7e0")
+
+    # ── FETCH LIBRARY ITEMS ──
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT * FROM content_library
+        WHERE user_id = ?
+        AND status IN ('approved', 'published')
+        ORDER BY COALESCE(approved_at, saved_at) DESC
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    # Optional date filter
+    def parse_dt(s):
+        if not s: return None
+        try: return datetime.fromisoformat(s.replace("Z",""))
+        except: return None
+
+    dt_from = parse_dt(date_from)
+    dt_to   = parse_dt(date_to)
+
+    if dt_from or dt_to:
+        filtered = []
+        for r in rows:
+            d = parse_dt(r["approved_at"] or r["saved_at"])
+            if d:
+                if dt_from and d < dt_from: continue
+                if dt_to   and d > dt_to:   continue
+            filtered.append(r)
+        rows = filtered
+
+    # ── COMPLIANCE STATS ──
+    total        = len(rows)
+    passing      = 0
+    review_count = 0
+    fail_count   = 0
+
+    for r in rows:
+        try:
+            comp = json.loads(r["compliance"]) if isinstance(r["compliance"], str) else r["compliance"]
+            v = ""
+            if isinstance(comp, dict):
+                v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+                if comp.get("passed") is True: v = "pass"
+            if v in ("pass","compliant","ok","green"): passing += 1
+            elif v in ("warn","warning","review"):      review_count += 1
+            else:                                        fail_count += 1
+        except:
+            fail_count += 1
+
+    compliance_rate = round((passing / total) * 100) if total > 0 else 0
+    generated_at    = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p UTC")
+    report_date     = datetime.utcnow().strftime("%Y-%m-%d")
+
+    # ── STYLES ──
+    def style(name, **kw):
+        return ParagraphStyle(name, **kw)
+
+    S = {
+        "logo":        style("logo",        fontName="Helvetica-Bold", fontSize=18, textColor=INK,   leading=22),
+        "logo_blue":   style("logo_blue",   fontName="Helvetica-Bold", fontSize=18, textColor=BLUE,  leading=22),
+        "label":       style("label",       fontName="Helvetica-Bold", fontSize=8,  textColor=INK_3, leading=10, spaceAfter=4),
+        "h1":          style("h1",          fontName="Helvetica-Bold", fontSize=16, textColor=INK,   leading=20, spaceAfter=4),
+        "h2":          style("h2",          fontName="Helvetica-Bold", fontSize=11, textColor=INK,   leading=14, spaceBefore=14, spaceAfter=4),
+        "body":        style("body",        fontName="Helvetica",      fontSize=9,  textColor=INK_2, leading=13, spaceAfter=4),
+        "body_small":  style("body_small",  fontName="Helvetica",      fontSize=8,  textColor=INK_3, leading=11),
+        "cell_bold":   style("cell_bold",   fontName="Helvetica-Bold", fontSize=8,  textColor=INK,   leading=11),
+        "cell":        style("cell",        fontName="Helvetica",      fontSize=8,  textColor=INK_2, leading=11),
+        "cell_pass":   style("cell_pass",   fontName="Helvetica-Bold", fontSize=8,  textColor=GREEN, leading=11),
+        "cell_warn":   style("cell_warn",   fontName="Helvetica-Bold", fontSize=8,  textColor=AMBER, leading=11),
+        "cell_fail":   style("cell_fail",   fontName="Helvetica-Bold", fontSize=8,  textColor=RED,   leading=11),
+        "cell_blue":   style("cell_blue",   fontName="Helvetica-Bold", fontSize=8,  textColor=BLUE,  leading=11),
+        "footer":      style("footer",      fontName="Helvetica",      fontSize=7,  textColor=INK_4, leading=10, alignment=TA_CENTER),
+    }
+
+    # ── HELPERS ──
+    def rule(color=BORDER, thickness=0.5):
+        return HRFlowable(width="100%", thickness=thickness, color=color, spaceAfter=8, spaceBefore=4)
+
+    def sp(h=6):
+        return Spacer(1, h)
+
+    def compliance_label(comp_raw):
+        try:
+            comp = json.loads(comp_raw) if isinstance(comp_raw, str) else comp_raw
+            if not isinstance(comp, dict): return ("—", "neutral")
+            v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+            if comp.get("passed") is True: v = "pass"
+            if v in ("pass","compliant","ok","green"): return ("Verified", "pass")
+            if v in ("warn","warning","review"):        return ("Review",   "warn")
+            return ("Attention", "fail")
+        except:
+            return ("—", "neutral")
+
+    def verdict_para(comp_raw):
+        label_text, kind = compliance_label(comp_raw)
+        st = {"pass": S["cell_pass"], "warn": S["cell_warn"], "fail": S["cell_fail"]}.get(kind, S["cell"])
+        return Paragraph(label_text, st)
+
+    def fmt_date(s):
+        if not s: return "—"
+        try:
+            dt = datetime.fromisoformat(s.replace("Z",""))
+            return dt.strftime("%b %d, %Y %I:%M %p")
+        except: return s[:16] if s else "—"
+
+    def truncate(s, n=80):
+        if not s: return ""
+        s = str(s)
+        return s[:n] + "…" if len(s) > n else s
+
+    # ── BUILD DOCUMENT ──
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=0.65*inch, rightMargin=0.65*inch,
+        topMargin=0.65*inch,  bottomMargin=0.75*inch,
+    )
+    W = letter[0] - 1.3*inch  # content width
+
+    story = []
+
+    # ── HEADER ──
+    header_data = [[
+        Paragraph('<font name="Helvetica-Bold" size="18" color="#0f0f0d">Home</font>'
+                  '<font name="Helvetica-Bold" size="18" color="#1749c9">Bridge</font>', S["body"]),
+        Paragraph(f'<font color="#787870">Compliance Audit Report</font>', S["body_small"]),
+    ]]
+    header_table = Table(header_data, colWidths=[W*0.5, W*0.5])
+    header_table.setStyle(TableStyle([
+        ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+        ("ALIGN",       (1,0), (1,0),   "RIGHT"),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+        ("TOPPADDING",  (0,0), (-1,-1), 0),
+    ]))
+    story.append(header_table)
+    story.append(rule(BORDER, 1))
+
+    # ── AGENT INFO ROW ──
+    story.append(sp(4))
+    info_data = [[
+        [Paragraph("AGENT", S["label"]),  Paragraph(agent_name or "—", S["h1"])],
+        [Paragraph("BROKERAGE", S["label"]), Paragraph(brokerage or "—", S["body"])],
+        [Paragraph("EMAIL", S["label"]),  Paragraph(email or "—", S["body"])],
+        [Paragraph("GENERATED", S["label"]), Paragraph(generated_at, S["body"])],
+    ]]
+    info_col_w = W / 4
+    info_table = Table([[
+        Table([[Paragraph("AGENT", S["label"])], [Paragraph(agent_name or "—", S["h1"])]], colWidths=[info_col_w-8]),
+        Table([[Paragraph("BROKERAGE", S["label"])], [Paragraph(brokerage or "—", S["body"])]], colWidths=[info_col_w-8]),
+        Table([[Paragraph("EMAIL", S["label"])], [Paragraph(email or "—", S["body"])]], colWidths=[info_col_w-8]),
+        Table([[Paragraph("REPORT DATE", S["label"])], [Paragraph(generated_at, S["body"])]], colWidths=[info_col_w-8]),
+    ]], colWidths=[info_col_w]*4)
+    info_table.setStyle(TableStyle([
+        ("VALIGN",  (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+        ("TOPPADDING",   (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+    ]))
+    story.append(info_table)
+    story.append(sp(12))
+    story.append(rule())
+
+    # ── SUMMARY TILES ──
+    story.append(sp(4))
+    def summary_tile(top_label, value, value_color, sub_label):
+        return Table([
+            [Paragraph(top_label, S["label"])],
+            [Paragraph(str(value), ParagraphStyle("tv", fontName="Helvetica-Bold", fontSize=22, textColor=value_color, leading=26))],
+            [Paragraph(sub_label, S["body_small"])],
+        ], colWidths=[(W/4)-8])
+
+    tiles = Table([[
+        summary_tile("TOTAL REVIEWED",    total,            BLUE,  "Items in this report"),
+        summary_tile("COMPLIANCE RATE",   f"{compliance_rate}%", GREEN if compliance_rate >= 90 else AMBER if compliance_rate >= 75 else RED, "Passed compliance check"),
+        summary_tile("VERIFIED",          passing,          GREEN, "Items fully compliant"),
+        summary_tile("NEEDS ATTENTION",   review_count + fail_count, RED if (review_count+fail_count)>0 else INK_4, "Review or attention flagged"),
+    ]], colWidths=[(W/4)]*4)
+    tiles.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (0,0), BLUE_DIM),
+        ("BACKGROUND",   (1,0), (1,0), GREEN_DIM if compliance_rate >= 75 else AMBER_DIM),
+        ("BACKGROUND",   (2,0), (2,0), GREEN_DIM),
+        ("BACKGROUND",   (3,0), (3,0), RED_DIM if (review_count+fail_count)>0 else BG),
+        ("ROWBACKGROUNDS",(0,0),(-1,-1), [None]),
+        ("VALIGN",       (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 10),
+        ("RIGHTPADDING", (0,0), (-1,-1), 10),
+        ("TOPPADDING",   (0,0), (-1,-1), 10),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 10),
+        ("LINEAFTER",    (0,0), (2,0),   0.5, BORDER),
+        ("BOX",          (0,0), (-1,-1), 0.5, BORDER),
+    ]))
+    story.append(tiles)
+    story.append(sp(16))
+
+    # ── CONTENT TABLE ──
+    story.append(Paragraph("Content Audit Record", S["h2"]))
+    story.append(sp(4))
+
+    if total == 0:
+        story.append(Paragraph(
+            "No approved or published content found for this report period.",
+            S["body"]
+        ))
+    else:
+        # Column widths
+        cw = {
+            "date":      1.0*inch,
+            "title":     2.4*inch,
+            "niche":     0.85*inch,
+            "platforms": 0.9*inch,
+            "verdict":   0.75*inch,
+            "approved":  1.1*inch,
+        }
+
+        col_headers = [
+            Paragraph("DATE SAVED",    S["cell_bold"]),
+            Paragraph("CONTENT",       S["cell_bold"]),
+            Paragraph("NICHE",         S["cell_bold"]),
+            Paragraph("PLATFORMS",     S["cell_bold"]),
+            Paragraph("COMPLIANCE",    S["cell_bold"]),
+            Paragraph("APPROVED AT",   S["cell_bold"]),
+        ]
+
+        table_data = [col_headers]
+        row_colors = []
+
+        for i, r in enumerate(rows):
+            try:
+                content_dict = json.loads(r["content"]) if isinstance(r["content"], str) else r["content"]
+            except: content_dict = {}
+
+            title = (
+                content_dict.get("headline") or
+                content_dict.get("title") or
+                content_dict.get("hook") or
+                content_dict.get("subject") or
+                ""
+            )
+            body_text = (
+                content_dict.get("body") or
+                content_dict.get("caption") or
+                content_dict.get("content") or
+                ""
+            )
+            display = truncate(title or body_text, 90) or "—"
+
+            platforms_raw = r["copied_platforms"] or "[]"
+            try:
+                platforms = json.loads(platforms_raw) if isinstance(platforms_raw, str) else platforms_raw
+                plat_str  = ", ".join(platforms) if platforms else "Pending"
+            except: plat_str = "Pending"
+
+            _, comp_kind = compliance_label(r["compliance"])
+            row_bg = {
+                "pass":    colors.HexColor("#f9fef9"),
+                "warn":    colors.HexColor("#fffdf5"),
+                "fail":    colors.HexColor("#fff9f9"),
+                "neutral": WHITE,
+            }.get(comp_kind, WHITE)
+            row_colors.append(row_bg)
+
+            table_data.append([
+                Paragraph(fmt_date(r["saved_at"])[:12], S["cell"]),
+                Paragraph(display, S["cell"]),
+                Paragraph(r["niche"] or "—", S["cell"]),
+                Paragraph(truncate(plat_str, 40), S["cell"]),
+                verdict_para(r["compliance"]),
+                Paragraph(fmt_date(r["approved_at"] or r["published_at"]), S["cell"]),
+            ])
+
+        content_table = Table(
+            table_data,
+            colWidths=list(cw.values()),
+            repeatRows=1,
+        )
+
+        ts = [
+            # Header row
+            ("BACKGROUND",    (0,0), (-1,0),  colors.HexColor("#f0eff8")),
+            ("TEXTCOLOR",     (0,0), (-1,0),  INK),
+            ("FONTNAME",      (0,0), (-1,0),  "Helvetica-Bold"),
+            ("FONTSIZE",      (0,0), (-1,0),  7.5),
+            ("ROWBACKGROUNDS",(0,1), (-1,-1), [WHITE]),
+            ("VALIGN",        (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING",   (0,0), (-1,-1), 5),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 5),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("LINEBELOW",     (0,0), (-1,0),  0.75, BLUE),
+            ("LINEBELOW",     (0,1), (-1,-1), 0.3,  BORDER),
+            ("BOX",           (0,0), (-1,-1), 0.5,  BORDER),
+        ]
+        # Per-row background colors
+        for idx, bg in enumerate(row_colors):
+            ts.append(("BACKGROUND", (0, idx+1), (-1, idx+1), bg))
+
+        content_table.setStyle(TableStyle(ts))
+        story.append(content_table)
+
+    story.append(sp(16))
+    story.append(rule())
+
+    # ── FOOTER ATTESTATION ──
+    story.append(sp(4))
+    story.append(Paragraph(
+        f"This report was automatically generated by HomeBridge on {generated_at}. "
+        f"It reflects all content reviewed and approved by the agent named above. "
+        f"All compliance verdicts are generated by HomeBridge's automated compliance engine and do not constitute legal advice. "
+        f"This document is intended for internal review and compliance record-keeping purposes.",
+        S["footer"]
+    ))
+
+    # ── BUILD ──
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────
+# BROKER OFFICE FUNCTIONS
+# ─────────────────────────────────────────────
+
+def get_broker_office_stats(broker_id: int) -> list:
+    """
+    For each agent under broker_id, return their content stats
+    and identity score inputs so the broker dashboard can render
+    without hitting the score endpoint per-agent.
+    """
+    import json
+
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # Get all agents under this broker
+    c.execute("""
+        SELECT id, email, agent_name, brokerage, created_at
+        FROM users
+        WHERE broker_id = ? AND role = 'agent' AND is_active = 1
+        ORDER BY agent_name ASC
+    """, (broker_id,))
+    agents = c.fetchall()
+
+    results = []
+    for agent in agents:
+        uid = agent["id"]
+
+        # Content stats
+        c.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'approved'  THEN 1 ELSE 0 END) as approved,
+                SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) as published,
+                SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END) as pending,
+                MAX(COALESCE(approved_at, saved_at)) as last_activity
+            FROM content_library
+            WHERE user_id = ?
+        """, (uid,))
+        stats = c.fetchone()
+
+        # Compliance rate
+        c.execute("""
+            SELECT compliance FROM content_library
+            WHERE user_id = ? AND status IN ('approved','published')
+        """, (uid,))
+        comp_rows = c.fetchall()
+
+        passing = 0
+        for cr in comp_rows:
+            try:
+                comp = json.loads(cr["compliance"]) if isinstance(cr["compliance"], str) else cr["compliance"]
+                if isinstance(comp, dict):
+                    v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+                    if comp.get("passed") is True: v = "pass"
+                    if v in ("pass","compliant","ok","green"): passing += 1
+            except: pass
+
+        total_reviewed = (stats["approved"] or 0) + (stats["published"] or 0)
+        compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
+
+        # Active schedule?
+        c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (uid,))
+        sched = c.fetchone()
+        has_schedule = (sched["cnt"] > 0) if sched else False
+
+        results.append({
+            "id":              uid,
+            "agent_name":      agent["agent_name"],
+            "email":           agent["email"],
+            "brokerage":       agent["brokerage"],
+            "joined":          agent["created_at"],
+            "total_content":   stats["total"] or 0,
+            "pending":         stats["pending"] or 0,
+            "approved":        stats["approved"] or 0,
+            "published":       stats["published"] or 0,
+            "compliance_rate": compliance_rate,
+            "has_schedule":    has_schedule,
+            "last_activity":   stats["last_activity"],
+        })
+
+    conn.close()
+    return results
