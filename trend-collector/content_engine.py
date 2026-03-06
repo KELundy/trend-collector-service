@@ -632,3 +632,80 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
         return _parse_claude_output(raw_text, compliance)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error structuring content response: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# CORE GENERATION — callable by scheduler
+# without going through HTTP layer
+# ─────────────────────────────────────────────
+def generate_content_core(
+    agent_name:   str,
+    brokerage:    str,
+    market:       str       = "",
+    niche:        str       = "",
+    situation:    str       = "",
+    persona:      str       = "homeowners",
+    tone:         str       = "Professional",
+    length:       str       = "Standard",
+    trends:       list      = None,
+    brand_voice:  str       = "",
+    short_bio:    str       = "",
+    audience:     str       = "",
+    words_avoid:  str       = "",
+    words_prefer: str       = "",
+    mls_names:    list      = None,
+) -> dict:
+    """
+    Generate content and run compliance check.
+    Returns a dict with 'content' and 'compliance' keys.
+    Used by the scheduler — no HTTP, no Depends(), no await.
+    """
+    from pydantic import BaseModel as _BM
+
+    profile = AgentProfileModel(
+        agentName          = agent_name,
+        brokerage          = brokerage,
+        market             = market,
+        bio                = short_bio,
+        brandVoice         = brand_voice,
+        audienceDescription= audience,
+        wordsAvoid         = words_avoid,
+        wordsPrefer        = words_prefer,
+        primaryNiches      = [niche] if niche else [],
+        trends             = trends or [],
+        persona            = persona,
+        tone               = tone,
+        length             = length,
+        mlsNames           = mls_names or [],
+    )
+
+    payload = ContentRequest(
+        niche        = niche,
+        situation    = situation,
+        agentProfile = profile,
+    )
+
+    client = _get_anthropic_client()
+    prompt = _build_content_prompt(payload)
+
+    response = client.messages.create(
+        model      = "claude-sonnet-4-20250514",
+        max_tokens = 1800,
+        messages   = [{"role": "user", "content": prompt}],
+    )
+
+    text_chunks = [
+        block.text for block in (response.content or [])
+        if getattr(block, "type", "") == "text"
+    ]
+    raw_text = "\n\n".join(text_chunks).strip()
+    if not raw_text:
+        raise ValueError("Claude returned empty content")
+
+    compliance = _run_compliance_check(raw_text, agent_name, brokerage, mls_names or [])
+    content_response = _parse_claude_output(raw_text, compliance)
+
+    return {
+        "content":    content_response.dict(),
+        "compliance": compliance.dict(),
+    }
