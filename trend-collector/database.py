@@ -357,3 +357,218 @@ def get_content_queue():
 
 def update_content_status(item_id: int, new_status: str):
     pass
+
+
+# ─────────────────────────────────────────────
+# IDENTITY STRENGTH SCORE
+# ─────────────────────────────────────────────
+
+def calculate_identity_score(user_id: int, setup: dict) -> dict:
+    """
+    Calculate a 0-100 identity strength score across four pillars.
+    setup dict comes from agent_setup table or is passed from frontend.
+
+    Pillars:
+      Foundation  (30 pts) — profile completeness
+      Integrity   (25 pts) — compliance rate
+      Presence    (30 pts) — publishing activity
+      Consistency (15 pts) — regularity over time
+    """
+    from datetime import datetime, timedelta
+    import json
+
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # ── Pull all library items for this user ──
+    c.execute("""
+        SELECT status, compliance, approved_at, published_at, saved_at, niche
+        FROM content_library
+        WHERE user_id = ?
+        ORDER BY saved_at DESC
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    total_items     = len(rows)
+    approved_items  = [r for r in rows if r["status"] in ("approved", "published")]
+    published_items = [r for r in rows if r["status"] == "published"]
+
+    # ── PILLAR 1: Foundation (30 pts) ──
+    foundation = 0
+    foundation_breakdown = {}
+
+    name_pts       = 5  if setup.get("agentName", "").strip()   else 0
+    market_pts     = 5  if setup.get("market", "").strip()      else 0
+    bio_pts        = 8  if len(setup.get("shortBio","").strip()) > 60  else (4 if len(setup.get("shortBio","").strip()) > 20 else 0)
+    voice_pts      = 6  if len(setup.get("brandVoice","").strip()) > 30 else (3 if len(setup.get("brandVoice","").strip()) > 10 else 0)
+    niches_raw     = setup.get("selectedNiches", [])
+    niches         = niches_raw if isinstance(niches_raw, list) else []
+    niche_pts      = 6  if len(niches) >= 2 else (3 if len(niches) == 1 else 0)
+
+    foundation = name_pts + market_pts + bio_pts + voice_pts + niche_pts
+    foundation_breakdown = {
+        "name":   {"pts": name_pts,   "max": 5,  "label": "Name"},
+        "market": {"pts": market_pts, "max": 5,  "label": "Market"},
+        "bio":    {"pts": bio_pts,    "max": 8,  "label": "Bio"},
+        "voice":  {"pts": voice_pts,  "max": 6,  "label": "Brand Voice"},
+        "niches": {"pts": niche_pts,  "max": 6,  "label": "Niches"},
+    }
+
+    # ── PILLAR 2: Integrity (25 pts) ──
+    integrity = 0
+    integrity_breakdown = {}
+
+    if total_items == 0:
+        integrity = 0
+        compliance_rate = None
+        integrity_breakdown = {"label": "No content yet", "rate": None}
+    else:
+        compliant_count = 0
+        for r in rows:
+            try:
+                comp = json.loads(r["compliance"]) if isinstance(r["compliance"], str) else r["compliance"]
+                if isinstance(comp, dict):
+                    verdict = comp.get("overall_verdict") or comp.get("status") or ""
+                    if str(verdict).lower() in ("pass", "compliant", "ok", "green"):
+                        compliant_count += 1
+                    elif comp.get("passed") is True:
+                        compliant_count += 1
+            except Exception:
+                pass
+
+        compliance_rate = round((compliant_count / total_items) * 100) if total_items > 0 else 0
+
+        if compliance_rate == 100:   integrity = 25
+        elif compliance_rate >= 90:  integrity = 20
+        elif compliance_rate >= 75:  integrity = 12
+        elif compliance_rate >= 50:  integrity = 6
+        else:                         integrity = 2
+
+        integrity_breakdown = {
+            "rate":     compliance_rate,
+            "passing":  compliant_count,
+            "total":    total_items,
+        }
+
+    # ── PILLAR 3: Presence (30 pts) ──
+    presence = 0
+    presence_breakdown = {}
+
+    now = datetime.utcnow()
+    last_7  = now - timedelta(days=7)
+    last_30 = now - timedelta(days=30)
+
+    def parse_date(s):
+        if not s: return None
+        try:    return datetime.fromisoformat(s.replace("Z",""))
+        except: return None
+
+    published_dates = [parse_date(r["published_at"] or r["approved_at"] or r["saved_at"]) for r in approved_items]
+    published_dates = [d for d in published_dates if d]
+
+    has_any        = len(approved_items) > 0
+    in_last_7      = any(d >= last_7  for d in published_dates)
+    in_last_30     = any(d >= last_30 for d in published_dates)
+    total_approved = len(approved_items)
+
+    any_pts      = 5  if has_any        else 0
+    recent7_pts  = 12 if in_last_7      else 0
+    recent30_pts = 8  if in_last_30 and not in_last_7 else 0
+    volume_pts   = 5  if total_approved >= 5 else (3 if total_approved >= 2 else 0)
+
+    presence = any_pts + recent7_pts + recent30_pts + volume_pts
+    presence_breakdown = {
+        "total_approved": total_approved,
+        "published_last_7":  in_last_7,
+        "published_last_30": in_last_30,
+    }
+
+    # ── PILLAR 4: Consistency (15 pts) ──
+    consistency = 0
+    consistency_breakdown = {}
+
+    # Check for active schedule
+    try:
+        conn2 = get_conn()
+        c2 = conn2.cursor()
+        c2.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (user_id,))
+        sched_row = c2.fetchone()
+        conn2.close()
+        has_schedule = (sched_row["cnt"] > 0) if sched_row else False
+    except Exception:
+        has_schedule = False
+
+    # Check niche diversity
+    niche_diversity = len(set(r["niche"] for r in approved_items if r["niche"])) if approved_items else 0
+
+    # Check weekly regularity over last 4 weeks
+    weeks_active = 0
+    for i in range(4):
+        week_start = now - timedelta(days=(i+1)*7)
+        week_end   = now - timedelta(days=i*7)
+        if any(week_start <= d < week_end for d in published_dates):
+            weeks_active += 1
+
+    schedule_pts   = 5 if has_schedule                  else 0
+    diversity_pts  = 5 if niche_diversity >= 2          else (2 if niche_diversity == 1 else 0)
+    regularity_pts = 5 if weeks_active >= 3             else (3 if weeks_active >= 2   else (1 if weeks_active == 1 else 0))
+
+    consistency = schedule_pts + diversity_pts + regularity_pts
+    consistency_breakdown = {
+        "has_schedule":    has_schedule,
+        "niche_diversity": niche_diversity,
+        "weeks_active":    weeks_active,
+    }
+
+    # ── TOTAL ──
+    total = foundation + integrity + presence + consistency
+    total = min(total, 100)
+
+    if total >= 90:   level = "Authoritative"
+    elif total >= 75: level = "Recognized"
+    elif total >= 50: level = "Building"
+    elif total >= 25: level = "Establishing"
+    else:             level = "Getting Started"
+
+    # ── NEXT BEST ACTION ──
+    next_action = _score_next_action(foundation, integrity, presence, consistency,
+                                      foundation_breakdown, integrity_breakdown,
+                                      presence_breakdown, consistency_breakdown)
+
+    return {
+        "total":       total,
+        "level":       level,
+        "pillars": {
+            "foundation":  {"score": foundation,  "max": 30, "label": "Foundation",  "breakdown": foundation_breakdown},
+            "integrity":   {"score": integrity,   "max": 25, "label": "Integrity",   "breakdown": integrity_breakdown},
+            "presence":    {"score": presence,    "max": 30, "label": "Presence",    "breakdown": presence_breakdown},
+            "consistency": {"score": consistency, "max": 15, "label": "Consistency", "breakdown": consistency_breakdown},
+        },
+        "next_action": next_action,
+    }
+
+
+def _score_next_action(f, i, p, c, fb, ib, pb, cb) -> str:
+    """Return the single most impactful next action."""
+    gaps = []
+    if fb.get("bio", {}).get("pts", 0) < 8:
+        gaps.append((8 - fb["bio"]["pts"], "Complete your bio — it's the largest single factor in your Foundation score."))
+    if fb.get("niches", {}).get("pts", 0) < 6:
+        gaps.append((6 - fb["niches"]["pts"], "Select at least two niches to establish your areas of expertise."))
+    if fb.get("voice", {}).get("pts", 0) < 6:
+        gaps.append((6 - fb["voice"]["pts"], "Define your brand voice — it shapes every piece of content you generate."))
+    if pb.get("total_approved", 0) == 0:
+        gaps.append((20, "Generate and approve your first piece of content to activate your Presence score."))
+    if not pb.get("published_last_7"):
+        gaps.append((12, "Approve and publish content this week to maintain an active Presence score."))
+    if not cb.get("has_schedule"):
+        gaps.append((5, "Set a content schedule so HomeBridge builds your presence automatically."))
+    if cb.get("niche_diversity", 0) < 2 and pb.get("total_approved", 0) > 0:
+        gaps.append((5, "Generate content across multiple niches to deepen your Consistency score."))
+
+    if not gaps:
+        return "Your identity is strong. Keep publishing consistently to maintain your score."
+
+    gaps.sort(key=lambda x: -x[0])
+    return gaps[0][1]
