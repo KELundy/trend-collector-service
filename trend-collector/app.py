@@ -24,6 +24,7 @@ from database import (
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
     schedule_delete, schedules_get_due, schedule_mark_ran,
+    calculate_identity_score,
     DB_NAME,
 )
 from auth import router as auth_router, get_current_user
@@ -219,6 +220,24 @@ async def delete_schedule(niche: str, current_user=Depends(get_current_user)):
     if not success:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return {"success": True}
+
+
+# ─────────────────────────────────────────────
+# IDENTITY STRENGTH SCORE
+# ─────────────────────────────────────────────
+
+class ScoreRequest(BaseModel):
+    setup: dict = {}
+
+@app.post("/identity/score")
+async def get_identity_score(req: ScoreRequest, current_user = Depends(get_current_user)):
+    """
+    Calculate the agent's identity strength score.
+    Frontend passes current setup (from localStorage) so profile
+    completeness is always current even before full DB migration.
+    """
+    score = calculate_identity_score(current_user["id"], req.setup)
+    return score
 
 
 # ─────────────────────────────────────────────
@@ -433,3 +452,27 @@ async def trends_by_niche(niche: str):
         grouped["google"] = [{"topic": f"Rising interest in {niche} this week",
                                "collected_at": datetime.utcnow().isoformat()}]
     return grouped
+
+
+("/schedules/{niche}")
+async def delete_schedule(niche: str, user = Depends(get_current_user)):
+    schedule_delete(user["id"], niche)
+    return {"deleted": True}
+
+
+# ─────────────────────────────────────────────
+# IDENTITY STRENGTH SCORE
+# ─────────────────────────────────────────────
+
+class ScoreRequest(BaseModel):
+    setup: dict = {}
+
+@app.post("/identity/score")
+async def get_identity_score(req: ScoreRequest, user = Depends(get_current_user)):
+    """
+    Calculate the agent's identity strength score.
+    Frontend passes current setup (from localStorage) so profile
+    completeness is always current even before DB migration.
+    """
+    score = calculate_identity_score(user["id"], req.setup)
+    return score
