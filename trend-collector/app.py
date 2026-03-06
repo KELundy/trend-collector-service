@@ -9,6 +9,8 @@ from typing import Dict, Any
 
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import io
 from pydantic import BaseModel
 from typing import Optional
 
@@ -25,6 +27,8 @@ from database import (
     schedule_upsert, schedules_get_all, schedule_get,
     schedule_delete, schedules_get_due, schedule_mark_ran,
     calculate_identity_score,
+    generate_compliance_pdf,
+    get_broker_office_stats,
     DB_NAME,
 )
 from auth import router as auth_router, get_current_user
@@ -476,3 +480,99 @@ async def get_identity_score(req: ScoreRequest, user = Depends(get_current_user)
     """
     score = calculate_identity_score(user["id"], req.setup)
     return score
+
+# ─────────────────────────────────────────────
+# COMPLIANCE REPORT — PDF DOWNLOAD
+# ─────────────────────────────────────────────
+
+class ComplianceReportRequest(BaseModel):
+    setup: dict = {}
+    date_from: str = ""   # ISO date string, optional filter
+    date_to:   str = ""
+
+@app.post("/compliance/report")
+async def download_compliance_report(
+    req: ComplianceReportRequest,
+    current_user = Depends(get_current_user)
+):
+    """
+    Generate and stream a compliance audit report PDF.
+    Includes every approved/published item, compliance verdicts,
+    approval timestamps, and agent identity summary.
+    """
+    pdf_bytes = generate_compliance_pdf(
+        user_id    = current_user["id"],
+        agent_name = current_user.get("agent_name", ""),
+        brokerage  = current_user.get("brokerage", ""),
+        email      = current_user.get("email", ""),
+        setup      = req.setup,
+        date_from  = req.date_from,
+        date_to    = req.date_to,
+    )
+
+    filename = f"HomeBridge_Compliance_Report_{current_user.get('agent_name','Agent').replace(' ','_')}.pdf"
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─────────────────────────────────────────────
+# BROKER OFFICE STATS
+# ─────────────────────────────────────────────
+
+@app.get("/broker/office-stats")
+async def broker_office_stats(current_user = Depends(get_current_user)):
+    """
+    Return content stats for every agent under this broker.
+    Broker-role only.
+    """
+    if current_user.get("role") not in ("broker", "admin"):
+        raise HTTPException(status_code=403, detail="Broker accounts only.")
+    stats = get_broker_office_stats(current_user["id"])
+    return {"agents": stats, "count": len(stats)}
+
+
+@app.post("/broker/agent-compliance-report")
+async def broker_agent_report(
+    req: dict,
+    current_user = Depends(get_current_user)
+):
+    """
+    Download compliance report for a specific agent — broker only.
+    req: { agent_id: int }
+    """
+    if current_user.get("role") not in ("broker", "admin"):
+        raise HTTPException(status_code=403, detail="Broker accounts only.")
+
+    agent_id = req.get("agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id required.")
+
+    # Verify agent is under this broker
+    from database import get_conn
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id = ? AND broker_id = ?", (agent_id, current_user["id"]))
+    agent = c.fetchone()
+    conn.close()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found in your office.")
+
+    pdf_bytes = generate_compliance_pdf(
+        user_id    = agent["id"],
+        agent_name = agent["agent_name"],
+        brokerage  = agent["brokerage"],
+        email      = agent["email"],
+        setup      = {},
+    )
+
+    filename = f"Compliance_{agent['agent_name'].replace(' ','_')}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
