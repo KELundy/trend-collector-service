@@ -183,20 +183,29 @@ All content must comply with:
   identifiable in the content. Agent's licensed name must appear.
 - Do not make specific financial predictions or guarantee investment returns.
 
-OUTPUT FORMAT
-─────────────
-Write exactly six sections separated by two blank lines.
-NO labels. NO headings. NO brackets. NO numbers. NO explanations.
-Write in this exact order:
+OUTPUT FORMAT — CRITICAL
+────────────────────────
+You MUST respond with ONLY a valid JSON object. No preamble, no explanation,
+no markdown fences, no text before or after. Just the raw JSON object.
 
-1. A compelling, niche-specific headline (one sentence, no period)
-2. A vivid thumbnail/image concept (one to two sentences describing the visual)
-3. Hashtags (space-separated, 8-12 tags, mix of niche + location + broad)
-4. A platform-ready social post (naturally includes agent name and brokerage disclosure)
-5. A specific, action-oriented call to action (includes agent name or contact signal)
-6. A 45-75 second spoken script written as natural, conversational dialogue
+The JSON must have exactly these keys:
 
-Each section must contain real, specific content — never placeholders or generic text.
+{{
+  "headline": "A compelling, niche-specific headline — one sentence, no period",
+  "thumbnailIdea": "A vivid 1-2 sentence description of a visual concept for this content",
+  "hashtags": "#hashtag1 #hashtag2 #hashtag3 (8-12 tags, space-separated, mix of niche + location + broad)",
+  "post": "A full platform-ready social post. MUST end with a footer line formatted exactly as: — {agent_name}{' | ' + brokerage if brokerage else ''}",
+  "cta": "A specific action-oriented call to action that includes {agent_name} by name",
+  "script": "A complete 45-75 second spoken script written as natural conversational dialogue. Must mention {agent_name} and {market} specifically. Full paragraphs, not a fragment."
+}}
+
+HARD RULES FOR JSON OUTPUT:
+- Every value must be complete, fully written content — never a placeholder
+- The post value MUST contain {agent_name}{' and ' + brokerage if brokerage else ''} — this is a legal disclosure requirement
+- The script value must be a complete paragraph of dialogue, not a sentence fragment
+- {market} must appear in the post or script — never use "your local market" or "the area"
+- No line breaks inside JSON string values — use spaces between sentences
+- Return ONLY the JSON. If you add any other text, the system will break.
 """
 
 
@@ -383,24 +392,43 @@ def _run_compliance_check(
 
 
 # ─────────────────────────────────────────────
-# OUTPUT PARSER
+# OUTPUT PARSER — JSON-based, no fragile splitting
 # ─────────────────────────────────────────────
 def _parse_claude_output(raw_text: str, compliance: ComplianceBadge) -> ContentResponse:
-    parts = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
-    while len(parts) < 6:
-        parts.append("")
+    """
+    Parse Claude's JSON response into a ContentResponse.
+    Falls back gracefully if JSON is malformed.
+    """
+    import re
 
-    headline, thumbnail, hashtags, post, cta, script = parts[:6]
+    # Strip any accidental markdown fences Claude might add
+    cleaned = raw_text.strip()
+    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Try to extract JSON object if surrounded by stray text
+        match = re.search(r'\{[\s\S]*\}', cleaned)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = {}
 
     return ContentResponse(
-        headline=headline,
-        thumbnailIdea=thumbnail,
-        hashtags=hashtags,
-        post=post,
-        cta=cta,
-        script=script,
-        compliance=compliance,
-        generated_at=datetime.utcnow(),
+        headline      = data.get("headline",      "Content generation error — please try again."),
+        thumbnailIdea = data.get("thumbnailIdea", ""),
+        hashtags      = data.get("hashtags",      ""),
+        post          = data.get("post",          ""),
+        cta           = data.get("cta",           ""),
+        script        = data.get("script",        ""),
+        compliance    = compliance,
+        generated_at  = datetime.utcnow(),
     )
 
 
