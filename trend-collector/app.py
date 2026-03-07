@@ -29,6 +29,8 @@ from database import (
     calculate_identity_score,
     generate_compliance_pdf,
     get_broker_office_stats,
+    save_agent_setup, get_agent_setup,
+    get_user_results,
     DB_NAME,
 )
 from auth import router as auth_router, get_current_user
@@ -458,28 +460,42 @@ async def trends_by_niche(niche: str):
     return grouped
 
 
-("/schedules/{niche}")
-async def delete_schedule(niche: str, user = Depends(get_current_user)):
-    schedule_delete(user["id"], niche)
-    return {"deleted": True}
+
+
+
+
+
 
 
 # ─────────────────────────────────────────────
-# IDENTITY STRENGTH SCORE
+# AGENT SETUP — server-side storage
 # ─────────────────────────────────────────────
 
-class ScoreRequest(BaseModel):
-    setup: dict = {}
+class SetupSaveRequest(BaseModel):
+    setup: dict
 
-@app.post("/identity/score")
-async def get_identity_score(req: ScoreRequest, user = Depends(get_current_user)):
-    """
-    Calculate the agent's identity strength score.
-    Frontend passes current setup (from localStorage) so profile
-    completeness is always current even before DB migration.
-    """
-    score = calculate_identity_score(user["id"], req.setup)
-    return score
+@app.post("/setup/save")
+async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_user)):
+    """Save agent identity/setup data to DB. Called every time agent saves Setup panel."""
+    save_agent_setup(current_user["id"], body.setup)
+    return {"success": True}
+
+@app.get("/setup/get")
+async def get_setup(current_user=Depends(get_current_user)):
+    """Load agent identity/setup data from DB. Used to restore state on login."""
+    setup = get_agent_setup(current_user["id"])
+    return {"setup": setup, "has_setup": bool(setup)}
+
+
+# ─────────────────────────────────────────────
+# RESULTS PANEL
+# ─────────────────────────────────────────────
+
+@app.get("/results")
+async def get_results(current_user=Depends(get_current_user)):
+    """Return real content metrics for the Results panel."""
+    results = get_user_results(current_user["id"])
+    return results
 
 # ─────────────────────────────────────────────
 # COMPLIANCE REPORT — PDF DOWNLOAD
