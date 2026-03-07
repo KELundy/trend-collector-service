@@ -576,3 +576,20 @@ async def broker_agent_report(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ─────────────────────────────────────────────
+# ONE-TIME ADMIN SETUP — remove after use
+# ─────────────────────────────────────────────
+@app.get("/setup-admin-hb2026")
+async def setup_admin():
+    """Visit this URL once to make user id=1 an admin. Then delete it."""
+    from database import get_conn
+    conn = get_conn()
+    conn.execute("UPDATE users SET role='admin' WHERE id=1")
+    conn.commit()
+    row = conn.execute("SELECT id, email, role FROM users WHERE id=1").fetchone()
+    conn.close()
+    if row:
+        return {"success": True, "user": dict(row)}
+    return {"success": False, "message": "No user with id=1 found. Register first."}
