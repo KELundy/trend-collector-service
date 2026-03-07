@@ -209,50 +209,415 @@ HARD RULES:
 
 
 # ─────────────────────────────────────────────
-# COMPLIANCE CHECKER
+# COMPLIANCE RULE ENGINE
 # ─────────────────────────────────────────────
-# ── Fair Housing risk terms
-FAIR_HOUSING_RISK_TERMS = [
-    "perfect for families", "great for families", "ideal for families",
-    "walking distance to churches", "good schools nearby", "safe neighborhood",
-    "exclusive neighborhood", "desirable neighborhood", "up and coming",
-    "gentrifying", "transitional neighborhood", "no children", "adults only",
-    "perfect for couples", "ideal for young professionals", "bachelor pad",
-    "master bedroom", "master bath",
-    "integrated", "segregated", "ethnic", "hispanic", "asian neighborhood",
-    "school district" , "crime", "quiet street",
-]
 
-# ── NAR Article 12 — unverifiable claims
-NAR_RISK_TERMS = [
-    "guaranteed", "i promise", "best in the city", "number one agent",
-    "top agent in", "will sell your home", "promise you", "i guarantee",
-    "100% success", "never fails", "best agent", "highest rated",
-    "#1 agent", "number 1 agent",
-]
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPLIANCE RULE ENGINE
+# Architecture: rules are data, not code.
+# Adding a new client's custom requirements = adding entries to COMPLIANCE_RULES
+# and COMPLIANCE_PROFILES. Zero changes to core checker logic.
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── RESPA — referral fee and kickback language
-RESPA_RISK_TERMS = [
-    "referral fee", "kickback", "split the commission", "finder's fee",
-    "paid for referral", "referral payment", "split my commission",
-    "receive a fee", "compensation for referral", "refer and earn",
-]
+# ── RULE DEFINITIONS ─────────────────────────────────────────────────────────
+# Each rule: id, authority, severity (warn|fail), terms[], message
+# terms are matched case-insensitively against full content string
 
-# ── Clear Cooperation / off-market language
-CLEAR_COOPERATION_RISK_TERMS = [
-    "pocket listing", "off-market exclusive", "coming soon exclusive",
-    "pre-mls", "pre mls", "off mls", "not on the mls",
-    "exclusive off-market", "private listing", "silent listing",
-    "not listed publicly", "bypass the mls", "skip the mls",
-]
+COMPLIANCE_RULES = {
 
-# ── State commission — general property claim risk terms
-STATE_COMMISSION_RISK_TERMS = [
-    "as-is no inspection", "no inspection needed", "skip the inspection",
-    "guaranteed to appreciate", "will increase in value", "guaranteed roi",
-    "investment guaranteed", "never lose money", "risk free investment",
-    "perfect investment", "zero risk",
-]
+  # ── RESIDENTIAL / UNIVERSAL ────────────────────────────────────────────────
+  "fair_housing": {
+    "id": "fair_housing",
+    "authority": "Fair Housing Act (42 U.S.C. § 3604)",
+    "severity": "warn",
+    "terms": [
+      "perfect for families", "great for families", "ideal for families",
+      "walking distance to churches", "good schools nearby", "safe neighborhood",
+      "exclusive neighborhood", "desirable neighborhood", "up and coming",
+      "gentrifying", "transitional neighborhood", "no children", "adults only",
+      "perfect for couples", "ideal for young professionals", "bachelor pad",
+      "master bedroom", "master bath", "integrated", "segregated", "ethnic",
+      "hispanic neighborhood", "asian neighborhood", "school district", "quiet street",
+    ],
+    "message": "Fair Housing Act: phrase(s) may imply discriminatory steering. Use property-focused language only.",
+  },
+
+  "nar_article12": {
+    "id": "nar_article12",
+    "authority": "NAR Code of Ethics Article 12",
+    "severity": "warn",
+    "terms": [
+      "guaranteed", "i promise", "best in the city", "number one agent",
+      "top agent in", "will sell your home", "promise you", "i guarantee",
+      "100% success", "never fails", "best agent", "highest rated",
+      "#1 agent", "number 1 agent",
+    ],
+    "message": "NAR Article 12: unverifiable claim detected. Remove or qualify the statement — no guaranteed outcomes.",
+  },
+
+  "respa_section8": {
+    "id": "respa_section8",
+    "authority": "RESPA Section 8 (12 U.S.C. § 2607)",
+    "severity": "warn",
+    "terms": [
+      "referral fee", "kickback", "split the commission", "finder's fee",
+      "paid for referral", "referral payment", "split my commission",
+      "receive a fee", "compensation for referral", "refer and earn",
+    ],
+    "message": "RESPA Section 8: language may imply a referral fee or kickback arrangement. Verify before publishing.",
+  },
+
+  "clear_cooperation": {
+    "id": "clear_cooperation",
+    "authority": "NAR Clear Cooperation Policy",
+    "severity": "warn",
+    "terms": [
+      "pocket listing", "off-market exclusive", "coming soon exclusive",
+      "pre-mls", "pre mls", "off mls", "not on the mls",
+      "exclusive off-market", "private listing", "silent listing",
+      "not listed publicly", "bypass the mls", "skip the mls",
+    ],
+    "message": "MLS Cooperation: language may conflict with Clear Cooperation Policy. Verify with your MLS.",
+  },
+
+  "state_commission": {
+    "id": "state_commission",
+    "authority": "State Real Estate Commission (varies by state)",
+    "severity": "warn",
+    "terms": [
+      "as-is no inspection", "no inspection needed", "skip the inspection",
+      "guaranteed to appreciate", "will increase in value", "guaranteed roi",
+      "investment guaranteed", "never lose money", "risk free investment",
+      "perfect investment", "zero risk",
+    ],
+    "message": "State Commission: language may conflict with state advertising standards. Verify before publishing.",
+  },
+
+  # ── COMMERCIAL REAL ESTATE ─────────────────────────────────────────────────
+  "sec_investment_disclosure": {
+    "id": "sec_investment_disclosure",
+    "authority": "SEC Rule 10b-5 / Securities Act Section 17(b)",
+    "severity": "fail",
+    "terms": [
+      "this is not an offer to sell", "projected return", "expected return",
+      "annual return of", "irr of", "cap rate guarantee", "guaranteed cap rate",
+      "investment grade", "sec registered", "regulation d offering",
+      "accredited investors only",
+    ],
+    "message": "SEC Rule 10b-5: securities-adjacent language detected. Content marketing an investment property must include 'This is not an offer to sell securities' if referencing returns or investment structure. Legal review required before publishing.",
+  },
+
+  "sec_investment_risk": {
+    "id": "sec_investment_risk",
+    "authority": "SEC General Anti-Fraud / Rule 10b-5",
+    "severity": "warn",
+    "terms": [
+      "safe investment", "guaranteed income", "passive income guaranteed",
+      "risk-free", "no risk", "certain returns", "definite return",
+      "will cash flow", "guaranteed cash flow", "will appreciate",
+    ],
+    "message": "SEC / State Securities: language implying guaranteed investment outcomes may constitute a securities violation. Reframe as general market observation, not a promise.",
+  },
+
+  "finra_communications": {
+    "id": "finra_communications",
+    "authority": "FINRA Rule 2210 (Communications with the Public)",
+    "severity": "warn",
+    "terms": [
+      "financial advisor recommends", "broker recommends", "our analysts say",
+      "buy now", "strong buy", "must buy investment", "institutional grade",
+    ],
+    "message": "FINRA Rule 2210: content referencing financial recommendations may trigger broker-dealer communications standards. Verify with compliance if affiliated with a FINRA member.",
+  },
+
+  "fincen_aml": {
+    "id": "fincen_aml",
+    "authority": "FinCEN Geographic Targeting Orders / Bank Secrecy Act",
+    "severity": "warn",
+    "terms": [
+      "cash only", "cash buyers preferred", "no financing required",
+      "anonymous buyer", "no questions asked", "offshore buyer",
+      "foreign buyer cash", "wire transfer only",
+    ],
+    "message": "FinCEN / BSA: language may attract scrutiny under Anti-Money Laundering Geographic Targeting Orders, which require disclosure of beneficial ownership in all-cash commercial transactions. Review with compliance.",
+  },
+
+  "cercla_environmental": {
+    "id": "cercla_environmental",
+    "authority": "CERCLA (42 U.S.C. § 9601) / ASTM Phase I Standards",
+    "severity": "fail",
+    "terms": [
+      "clean site", "no environmental issues", "environmentally clean",
+      "no contamination", "clean environmental", "passed environmental",
+      "no phase i needed", "skip the phase i",
+    ],
+    "message": "CERCLA: representing a commercial property as environmentally clean without a Phase I ESA constitutes a potential material misrepresentation. Remove environmental clean claims unless supported by completed Phase I/II documentation.",
+  },
+
+  "commercial_investment_disclaimer": {
+    "id": "commercial_investment_disclaimer",
+    "authority": "State Real Estate Commission / NAR Article 12",
+    "severity": "warn",
+    "terms": [
+      "guaranteed noi", "noi will be", "income guaranteed",
+      "lease guaranteed", "tenant guaranteed", "guaranteed occupancy",
+      "cap rate will", "will produce income",
+    ],
+    "message": "Commercial Investment: projecting guaranteed income, NOI, or cap rates without qualification may violate state advertising standards. Reframe as illustrative figures, not guarantees.",
+  },
+
+  # ── DATA CENTER & TECHNOLOGY INFRASTRUCTURE ────────────────────────────────
+  "tier_certification_claims": {
+    "id": "tier_certification_claims",
+    "authority": "Uptime Institute Tier Certification Standards",
+    "severity": "fail",
+    "terms": [
+      "tier iv certified", "tier 4 certified", "tier iii certified", "tier 3 certified",
+      "tier ii certified", "tier 2 certified", "uptime certified",
+      "certified tier", "tier-certified",
+    ],
+    "message": "Uptime Institute: tier certification claims require active, audited certification. Representing a facility as certified without current documentation constitutes material misrepresentation. Remove or replace with 'tier-equivalent design' unless certification documentation is current.",
+  },
+
+  "soc2_claims": {
+    "id": "soc2_claims",
+    "authority": "AICPA SOC 2 Standards / FTC Act Section 5",
+    "severity": "warn",
+    "terms": [
+      "soc 2 compliant", "soc2 compliant", "soc 2 certified",
+      "soc ii compliant", "fully soc compliant",
+    ],
+    "message": "SOC 2: 'SOC 2 compliant' is not a recognized standard — SOC 2 is an audit report, not a certification. Use 'SOC 2 Type II audited' or 'SOC 2 report available' instead. Misrepresenting audit status may violate FTC Act Section 5.",
+  },
+
+  "ferc_power_claims": {
+    "id": "ferc_power_claims",
+    "authority": "FERC / Federal Power Act",
+    "severity": "warn",
+    "terms": [
+      "guaranteed power", "power guaranteed", "100% uptime power",
+      "unlimited power", "unconstrained power", "power with no limits",
+      "ferc approved power", "utility guaranteed",
+    ],
+    "message": "FERC / Federal Power Act: power availability claims for data center facilities must be qualified. Power delivery is subject to utility interconnection agreements and FERC-regulated terms. Remove absolute power guarantees.",
+  },
+
+  "cfius_awareness": {
+    "id": "cfius_awareness",
+    "authority": "CFIUS (50 U.S.C. § 4565) / FIRRMA",
+    "severity": "warn",
+    "terms": [
+      "foreign investor welcome", "international buyers welcome",
+      "open to foreign capital", "no restrictions on foreign",
+      "foreign ownership available", "chinese investment", "foreign acquisition",
+    ],
+    "message": "CFIUS / FIRRMA: data center and critical infrastructure assets are subject to Committee on Foreign Investment review for foreign acquisitions. Content broadly inviting foreign capital to critical infrastructure assets without CFIUS awareness language requires legal review.",
+  },
+
+  "critical_infrastructure_disclosure": {
+    "id": "critical_infrastructure_disclosure",
+    "authority": "DHS Critical Infrastructure Framework / FISMA",
+    "severity": "warn",
+    "terms": [
+      "government tenant", "dod tenant", "federal government client",
+      "classified facility", "scif", "government contract",
+      "clearance required", "cleared facility",
+    ],
+    "message": "Critical Infrastructure: content referencing government or classified tenants in data center facilities may trigger additional disclosure and security review requirements. Confirm with legal before publishing facility details.",
+  },
+
+  "ppa_claims": {
+    "id": "ppa_claims",
+    "authority": "FERC / State PUC Regulations",
+    "severity": "warn",
+    "terms": [
+      "renewable powered", "100% renewable", "fully renewable",
+      "carbon neutral facility", "green powered", "net zero facility",
+      "zero carbon data center",
+    ],
+    "message": "PPA / Renewable Claims: sustainability claims for data center facilities must be supported by verified Power Purchase Agreements or RECs. Unsubstantiated renewable energy claims may violate FTC Green Guides (16 C.F.R. Part 260).",
+  },
+
+  # ── MORTGAGE (FUTURE — framework ready) ──────────────────────────────────
+  "nmls_disclosure": {
+    "id": "nmls_disclosure",
+    "authority": "SAFE Act / CFPB Regulation Z",
+    "severity": "warn",
+    "terms": ["loan officer", "mortgage advisor", "lender", "mortgage broker"],
+    "message": "SAFE Act: Mortgage professional content must include NMLS license number. Verify disclosure before publishing.",
+  },
+
+  "regulation_z": {
+    "id": "regulation_z",
+    "authority": "CFPB Regulation Z (12 C.F.R. § 1026)",
+    "severity": "fail",
+    "terms": [
+      "rates as low as", "payment of only", "only $", "payments starting at",
+      "as low as % apr", "% interest rate",
+    ],
+    "message": "Regulation Z: quoting rates or payments in advertising triggers full APR disclosure requirements. Remove rate/payment references or add full Reg Z disclosures.",
+  },
+}
+
+
+# ── COMPLIANCE PROFILES ────────────────────────────────────────────────────────
+# Maps a profile name to a list of rule IDs that apply.
+# To add a client's custom requirements: add their rules to COMPLIANCE_RULES,
+# create a new profile, and map their niches to it in NICHE_COMPLIANCE_PROFILE.
+
+COMPLIANCE_PROFILES = {
+
+  "residential": [
+    "fair_housing",
+    "nar_article12",
+    "respa_section8",
+    "clear_cooperation",
+    "state_commission",
+  ],
+
+  "commercial": [
+    "nar_article12",
+    "respa_section8",
+    "state_commission",
+    "sec_investment_disclosure",
+    "sec_investment_risk",
+    "finra_communications",
+    "fincen_aml",
+    "cercla_environmental",
+    "commercial_investment_disclaimer",
+  ],
+
+  "data_center": [
+    "nar_article12",
+    "state_commission",
+    "sec_investment_disclosure",
+    "sec_investment_risk",
+    "finra_communications",
+    "fincen_aml",
+    "tier_certification_claims",
+    "soc2_claims",
+    "ferc_power_claims",
+    "cfius_awareness",
+    "critical_infrastructure_disclosure",
+    "ppa_claims",
+    "commercial_investment_disclaimer",
+  ],
+
+  "investment": [
+    "nar_article12",
+    "state_commission",
+    "sec_investment_disclosure",
+    "sec_investment_risk",
+    "fincen_aml",
+    "commercial_investment_disclaimer",
+  ],
+
+  "mortgage": [
+    "nmls_disclosure",
+    "regulation_z",
+    "respa_section8",
+    "fair_housing",
+    "state_commission",
+  ],
+
+  # ── FUTURE CLIENT PROFILES — add here, zero code changes ──────────────────
+  # "reit_enterprise_abc": [
+  #   "data_center",         # inherit all data_center rules
+  #   "custom_abc_rule_1",   # add client-specific on top
+  #   "custom_abc_rule_2",
+  # ],
+}
+
+
+# ── NICHE → COMPLIANCE PROFILE MAPPING ────────────────────────────────────────
+NICHE_COMPLIANCE_PROFILE = {
+  # Residential
+  "Residential Buying & Selling":  "residential",
+  "First-Time Homebuyers":         "residential",
+  "Luxury Real Estate":            "residential",
+  "Seniors & 55+ Communities":     "residential",
+  "New Construction":               "residential",
+  "Move-Up Buyers":                "residential",
+  "Relocation":                    "residential",
+  "Veterans & Military":           "residential",
+  "Condos & Townhomes":            "residential",
+  "Multi-Family (2–4 Units)":      "residential",
+  "Short Sale & Foreclosure":      "residential",
+  "Residential Leasing":           "residential",
+  # Commercial
+  "Commercial Sales":              "commercial",
+  "Commercial Leasing":            "commercial",
+  "Office Space":                  "commercial",
+  "Retail & Mixed-Use":            "commercial",
+  "Industrial & Warehouse":        "commercial",
+  "Medical & Dental":              "commercial",
+  "Multi-Family (5+ Units)":       "commercial",
+  "Hospitality":                   "commercial",
+  # Land
+  "Land & Development":            "residential",
+  "Ranch & Farm / Agricultural":   "residential",
+  "Recreational & Mountain":       "residential",
+  "Vacant Land":                   "residential",
+  # Functional
+  "Property Management":           "residential",
+  "Investment Analysis":           "investment",
+  "Transaction Coordination":      "residential",
+  "Appraisal & Valuation":        "residential",
+  # Luxury
+  "Ultra-Luxury / UHNW":          "commercial",
+  "Second Homes & Vacation":       "residential",
+  "Luxury New Construction":       "residential",
+  # Lifecycle
+  "Divorce & Separation":          "residential",
+  "Probate & Inherited Homes":     "residential",
+  "Empty Nesters & Downsizing":    "residential",
+  "Young Professionals":           "residential",
+  "Families with Children":        "residential",
+  # Situational
+  "Pre-Foreclosure & Hardship":    "residential",
+  "Estate & Probate Sales":        "residential",
+  "Care-Driven Transitions":       "residential",
+  "Emergency Relocation":          "residential",
+  # Investment
+  "Fix & Flip":                    "investment",
+  "Long-Term Rentals (BRRRR)":     "investment",
+  "Short-Term Rentals / Airbnb":   "investment",
+  "Mid-Term Rentals":              "investment",
+  "1031 Exchange":                 "investment",
+  "Opportunity Zones":             "investment",
+  # Technology & Infrastructure
+  "Data Centers":                  "data_center",
+  "Colocation Facilities":         "data_center",
+  "Hyperscale Campuses":           "data_center",
+  "Edge Data Centers":             "data_center",
+  "Powered Shells":                "data_center",
+  "Cloud Infrastructure Real Estate": "data_center",
+  "Telecom & Fiber Infrastructure":"data_center",
+  "Network Facilities":            "data_center",
+  # Legacy keys
+  "Seniors & Downsizing":          "residential",
+  "Probate & Inherited Homes":     "residential",
+  "Divorce & Separation":          "residential",
+  "Luxury":                        "residential",
+  "First-Time Buyers":             "residential",
+  "Investors":                     "investment",
+  "Veterans":                      "residential",
+  "Distressed / Pre-Foreclosure":  "residential",
+  "Land & Rural":                  "residential",
+  "Short-Term Rentals":            "investment",
+}
+
+
+def _get_compliance_profile(niche: str) -> str:
+  """Return the compliance profile name for a given niche. Defaults to residential."""
+  return NICHE_COMPLIANCE_PROFILE.get(niche, "residential")
+
+
+def _get_rules_for_profile(profile_name: str) -> list:
+  """Return the list of rule dicts for a given profile."""
+  rule_ids = COMPLIANCE_PROFILES.get(profile_name, COMPLIANCE_PROFILES["residential"])
+  return [COMPLIANCE_RULES[rid] for rid in rule_ids if rid in COMPLIANCE_RULES]
+
 
 
 def _run_compliance_check(
@@ -260,126 +625,111 @@ def _run_compliance_check(
     agent_name: str,
     brokerage: str,
     mls_names: Optional[List[str]] = None,
+    niche: str = "",
+    custom_rule_ids: Optional[List[str]] = None,
 ) -> ComplianceBadge:
     """
-    Full compliance check:
-    - Fair Housing Act
-    - Brokerage & licensee disclosure
-    - NAR Code of Ethics Article 12
-    - RESPA referral/kickback language
-    - Clear Cooperation / off-market policy
-    - State Real Estate Commission general rules
-    - MLS-aware flagging
+    Niche-aware, extensible compliance checker.
+    Loads the correct rule profile based on niche.
+    custom_rule_ids allows client-specific rules to be injected per account.
     """
-    notes        = []
-    fair_housing_status  = "pass"
-    disclosure_status    = "pass"
-    nar_status           = "pass"
-    respa_status         = "pass"
-    cooperation_status   = "pass"
-    state_status         = "pass"
-
     content_lower = content.lower()
-    mls_list = [m.strip() for m in (mls_names or []) if m and m.strip()]
-    mls_display = ", ".join(mls_list) if mls_list else "your MLS"
+    notes         = []
+    statuses      = {}
 
-    # ── Fair Housing
-    triggered_fh = [t for t in FAIR_HOUSING_RISK_TERMS if t in content_lower]
-    if triggered_fh:
-        fair_housing_status = "warn"
-        notes.append(
-            f"Fair Housing: phrase(s) may imply steering — "
-            f"'{triggered_fh[0]}'. Use property-focused language instead."
-        )
+    # ── Determine which ruleset applies
+    profile_name = _get_compliance_profile(niche)
+    rules        = _get_rules_for_profile(profile_name)
 
-    # ── Brokerage disclosure
+    # ── Inject any client-specific custom rules on top
+    if custom_rule_ids:
+        for rid in custom_rule_ids:
+            if rid in COMPLIANCE_RULES:
+                rules.append(COMPLIANCE_RULES[rid])
+
+    # ── Run every rule in the profile
+    for rule in rules:
+        triggered = [t for t in rule["terms"] if t in content_lower]
+        if triggered:
+            statuses[rule["id"]] = rule["severity"]
+            authority = rule.get("authority", "")
+            msg = rule["message"]
+            notes.append(f"[{authority}] {msg} (triggered: '{triggered[0]}')")
+        else:
+            statuses[rule["id"]] = "pass"
+
+    # ── Brokerage disclosure check (always applies)
     if brokerage:
         brokerage_words = [w.lower() for w in brokerage.split() if len(w) > 3]
         if not any(w in content_lower for w in brokerage_words):
-            disclosure_status = "warn"
+            statuses["brokerage_disclosure"] = "warn"
             notes.append(
                 f"Brokerage disclosure: '{brokerage}' not detected. "
                 f"Verify brokerage name appears before publishing."
             )
 
-    # ── Agent name disclosure
+    # ── Agent name disclosure check (always applies)
     if agent_name:
         name_parts = [p.lower() for p in agent_name.split() if len(p) > 2]
         if not any(p in content_lower for p in name_parts):
-            if disclosure_status == "pass":
-                disclosure_status = "warn"
+            statuses["agent_disclosure"] = "warn"
             notes.append(
-                f"Licensee disclosure: '{agent_name}' not detected in content. "
+                f"Licensee disclosure: '{agent_name}' not detected. "
                 f"State law requires licensee name on all advertising."
             )
 
-    # ── NAR Article 12
-    triggered_nar = [t for t in NAR_RISK_TERMS if t in content_lower]
-    if triggered_nar:
-        nar_status = "warn"
+    # ── MLS reminder if applicable
+    mls_list = [m.strip() for m in (mls_names or []) if m and m.strip()]
+    if mls_list:
+        mls_display = ", ".join(mls_list)
         notes.append(
-            f"NAR Article 12: '{triggered_nar[0]}' may constitute an unverifiable claim. "
-            f"Remove or qualify the statement."
+            f"MLS reminder: Automated checks do not cover all rules for "
+            f"{mls_display}. Verify advertising standards before publishing."
         )
 
-    # ── RESPA
-    triggered_respa = [t for t in RESPA_RISK_TERMS if t in content_lower]
-    if triggered_respa:
-        respa_status = "warn"
+    # ── Always add a state/jurisdiction reminder
+    if profile_name == "data_center":
         notes.append(
-            f"RESPA review suggested: '{triggered_respa[0]}' may reference a referral "
-            f"fee or kickback arrangement. Verify compliance with RESPA Section 8 "
-            f"before publishing."
+            "Jurisdiction note: Data center and critical infrastructure transactions "
+            "may involve additional state, federal, and international regulatory review "
+            "beyond these automated checks. Confirm with legal counsel before publishing."
         )
-
-    # ── Clear Cooperation
-    triggered_cc = [t for t in CLEAR_COOPERATION_RISK_TERMS if t in content_lower]
-    if triggered_cc:
-        cooperation_status = "warn"
+    elif profile_name == "commercial":
         notes.append(
-            f"MLS Cooperation: '{triggered_cc[0]}' may conflict with MLS cooperation "
-            f"policies in {mls_display}. Verify this content complies with your MLS "
-            f"advertising and listing rules before publishing."
-        )
-
-    # ── State Real Estate Commission
-    triggered_state = [t for t in STATE_COMMISSION_RISK_TERMS if t in content_lower]
-    if triggered_state:
-        state_status = "warn"
-        notes.append(
-            f"State Commission review suggested: '{triggered_state[0]}' may conflict "
-            f"with state real estate commission advertising standards. Verify compliance "
-            f"with your state's rules before publishing."
+            "Jurisdiction note: Commercial real estate advertising may be subject to "
+            "state securities laws and additional disclosure requirements beyond "
+            "these automated checks. Confirm with legal counsel before publishing."
         )
     else:
-        # Always add a soft state reminder — rules vary too much to fully automate
         notes.append(
-            f"State rules: Automated checks cover federal and NAR standards. "
-            f"Verify content also meets your state real estate commission's "
-            f"advertising requirements before publishing."
+            "State rules: Automated checks cover federal and NAR standards. "
+            "Verify content also meets your state commission's advertising "
+            "requirements before publishing."
         )
 
-    # ── MLS-specific reminder if MLS provided
-    if mls_list:
-        notes.append(
-            f"MLS reminder: Content has not been checked against specific rules for "
-            f"{mls_display}. Verify advertising rules including property description "
-            f"standards and cooperation policies for your MLS before publishing."
-        )
+    # ── Map to legacy ComplianceBadge fields for backward compatibility
+    def _worst(ids):
+        vals = [statuses.get(i, "pass") for i in ids]
+        if "fail" in vals: return "fail"
+        if "warn" in vals: return "warn"
+        return "pass"
 
-    # ── Overall status
-    all_statuses = [
-        fair_housing_status, disclosure_status, nar_status,
-        respa_status, cooperation_status, state_status
-    ]
-    if "fail" in all_statuses:
+    fair_housing_status = _worst(["fair_housing"])
+    disclosure_status   = _worst(["brokerage_disclosure", "agent_disclosure"])
+    nar_status          = _worst(["nar_article12"])
+
+    all_vals = list(statuses.values())
+    if "fail" in all_vals:
         overall = "attention"
-    elif "warn" in all_statuses:
+    elif "warn" in all_vals:
         overall = "review"
     else:
         overall = "compliant"
-        notes = ["Content passed all automated compliance checks. "
-                 "Verify state commission and MLS-specific rules before publishing."]
+        if not notes or all("reminder" in n.lower() or "jurisdiction" in n.lower() or "state rules" in n.lower() for n in notes):
+            notes = [
+                f"Content passed all automated compliance checks for {profile_name} profile. "
+                f"Verify jurisdiction-specific rules before publishing."
+            ]
 
     return ComplianceBadge(
         fairHousing=fair_housing_status,
@@ -388,6 +738,7 @@ def _run_compliance_check(
         overallStatus=overall,
         notes=notes,
     )
+
 
 
 # ─────────────────────────────────────────────
@@ -1148,7 +1499,8 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
     agent_name = profile.agentName or ""
     brokerage  = profile.brokerage  or ""
     mls_names  = profile.mlsNames   or []
-    compliance = _run_compliance_check(raw_text, agent_name, brokerage, mls_names)
+    niche_for_check = ", ".join(payload.identity.primaryCategories) if payload.identity.primaryCategories else ""
+    compliance = _run_compliance_check(raw_text, agent_name, brokerage, mls_names, niche=niche_for_check)
 
     try:
         return _parse_claude_output(raw_text, compliance)
@@ -1224,7 +1576,7 @@ def generate_content_core(
     if not raw_text:
         raise ValueError("Claude returned empty content")
 
-    compliance = _run_compliance_check(raw_text, agent_name, brokerage, mls_names or [])
+    compliance = _run_compliance_check(raw_text, agent_name, brokerage, mls_names or [], niche=niche)
     content_response = _parse_claude_output(raw_text, compliance)
 
     return {
