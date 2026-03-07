@@ -1,13 +1,13 @@
 import sys
 sys.path.insert(0, '.')
-from database import init_db
 import sqlite3
 
-init_db()
+# Check what tables exist
 conn = sqlite3.connect("trends.db")
-conn.execute("UPDATE users SET role='admin' WHERE id=1")
-conn.commit()
-rows = conn.execute("SELECT id, email, role FROM users").fetchall()
-for r in rows:
-    print(r)
+tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+print("Tables:", tables)
 conn.close()
+
+# Check which database.py is loaded
+import database
+print("Database file:", database.__file__)
