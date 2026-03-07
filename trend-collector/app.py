@@ -578,15 +578,3 @@ async def broker_agent_report(
     )
 
 
-# ─────────────────────────────────────────────
-# ONE-TIME ADMIN SETUP — remove after use
-# ─────────────────────────────────────────────
-@app.get("/setup-admin-hb2026")
-async def setup_admin():
-    from database import get_conn
-    conn = get_conn()
-    conn.execute("UPDATE users SET role='admin'")
-    conn.commit()
-    rows = conn.execute("SELECT id, email, role FROM users").fetchall()
-    conn.close()
-    return {"success": True, "users": [dict(r) for r in rows]}
