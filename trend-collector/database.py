@@ -96,8 +96,133 @@ def init_db():
         )
     """)
 
+    # Agent setup — stores identity/profile data server-side
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS agent_setup (
+            user_id INTEGER PRIMARY KEY,
+            setup_json TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
     conn.commit()
     conn.close()
+
+
+# ─────────────────────────────────────────────
+# AGENT SETUP (server-side identity storage)
+# ─────────────────────────────────────────────
+def save_agent_setup(user_id: int, setup: dict):
+    """Save or update agent setup/identity data server-side."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO agent_setup (user_id, setup_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            setup_json = excluded.setup_json,
+            updated_at = excluded.updated_at
+    """, (user_id, json.dumps(setup), datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def get_agent_setup(user_id: int) -> dict:
+    """Get agent setup/identity data from DB."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {}
+    try:
+        return json.loads(row["setup_json"])
+    except Exception:
+        return {}
+
+
+def get_user_results(user_id: int) -> dict:
+    """Return real metrics for the Results panel."""
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE user_id = ?", (user_id,))
+    total_generated = c.fetchone()["cnt"]
+
+    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE user_id = ? AND status = 'published'", (user_id,))
+    total_published = c.fetchone()["cnt"]
+
+    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE user_id = ? AND status = 'pending'", (user_id,))
+    total_pending = c.fetchone()["cnt"]
+
+    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE user_id = ? AND status IN ('approved','published')", (user_id,))
+    total_approved = c.fetchone()["cnt"]
+
+    c.execute("SELECT copied_platforms FROM content_library WHERE user_id = ? AND copied_platforms IS NOT NULL", (user_id,))
+    all_platforms = set()
+    for row in c.fetchall():
+        try:
+            plats = json.loads(row["copied_platforms"]) if isinstance(row["copied_platforms"], str) else row["copied_platforms"]
+            if isinstance(plats, list):
+                all_platforms.update(plats)
+        except Exception:
+            pass
+
+    c.execute("SELECT compliance FROM content_library WHERE user_id = ? AND status IN ('approved','published')", (user_id,))
+    passing = 0
+    comp_rows = c.fetchall()
+    for row in comp_rows:
+        try:
+            comp = json.loads(row["compliance"]) if isinstance(row["compliance"], str) else row["compliance"]
+            if isinstance(comp, dict):
+                v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+                if comp.get("passed") is True: v = "pass"
+                if v in ("pass","compliant","ok","green"): passing += 1
+        except Exception:
+            pass
+    compliance_rate = round((passing / total_approved) * 100) if total_approved > 0 else None
+
+    c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (user_id,))
+    active_schedules = c.fetchone()["cnt"]
+
+    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE user_id = ? AND saved_at >= datetime('now', '-7 days')", (user_id,))
+    this_week = c.fetchone()["cnt"]
+
+    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE user_id = ? AND saved_at >= datetime('now', '-30 days')", (user_id,))
+    this_month = c.fetchone()["cnt"]
+
+    c.execute("""
+        SELECT niche, COUNT(*) as total,
+               SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) as published
+        FROM content_library WHERE user_id = ?
+        GROUP BY niche ORDER BY total DESC
+    """, (user_id,))
+    niche_breakdown = [
+        {"niche": r["niche"], "total": r["total"], "published": r["published"]}
+        for r in c.fetchall() if r["niche"]
+    ]
+
+    c.execute("SELECT saved_at FROM content_library WHERE user_id = ? ORDER BY saved_at DESC LIMIT 1", (user_id,))
+    last_row = c.fetchone()
+    last_activity = last_row["saved_at"] if last_row else None
+
+    conn.close()
+    return {
+        "total_generated":  total_generated,
+        "total_published":  total_published,
+        "total_pending":    total_pending,
+        "total_approved":   total_approved,
+        "platforms_reached": len(all_platforms),
+        "platform_list":    sorted(list(all_platforms)),
+        "compliance_rate":  compliance_rate,
+        "active_schedules": active_schedules,
+        "this_week":        this_week,
+        "this_month":       this_month,
+        "niche_breakdown":  niche_breakdown,
+        "last_activity":    last_activity,
+    }
 
 
 # ─────────────────────────────────────────────
