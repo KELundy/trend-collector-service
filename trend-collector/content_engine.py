@@ -95,117 +95,116 @@ def _build_content_prompt(payload: ContentRequest) -> str:
     business_name = profile.businessName or ""
     brokerage     = profile.brokerage    or ""
     market        = profile.market       or "their local market"
-    brand_voice   = profile.brandVoice   or "professional and approachable"
+    brand_voice   = profile.brandVoice   or "conversational and genuine"
     short_bio     = profile.shortBio     or ""
     audience      = profile.audienceDescription or ""
     words_avoid   = profile.wordsAvoid   or ""
     words_prefer  = profile.wordsPrefer  or ""
 
-    # Build identity display string naturally
     agent_display = agent_name
     if business_name:
         agent_display += f" of {business_name}"
     if brokerage and brokerage.lower() not in business_name.lower():
         agent_display += f" with {brokerage}"
 
-    # ── Niche context
     primary_categories = ", ".join(identity.primaryCategories) or "real estate"
     subniche_lines = []
     for cat, subs in identity.subNichesByCategory.items():
         if subs:
-            subniche_lines.append(f"  - {cat}: {', '.join(subs)}")
+            subniche_lines.append("  - {}: {}".format(cat, ", ".join(subs)))
     subniches_text = "\n".join(subniche_lines) or "  - General real estate services"
 
-    trend_prefs      = ", ".join(identity.trendPreferences) or "current market conditions"
-    selected_trends  = ", ".join(payload.selectedTrends)    or "current market activity"
+    trend_prefs     = ", ".join(identity.trendPreferences) or "current market conditions"
+    selected_trends = ", ".join(payload.selectedTrends)    or "current market activity"
 
-    # ── Optional refinements
-    persona_text = f"Target audience: {payload.persona}.\n" if payload.persona else ""
-    tone_text    = f"Tone: {payload.tone}.\n" if payload.tone else f"Tone: {brand_voice}.\n"
-    length_text  = f"Content length: {payload.length}.\n" if payload.length else "Content length: medium.\n"
+    tone_text    = f"Voice: {payload.tone}.\n"   if payload.tone   else f"Voice: {brand_voice}.\n"
+    length_text  = f"Length: {payload.length}.\n" if payload.length else "Length: medium.\n"
     avoid_text   = f"Never use these words or phrases: {words_avoid}.\n" if words_avoid else ""
-    prefer_text  = f"Naturally use these words or phrases where appropriate: {words_prefer}.\n" if words_prefer else ""
-    bio_text     = f"Agent background: {short_bio}\n" if short_bio else ""
-    audience_text = f"Audience context: {audience}\n" if audience else ""
+    prefer_text  = f"Naturally weave in these words or phrases: {words_prefer}.\n" if words_prefer else ""
+    bio_text     = f"About {agent_name}: {short_bio}\n" if short_bio else ""
+    audience_text = f"Who reads this: {audience}\n" if audience else ""
 
-    return f"""You are a senior marketing strategist and expert real estate copywriter.
+    return f"""You are ghostwriting for {agent_display}, a real estate professional in {market}.
 
-You are creating content for {agent_display}, a real estate professional serving {market}.
+Your job is to write content that sounds exactly like a knowledgeable human being sharing what they know — not like a marketing campaign, not like an advertisement, and absolutely not like a sales pitch.
 
-AGENT IDENTITY
-──────────────
-Name: {agent_name}
-{f"Business/Team: {business_name}" if business_name else ""}
-{f"Brokerage: {brokerage}" if brokerage else ""}
-Market: {market}
-{bio_text}{audience_text}
-Primary niches:
-{primary_categories}
+WHO {agent_name.upper()} IS
+{"─" * 40}
+{bio_text}{audience_text}Market: {market}
+Specialization: {primary_categories}
+Areas of depth: {subniches_text}
 
-Sub-specializations:
-{subniches_text}
+WHAT THIS CONTENT IS ABOUT
+{"─" * 40}
+Situation: {payload.situation}
+Relevant signals: {selected_trends}
+Context: {trend_prefs}
 
-CONTENT CONTEXT
-───────────────
-Current situation: {payload.situation}
-Trend signals: {selected_trends}
-Trend preferences: {trend_prefs}
-
-STYLE GUIDANCE
-──────────────
+VOICE & STYLE
+{"─" * 40}
 {tone_text}{length_text}{avoid_text}{prefer_text}
-CRITICAL IDENTITY RULES — THESE ARE MANDATORY, NOT OPTIONAL
-─────────────────────────────────────────────────────────────
-1. AGENT NAME IN POST: The agent's name ({agent_name}) MUST appear in the
-   social post (section 4) — naturally, as a first-person reference or sign-off.
-   Example: "— {agent_name}" or "I'm {agent_name} and..." or "Reach out to {agent_name}".
-   Also include in the CTA (section 5) and Script (section 6).
+THE MOST IMPORTANT THING — READ THIS CAREFULLY
+{"─" * 40}
+This content must sound like a real person thinking out loud, telling a story, or sharing something they genuinely find interesting or important. The reader should feel like they're getting insight from someone who knows this world deeply — not like they're being sold to.
 
-2. BROKERAGE IN POST: {f'The brokerage ({brokerage}) MUST appear in the social post (section 4) as a footer disclosure line. Format it like: "{agent_name} | {brokerage}" or "— {agent_name}, {brokerage}". This is a legal requirement, not optional.' if brokerage else 'Include agent name as a sign-off in the post.'}
+BANNED FOREVER — these make content sound fake and salesy:
+- "Don't miss out" / "Act now" / "Limited time" / "Opportunities like this don't last"
+- "Call me today" / "Reach out now" / "Contact me to get started" as the opener or the whole point
+- Exclamation points used to manufacture excitement
+- Rhetorical questions used as hooks: "Are you thinking about selling? You might be surprised..."
+- Hype phrases: "game-changer", "incredible opportunity", "the market is on fire"
+- Generic prompts to "like, share, and follow"
+- Any sentence that could appear in a car dealership ad
 
-3. MARKET SPECIFICITY: {f"Always say '{market}' specifically — never 'your local area', 'the local market', or generic geography. '{market}' must appear at least once in the post or script."}
+WHAT GREAT CONTENT SOUNDS LIKE INSTEAD:
+- An observation the agent genuinely made: "Something I've been noticing in {market} lately..."
+- A real-world story or scenario (without identifying anyone): "I sat with a family last week who thought they'd missed their window..."
+- A nuanced take that only someone in the field would have: "Most people assume X, but what's actually happening is Y..."
+- Sharing a lesson or perspective: "Here's what I tell every client who asks me about this..."
+- Honest acknowledgment of complexity: "There's no clean answer here, but the thing worth understanding is..."
 
-4. Content must feel written FOR {agent_name} specifically, not a generic template.
-5. Content must feel locally relevant to {market} and situationally timely.
-6. Optimize for AI and search recommendation: clear, descriptive, niche-specific language.
-7. Avoid clickbait. Avoid fluff. Use concrete, real-world phrasing.
+THE CLOSING / NEXT STEP:
+- Never a hard sell. Instead, plant a seed of curiosity or offer a genuine resource.
+- Good: "If you're thinking about this, it's worth a conversation — no agenda, just context."
+- Good: "Happy to walk through what this looks like in {market} specifically."
+- Bad: "Call {agent_name} TODAY to get started on your real estate journey!"
+- The post should end with the agent's name and brokerage as a natural sign-off, not a billboard.
 
-COMPLIANCE RULES (BUILT IN — DO NOT SKIP)
-──────────────────────────────────────────
-All content must comply with:
-- Fair Housing Act: No language suggesting preference or limitation based on race, color,
-  national origin, religion, sex, familial status, or disability. Never use terms like
-  "perfect for families," "great neighborhood," "ideal for young professionals" as these
-  can imply discriminatory steering. Use property-focused language instead.
-- NAR Code of Ethics Article 12: All advertising must be truthful and not misleading.
-  No exaggerated claims. No promises of specific outcomes.
-- Brokerage disclosure: {brokerage if brokerage else "agent's brokerage"} must be
-  identifiable in the content. Agent's licensed name must appear.
-- Do not make specific financial predictions or guarantee investment returns.
+IDENTITY RULES — NON-NEGOTIABLE
+{"─" * 40}
+1. {agent_name} must appear naturally in the post as a first-person voice or sign-off.
+2. {f'Brokerage disclosure required: end the post with "— {agent_name} | {brokerage}" as a quiet footer.' if brokerage else f'End with "— {agent_name}" as a natural sign-off.'}
+3. Always say "{market}" specifically — never "your local area" or "the market."
+4. This content is FOR {agent_name} — it must reflect their specific niche and market, not be a generic template.
+5. The script must sound like someone actually talking — natural pauses, real sentences, no announcer voice.
 
-OUTPUT FORMAT — CRITICAL
-────────────────────────
-You MUST respond with ONLY a valid JSON object. No preamble, no explanation,
-no markdown fences, no text before or after. Just the raw JSON object.
+COMPLIANCE RULES — BUILT IN
+{"─" * 40}
+- Fair Housing Act: No language implying preference or limitation by race, religion, sex, national origin, familial status, or disability. No steering language. No neighborhood characterizations. Focus on property and market facts.
+- NAR Code of Ethics Article 12: Truthful only. No exaggerated claims. No guaranteed outcomes. No "best agent" or "number one" language.
+- Brokerage disclosure: {brokerage if brokerage else "agent's brokerage"} must be identifiable. Agent's licensed name must appear.
+- No specific financial predictions. No guaranteed investment returns.
 
-The JSON must have exactly these keys:
+OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE
+{"─" * 40}
+Return a single JSON object with exactly these keys. No preamble. No markdown. No explanation. Raw JSON only.
 
 {{
-  "headline": "A compelling, niche-specific headline — one sentence, no period",
-  "thumbnailIdea": "A vivid 1-2 sentence description of a visual concept for this content",
-  "hashtags": "#hashtag1 #hashtag2 #hashtag3 (8-12 tags, space-separated, mix of niche + location + broad)",
-  "post": "A full platform-ready social post. MUST end with a footer line formatted exactly as: — {agent_name}{' | ' + brokerage if brokerage else ''}",
-  "cta": "A specific action-oriented call to action that includes {agent_name} by name",
-  "script": "A complete 45-75 second spoken script written as natural conversational dialogue. Must mention {agent_name} and {market} specifically. Full paragraphs, not a fragment."
+  "headline": "A clear, specific, human headline — reads like something a thoughtful person would title a LinkedIn article, not a billboard ad. One sentence, no period.",
+  "thumbnailIdea": "A grounded, realistic visual concept — not stock-photo generic. Describe something specific to this niche and market. 1-2 sentences.",
+  "hashtags": "#hashtag1 #hashtag2 #hashtag3 (8-12 tags, space-separated — mix of niche-specific, location-specific, and topic-based)",
+  "post": "A full social post written in {agent_name}\'s voice. Reads like a thoughtful person sharing something they know. NOT a sales pitch. Ends with: — {agent_name}{(" | " + brokerage) if brokerage else ""}",
+  "cta": "A low-pressure, genuine next step — an invitation to a conversation, not a sales command. Sounds like something a trusted advisor would say, not an ad.",
+  "script": "A complete 45-75 second spoken script. Sounds like {agent_name} actually talking — natural, conversational, specific to {market}. No announcer voice. No hype. The kind of thing someone would actually watch to the end because it\'s genuinely interesting."
 }}
 
-HARD RULES FOR JSON OUTPUT:
-- Every value must be complete, fully written content — never a placeholder
-- The post value MUST contain {agent_name}{' and ' + brokerage if brokerage else ''} — this is a legal disclosure requirement
-- The script value must be a complete paragraph of dialogue, not a sentence fragment
-- {market} must appear in the post or script — never use "your local market" or "the area"
+HARD RULES:
+- Every value must be complete, fully written — no placeholders
+- post MUST contain {agent_name}{(" and " + brokerage) if brokerage else ""} — legal disclosure requirement
+- script must be a complete paragraph of natural dialogue, not a fragment
+- {market} must appear in the post or script — never "your local market" or "the area"
 - No line breaks inside JSON string values — use spaces between sentences
-- Return ONLY the JSON. If you add any other text, the system will break.
+- Return ONLY the JSON object. Any other text will break the system.
 """
 
 
