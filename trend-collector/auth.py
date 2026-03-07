@@ -183,7 +183,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if not user:
         raise HTTPException(status_code=401, detail="User not found.")
     if not user["is_active"]:
-        raise HTTPException(status_code=403, detail="Account disabled. Contact support.")
+        raise HTTPException(status_code=403, detail="Account disabled. Contact support@homebridgegroup.co")
     return user
 
 
@@ -236,7 +236,7 @@ def login(body: LoginRequest):
     if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     if not user["is_active"]:
-        raise HTTPException(status_code=403, detail="Account disabled. Contact support.")
+        raise HTTPException(status_code=403, detail="Account disabled. Contact support@homebridgegroup.co")
 
     token = create_token(user["id"], user["email"], user.get("role", "agent"))
     return {
