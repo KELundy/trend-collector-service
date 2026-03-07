@@ -112,29 +112,25 @@ def init_users_table():
 
 def get_user_by_email(email: str):
     conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE email = ?", (email.lower().strip(),))
     row = c.fetchone()
     conn.close()
     if not row:
         return None
-    cols = [d[0] for d in c.description]
-    conn.close()
-    d = dict(zip(cols, row))
-    return _normalize_user(d)
+    return _normalize_user(dict(row))
 
 def get_user_by_id(user_id: int):
     conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
     if not row:
         return None
-    cols = [d[0] for d in c.description]
-    conn.close()
-    d = dict(zip(cols, row))
-    return _normalize_user(d)
+    return _normalize_user(dict(row))
 
 def create_user(email: str, password: str, agent_name: str, brokerage: str,
                role: str = "agent", broker_id: int = None):
@@ -194,8 +190,15 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 def register(body: RegisterRequest):
     if not body.email or not body.password or not body.agent_name:
         raise HTTPException(status_code=400, detail="Email, password, and agent name are required.")
+    import re
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if not re.search(r"[A-Z]", body.password):
+        raise HTTPException(status_code=400, detail="Password must include at least one uppercase letter.")
+    if not re.search(r"[a-z]", body.password):
+        raise HTTPException(status_code=400, detail="Password must include at least one lowercase letter.")
+    if not re.search(r"[0-9]", body.password):
+        raise HTTPException(status_code=400, detail="Password must include at least one number.")
 
     # Resolve broker_id from office_code if provided
     broker_id  = None
