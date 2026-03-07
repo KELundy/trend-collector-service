@@ -33,9 +33,21 @@ def init_db():
             brokerage TEXT DEFAULT '',
             phone TEXT DEFAULT '',
             is_active INTEGER DEFAULT 1,
+            role TEXT DEFAULT 'agent',
+            broker_id INTEGER DEFAULT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Non-destructive migrations for existing deployments
+    for col, defn in [
+        ("role",      "TEXT DEFAULT 'agent'"),
+        ("broker_id", "INTEGER DEFAULT NULL"),
+        ("phone",     "TEXT DEFAULT ''"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
+        except Exception:
+            pass  # Column already exists
 
     # Trends
     c.execute("""
