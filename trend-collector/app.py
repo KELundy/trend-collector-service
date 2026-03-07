@@ -516,15 +516,26 @@ async def download_compliance_report(
     Includes every approved/published item, compliance verdicts,
     approval timestamps, and agent identity summary.
     """
-    pdf_bytes = generate_compliance_pdf(
-        user_id    = current_user["id"],
-        agent_name = current_user.get("agent_name", ""),
-        brokerage  = current_user.get("brokerage", ""),
-        email      = current_user.get("email", ""),
-        setup      = req.setup,
-        date_from  = req.date_from,
-        date_to    = req.date_to,
-    )
+    try:
+        pdf_bytes = generate_compliance_pdf(
+            user_id    = current_user["id"],
+            agent_name = current_user.get("agent_name", ""),
+            brokerage  = current_user.get("brokerage", ""),
+            email      = current_user.get("email", ""),
+            setup      = req.setup,
+            date_from  = req.date_from,
+            date_to    = req.date_to,
+        )
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation requires reportlab: {str(e)}. Check requirements.txt."
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {str(e)}"
+        )
 
     filename = f"HomeBridge_Compliance_Report_{current_user.get('agent_name','Agent').replace(' ','_')}.pdf"
 
