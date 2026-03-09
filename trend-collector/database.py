@@ -106,6 +106,19 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS demo_tokens (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            token       TEXT    NOT NULL UNIQUE,
+            label       TEXT    NOT NULL,
+            created_by  INTEGER NOT NULL,
+            created_at  TEXT    DEFAULT (datetime('now')),
+            open_count  INTEGER DEFAULT 0,
+            last_opened TEXT,
+            ip_log      TEXT    DEFAULT '[]'
+        )
+    """)
+
     conn.commit()
     conn.close()
 
