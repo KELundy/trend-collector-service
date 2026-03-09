@@ -472,6 +472,40 @@ def list_users(current_user=Depends(get_current_user)):
     ]
 
 
+@router.post("/admin/delete-user")
+def admin_delete_user(body: dict, current_user=Depends(get_current_user)):
+    """Permanently delete a user and all their data. Admin only."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(403, "Admin only.")
+    user_id = int(body.get("user_id") or 0)
+    if not user_id:
+        raise HTTPException(400, "user_id required.")
+    if user_id == current_user["id"]:
+        raise HTTPException(400, "You cannot delete your own account.")
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("SELECT id, agent_name FROM users WHERE id=?", (user_id,))
+    target = c.fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(404, "User not found.")
+    # Delete all associated data
+    for table, col in [
+        ("library_items",           "user_id"),
+        ("schedules",               "user_id"),
+        ("password_reset_tokens",   "user_id"),
+        ("office_invites",          "office_id"),
+    ]:
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE {col}=?", (user_id,))
+        except Exception:
+            pass  # Table may not exist yet — safe to skip
+    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": f"User deleted."}
+
+
 @router.post("/admin/set-role")
 def set_role(payload: dict, current_user=Depends(get_current_user)):
     """Promote/demote a user's role. Admin only."""
