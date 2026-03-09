@@ -35,6 +35,7 @@ class AgentProfileModel(BaseModel):
     wordsPrefer: Optional[str] = Field(None, description="Words or phrases to prefer")
     mlsNames: Optional[List[str]] = Field(default_factory=list, description="MLS memberships for compliance")
     serviceAreas: Optional[List[str]] = Field(default_factory=list, description="Neighborhoods or zip codes served")
+    designations: Optional[List[str]] = Field(default_factory=list, description="Professional designations held (ABR, CRS, GRI, etc.)")
 
 
 class ComplianceBadge(BaseModel):
@@ -130,6 +131,10 @@ def _build_content_prompt(payload: ContentRequest) -> str:
     bio_text     = f"About {agent_name}: {short_bio}\n" if short_bio else ""
     audience_text = f"Who reads this: {audience}\n" if audience else ""
 
+    # Build designations context
+    desig_list    = profile.designations or []
+    desig_context = f"Professional designations: {', '.join(desig_list)}." if desig_list else ""
+
     return f"""You are ghostwriting for {agent_display}, a real estate professional in {market}.
 
 Your job is to write content that sounds exactly like a knowledgeable human being sharing what they know — not like a marketing campaign, not like an advertisement, and absolutely not like a sales pitch.
@@ -137,6 +142,7 @@ Your job is to write content that sounds exactly like a knowledgeable human bein
 WHO {agent_name.upper()} IS
 {"─" * 40}
 {bio_text}{audience_text}Market: {market}
+{desig_context}
 Specialization: {primary_categories}
 Areas of depth: {subniches_text}
 
