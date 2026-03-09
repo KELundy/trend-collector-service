@@ -17,6 +17,51 @@ from typing import Optional
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ─────────────────────────────────────────────
+# STRIPE CONFIG
+# Graceful no-op when keys not yet configured
+# ─────────────────────────────────────────────
+STRIPE_SECRET_KEY     = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_ENABLED        = bool(STRIPE_SECRET_KEY)
+
+if STRIPE_ENABLED:
+    import stripe as _stripe
+    _stripe.api_key = STRIPE_SECRET_KEY
+else:
+    _stripe = None
+
+# Pricing tiers (as of launch):
+# Agent:          $99/mo  | $79/mo annual  ($948/yr)    — 1 seat
+# Office Starter: $299/mo | $249/mo annual ($2,988/yr)  — up to 5 agents
+# Office Growth:  $499/mo | $399/mo annual ($4,788/yr)  — up to 15 agents
+# Office Team:    $799/mo | $649/mo annual ($7,788/yr)  — up to 30 agents
+# Enterprise:     Custom, annual, NET-30
+STRIPE_PRICES = {
+    "agent_monthly":           os.getenv("STRIPE_PRICE_AGENT_MONTHLY",          ""),
+    "agent_annual":            os.getenv("STRIPE_PRICE_AGENT_ANNUAL",           ""),
+    "office_starter_monthly":  os.getenv("STRIPE_PRICE_OFFICE_STARTER_MONTHLY", ""),
+    "office_starter_annual":   os.getenv("STRIPE_PRICE_OFFICE_STARTER_ANNUAL",  ""),
+    "office_growth_monthly":   os.getenv("STRIPE_PRICE_OFFICE_GROWTH_MONTHLY",  ""),
+    "office_growth_annual":    os.getenv("STRIPE_PRICE_OFFICE_GROWTH_ANNUAL",   ""),
+    "office_team_monthly":     os.getenv("STRIPE_PRICE_OFFICE_TEAM_MONTHLY",    ""),
+    "office_team_annual":      os.getenv("STRIPE_PRICE_OFFICE_TEAM_ANNUAL",     ""),
+}
+
+# Seat limits enforced per office plan
+OFFICE_SEAT_LIMITS = {
+    "office_starter": 5,
+    "office_growth":  15,
+    "office_team":    30,
+}
+
+def get_seat_limit(plan: str) -> int:
+    """Max agent seats for plan. 0 = solo agent, -1 = enterprise/unlimited."""
+    for key, limit in OFFICE_SEAT_LIMITS.items():
+        if key in (plan or ""):
+            return limit
+    return 0
+
+# ─────────────────────────────────────────────
 # LOCAL IMPORTS
 # ─────────────────────────────────────────────
 from database import (
@@ -748,8 +793,12 @@ async def stripe_webhook(request: Request):
     if etype == "checkout.session.completed":
         hb_uid    = int(obj.get("metadata", {}).get("hb_user_id", 0) or 0)
         price_key = obj.get("metadata", {}).get("price_key", "agent_monthly")
-        plan      = "office" if "office" in price_key else "agent"
-        cycle     = "annual"  if "annual"  in price_key else "monthly"
+        if   "office_team"    in price_key: plan = "office_team"
+        elif "office_growth"  in price_key: plan = "office_growth"
+        elif "office_starter" in price_key: plan = "office_starter"
+        elif "office"         in price_key: plan = "office_starter"
+        else:                               plan = "agent"
+        cycle = "annual" if "annual" in price_key else "monthly"
         if hb_uid:
             activate_subscription(hb_uid, plan, cycle,
                                    obj.get("customer", ""),
