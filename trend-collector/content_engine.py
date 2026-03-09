@@ -36,6 +36,7 @@ class AgentProfileModel(BaseModel):
     mlsNames: Optional[List[str]] = Field(default_factory=list, description="MLS memberships for compliance")
     serviceAreas: Optional[List[str]] = Field(default_factory=list, description="Neighborhoods or zip codes served")
     designations: Optional[List[str]] = Field(default_factory=list, description="Professional designations held (ABR, CRS, GRI, etc.)")
+    languagePref: Optional[str] = Field("english", description="Content language: english | spanish | bilingual")
 
 
 class ComplianceBadge(BaseModel):
@@ -135,6 +136,15 @@ def _build_content_prompt(payload: ContentRequest) -> str:
     desig_list    = profile.designations or []
     desig_context = f"Professional designations: {', '.join(desig_list)}." if desig_list else ""
 
+    # Build language instruction
+    lang_pref = (profile.languagePref or "english").lower()
+    if lang_pref == "spanish":
+        lang_instruction = "LANGUAGE: Write ALL content entirely in Spanish (Latin American Spanish). Every field — post, headline, CTA, hashtags, script — must be in Spanish only."
+    elif lang_pref == "bilingual":
+        lang_instruction = "LANGUAGE: Write BILINGUAL content. For the post, headline, CTA, and script fields, provide the English version first, then a horizontal rule (---), then the full Spanish translation. Label them clearly: [English] and [Español]. Hashtags in both languages."
+    else:
+        lang_instruction = ""
+
     return f"""You are ghostwriting for {agent_display}, a real estate professional in {market}.
 
 Your job is to write content that sounds exactly like a knowledgeable human being sharing what they know — not like a marketing campaign, not like an advertisement, and absolutely not like a sales pitch.
@@ -143,6 +153,7 @@ WHO {agent_name.upper()} IS
 {"─" * 40}
 {bio_text}{audience_text}Market: {market}
 {desig_context}
+{lang_instruction}
 Specialization: {primary_categories}
 Areas of depth: {subniches_text}
 
