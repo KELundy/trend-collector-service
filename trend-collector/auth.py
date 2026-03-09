@@ -217,6 +217,13 @@ def register(body: RegisterRequest):
     if not user:
         raise HTTPException(status_code=409, detail="An account with that email already exists.")
 
+    # Start 14-day trial automatically
+    try:
+        from database import set_trial
+        set_trial(user["id"], days=14)
+    except Exception:
+        pass
+
     token = create_token(user["id"], user["email"], user["role"])
     return {
         "token": token,
