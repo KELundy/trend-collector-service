@@ -40,9 +40,15 @@ def init_db():
     """)
     # Non-destructive migrations for existing deployments
     for col, defn in [
-        ("role",      "TEXT DEFAULT 'agent'"),
-        ("broker_id", "INTEGER DEFAULT NULL"),
-        ("phone",     "TEXT DEFAULT ''"),
+        ("role",           "TEXT DEFAULT 'agent'"),
+        ("broker_id",      "INTEGER DEFAULT NULL"),
+        ("phone",          "TEXT DEFAULT ''"),
+        ("plan",           "TEXT DEFAULT 'trial'"),
+        ("billing_cycle",  "TEXT DEFAULT 'monthly'"),
+        ("sub_status",     "TEXT DEFAULT 'trial'"),
+        ("trial_ends_at",  "TEXT DEFAULT NULL"),
+        ("stripe_customer_id",     "TEXT DEFAULT NULL"),
+        ("stripe_subscription_id", "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -1192,3 +1198,98 @@ def get_broker_office_stats(broker_id: int) -> list:
 
     conn.close()
     return results
+
+
+# ─────────────────────────────────────────────
+# BILLING / SUBSCRIPTION HELPERS
+# ─────────────────────────────────────────────
+
+def get_subscription_status(user_id: int) -> dict:
+    """Returns current subscription state for a user."""
+    from datetime import datetime
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT plan, billing_cycle, sub_status, trial_ends_at,
+               stripe_customer_id, stripe_subscription_id
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"status": "unknown"}
+
+    status       = row["sub_status"] or "trial"
+    trial_ends   = row["trial_ends_at"]
+    plan         = row["plan"] or "trial"
+
+    # Check if trial has expired
+    if status == "trial" and trial_ends:
+        try:
+            ends_dt = datetime.fromisoformat(trial_ends)
+            if datetime.utcnow() > ends_dt:
+                status = "expired"
+                # Update DB
+                conn2 = get_conn()
+                conn2.execute(
+                    "UPDATE users SET sub_status=? WHERE id=?",
+                    ("expired", user_id)
+                )
+                conn2.commit()
+                conn2.close()
+        except Exception:
+            pass
+
+    days_left = None
+    if status == "trial" and trial_ends:
+        try:
+            ends_dt   = datetime.fromisoformat(trial_ends)
+            delta     = ends_dt - datetime.utcnow()
+            days_left = max(0, delta.days)
+        except Exception:
+            pass
+
+    return {
+        "status":       status,
+        "plan":         plan,
+        "billing_cycle": row["billing_cycle"] or "monthly",
+        "trial_ends_at": trial_ends,
+        "days_left":    days_left,
+        "stripe_customer_id":     row["stripe_customer_id"],
+        "stripe_subscription_id": row["stripe_subscription_id"],
+    }
+
+def set_trial(user_id: int, days: int = 14):
+    """Start a 14-day trial for a new user."""
+    from datetime import datetime, timedelta
+    trial_ends = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    conn = get_conn()
+    conn.execute("""
+        UPDATE users SET plan='trial', sub_status='trial', trial_ends_at=?
+        WHERE id=?
+    """, (trial_ends, user_id))
+    conn.commit()
+    conn.close()
+
+def activate_subscription(user_id: int, plan: str, billing_cycle: str,
+                           stripe_customer_id: str, stripe_subscription_id: str):
+    """Called by Stripe webhook when subscription activates."""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE users SET
+            plan=?, billing_cycle=?, sub_status='active',
+            stripe_customer_id=?, stripe_subscription_id=?
+        WHERE id=?
+    """, (plan, billing_cycle, stripe_customer_id, stripe_subscription_id, user_id))
+    conn.commit()
+    conn.close()
+
+def cancel_subscription(user_id: int):
+    """Called by Stripe webhook on cancellation."""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE users SET sub_status='cancelled', stripe_subscription_id=NULL
+        WHERE id=?
+    """, (user_id,))
+    conn.commit()
+    conn.close()
