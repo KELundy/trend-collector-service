@@ -17,6 +17,35 @@ security = HTTPBearer()
 
 DB_NAME = os.getenv("DB_PATH", "/data/homebridge.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
+
+# ── SendGrid config (graceful no-op if not configured) ──
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+SENDGRID_FROM    = os.getenv("SENDGRID_FROM_EMAIL", "noreply@homebridgegroup.co")
+FRONTEND_URL     = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
+SENDGRID_ENABLED = bool(SENDGRID_API_KEY)
+
+def send_email(to_email: str, subject: str, html_body: str) -> bool:
+    """Send email via SendGrid. Silent no-op if not configured."""
+    if not SENDGRID_ENABLED:
+        print(f"[EMAIL QUEUED — SendGrid not configured] To: {to_email} | Subject: {subject}")
+        return False
+    try:
+        import httpx
+        res = httpx.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": SENDGRID_FROM, "name": "HomeBridge"},
+                "subject": subject,
+                "content": [{"type": "text/html", "value": html_body}],
+            },
+            timeout=10,
+        )
+        return res.status_code in (200, 202)
+    except Exception as e:
+        print(f"[EMAIL ERROR] {e}")
+        return False
 JWT_EXPIRY_DAYS = 30
 
 
@@ -260,6 +289,79 @@ def login(body: LoginRequest):
             "broker_id":  user.get("broker_id", None),
         }
     }
+
+
+@router.post("/forgot-password")
+def forgot_password(body: dict):
+    """Always returns 200 — never reveals whether email exists (security best practice)."""
+    from database import create_reset_token
+    email = (body.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "Email is required.")
+    user = get_user_by_email(email)
+    if user and user.get("is_active"):
+        token     = create_reset_token(user["id"])
+        reset_url = f"{FRONTEND_URL}/login.html?reset={token}"
+        html_body = f"""
+        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;">
+          <div style="font-size:18px;font-weight:700;color:#0f0f0d;margin-bottom:4px;">Home<span style="color:#1749c9;">Bridge</span></div>
+          <hr style="border:none;border-top:1px solid #e8e7e0;margin:16px 0;" />
+          <p style="color:#0f0f0d;font-size:15px;font-weight:600;margin-bottom:8px;">Reset your password</p>
+          <p style="color:#787870;font-size:14px;line-height:1.6;margin-bottom:24px;">
+            We received a request to reset the password for your HomeBridge account.
+            Click the button below to choose a new password. This link expires in 1 hour.
+          </p>
+          <a href="{reset_url}"
+             style="display:inline-block;background:#1749c9;color:#fff;font-weight:600;
+                    font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none;">
+            Reset My Password
+          </a>
+          <p style="color:#b0afa6;font-size:12px;margin-top:24px;line-height:1.5;">
+            If you didn't request this, you can safely ignore this email.<br/>
+            Your password won't change until you click the link above.
+          </p>
+          <hr style="border:none;border-top:1px solid #e8e7e0;margin:24px 0 16px;" />
+          <p style="color:#b0afa6;font-size:11px;">HomeBridge &middot; Professional Identity Infrastructure</p>
+        </div>
+        """
+        send_email(email, "Reset your HomeBridge password", html_body)
+    return {"ok": True, "message": "If that email is registered, a reset link is on its way."}
+
+
+@router.post("/reset-password")
+def reset_password_endpoint(body: dict):
+    """Validates reset token and updates password."""
+    import re
+    from database import validate_reset_token, consume_reset_token, update_password
+    token        = (body.get("token") or "").strip()
+    new_password = body.get("password") or ""
+    if not token:
+        raise HTTPException(400, "Reset token is required.")
+    if len(new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters.")
+    if not re.search(r"[A-Z]", new_password):
+        raise HTTPException(400, "Password must include at least one uppercase letter.")
+    if not re.search(r"[a-z]", new_password):
+        raise HTTPException(400, "Password must include at least one lowercase letter.")
+    if not re.search(r"[0-9]", new_password):
+        raise HTTPException(400, "Password must include at least one number.")
+    row = validate_reset_token(token)
+    if not row:
+        raise HTTPException(400, "This reset link is invalid or has expired. Please request a new one.")
+    hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    update_password(row["user_id"], hashed)
+    consume_reset_token(token)
+    return {"ok": True, "message": "Password updated. You can now sign in with your new password."}
+
+
+@router.get("/validate-reset-token")
+def validate_reset_token_endpoint(token: str):
+    """Quick check — is reset token valid? Called when user lands on reset page."""
+    from database import validate_reset_token
+    row = validate_reset_token(token)
+    if not row:
+        raise HTTPException(400, "This reset link is invalid or has expired.")
+    return {"ok": True, "email": row["email"], "name": row["agent_name"]}
 
 
 @router.get("/me")
