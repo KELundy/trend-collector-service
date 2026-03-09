@@ -1293,3 +1293,85 @@ def cancel_subscription(user_id: int):
     """, (user_id,))
     conn.commit()
     conn.close()
+
+# ─────────────────────────────────────────────
+# PASSWORD RESET HELPERS
+# ─────────────────────────────────────────────
+
+def init_reset_tokens_table():
+    """Create password_reset_tokens table if not exists."""
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            token      TEXT    UNIQUE NOT NULL,
+            expires_at TEXT    NOT NULL,
+            used       INTEGER DEFAULT 0,
+            created_at TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def create_reset_token(user_id: int) -> str:
+    """Generate a secure reset token valid for 1 hour. Returns the token."""
+    import secrets
+    from datetime import datetime, timedelta
+    init_reset_tokens_table()
+    # Invalidate any existing unused tokens for this user
+    conn = get_conn()
+    conn.execute(
+        "UPDATE password_reset_tokens SET used=1 WHERE user_id=? AND used=0",
+        (user_id,)
+    )
+    token      = secrets.token_urlsafe(32)
+    expires_at = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+    conn.execute(
+        "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (?,?,?)",
+        (user_id, token, expires_at)
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+def validate_reset_token(token: str) -> dict | None:
+    """
+    Validates a reset token. Returns user row if valid, None if not.
+    Does NOT mark token as used — call consume_reset_token after password update.
+    """
+    from datetime import datetime
+    init_reset_tokens_table()
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT rt.user_id, rt.expires_at, u.email, u.agent_name
+        FROM password_reset_tokens rt
+        JOIN users u ON u.id = rt.user_id
+        WHERE rt.token=? AND rt.used=0
+    """, (token,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+            return None
+    except Exception:
+        return None
+    return dict(row)
+
+def consume_reset_token(token: str):
+    """Mark token as used after successful password reset."""
+    init_reset_tokens_table()
+    conn = get_conn()
+    conn.execute("UPDATE password_reset_tokens SET used=1 WHERE token=?", (token,))
+    conn.commit()
+    conn.close()
+
+def update_password(user_id: int, new_password_hash: str):
+    """Update user's password hash."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET password_hash=? WHERE id=?", (new_password_hash, user_id))
+    conn.commit()
+    conn.close()
