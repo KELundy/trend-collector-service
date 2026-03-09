@@ -64,6 +64,7 @@ def get_seat_limit(plan: str) -> int:
 # ─────────────────────────────────────────────
 # LOCAL IMPORTS
 # ─────────────────────────────────────────────
+import database
 from database import (
     init_db, save_trends, get_latest_trends,
     migrate_add_niche_column,
