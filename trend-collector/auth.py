@@ -482,7 +482,8 @@ def admin_delete_user(body: dict, current_user=Depends(get_current_user)):
         raise HTTPException(400, "user_id required.")
     if user_id == current_user["id"]:
         raise HTTPException(400, "You cannot delete your own account.")
-    conn = get_conn()
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
     c    = conn.cursor()
     c.execute("SELECT id, agent_name FROM users WHERE id=?", (user_id,))
     target = c.fetchone()
