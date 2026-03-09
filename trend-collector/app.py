@@ -666,6 +666,105 @@ async def invite_agent(request: Request, current_user=Depends(get_current_user))
     conn.close()
     return {"ok": True, "message": f"Invite queued for {name} ({email})"}
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BILLING / STRIPE ENDPOINTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def check_paywall(user: dict):
+    """Call at top of content-generating endpoints. No-op until Stripe is live."""
+    if not STRIPE_ENABLED:
+        return
+    sub = get_subscription_status(user["id"])
+    if sub.get("status") == "expired":
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "subscription_expired",
+                "message": "Your 14-day trial has ended. Subscribe to continue.",
+                "upgrade_url": "/billing/create-checkout"
+            }
+        )
+
+@app.get("/billing/status")
+async def billing_status(current_user=Depends(get_current_user)):
+    return get_subscription_status(current_user["id"])
+
+@app.post("/billing/create-checkout")
+async def create_checkout(request: Request, current_user=Depends(get_current_user)):
+    if not STRIPE_ENABLED:
+        raise HTTPException(503, "Billing not yet configured — check back soon.")
+    body      = await request.json()
+    price_key = body.get("price_key", "agent_monthly")
+    price_id  = STRIPE_PRICES.get(price_key, "")
+    if not price_id:
+        raise HTTPException(400, f"Unknown plan key: {price_key}")
+    sub_data    = get_subscription_status(current_user["id"])
+    customer_id = sub_data.get("stripe_customer_id")
+    if not customer_id:
+        customer    = _stripe.Customer.create(
+            email=current_user["email"],
+            name=current_user.get("agent_name", ""),
+            metadata={"hb_user_id": str(current_user["id"])}
+        )
+        customer_id = customer.id
+    session = _stripe.checkout.Session.create(
+        customer=customer_id,
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}?billing=success",
+        cancel_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}?billing=cancelled",
+        metadata={"hb_user_id": str(current_user["id"]), "price_key": price_key},
+        allow_promotion_codes=True,
+    )
+    return {"checkout_url": session.url}
+
+@app.post("/billing/portal")
+async def billing_portal(current_user=Depends(get_current_user)):
+    if not STRIPE_ENABLED:
+        raise HTTPException(503, "Billing not yet configured.")
+    sub_data    = get_subscription_status(current_user["id"])
+    customer_id = sub_data.get("stripe_customer_id")
+    if not customer_id:
+        raise HTTPException(400, "No billing account yet. Please subscribe first.")
+    session = _stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}",
+    )
+    return {"portal_url": session.url}
+
+@app.post("/billing/webhook")
+async def stripe_webhook(request: Request):
+    if not STRIPE_ENABLED:
+        return {"ok": True}
+    payload    = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    try:
+        event = _stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        raise HTTPException(400, f"Webhook error: {e}")
+    etype = event["type"]
+    obj   = event["data"]["object"]
+    if etype == "checkout.session.completed":
+        hb_uid    = int(obj.get("metadata", {}).get("hb_user_id", 0) or 0)
+        price_key = obj.get("metadata", {}).get("price_key", "agent_monthly")
+        plan      = "office" if "office" in price_key else "agent"
+        cycle     = "annual"  if "annual"  in price_key else "monthly"
+        if hb_uid:
+            activate_subscription(hb_uid, plan, cycle,
+                                   obj.get("customer", ""),
+                                   obj.get("subscription", ""))
+    elif etype in ("customer.subscription.deleted", "customer.subscription.paused"):
+        cust_id = obj.get("customer", "")
+        conn = database.get_conn()
+        c    = conn.cursor()
+        c.execute("SELECT id FROM users WHERE stripe_customer_id=?", (cust_id,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            cancel_subscription(row["id"])
+    return {"ok": True}
+
 @app.get("/broker/office-stats")
 async def broker_office_stats(current_user = Depends(get_current_user)):
     """
