@@ -630,6 +630,42 @@ async def validate_demo_token(token: str, request: Request):
     conn.close()
     return {"valid": True, "message": "Demo access granted"}
 
+
+@app.post("/office/invite")
+async def invite_agent(request: Request, current_user=Depends(get_current_user)):
+    if current_user.get("role") not in ("broker", "admin"):
+        raise HTTPException(403, "Office managers only")
+    body  = await request.json()
+    name  = (body.get("name")  or "").strip()
+    email = (body.get("email") or "").strip()
+    if not name or not email:
+        raise HTTPException(400, "Name and email required")
+    # Store invite in DB (email sending activates with SendGrid)
+    conn = database.get_conn()
+    c    = conn.cursor()
+    # Reuse demo_tokens table pattern — store as pending invite
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS office_invites (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                office_id   INTEGER NOT NULL,
+                name        TEXT    NOT NULL,
+                email       TEXT    NOT NULL,
+                invited_at  TEXT    DEFAULT (datetime('now')),
+                status      TEXT    DEFAULT 'pending'
+            )
+        """)
+        c.execute(
+            "INSERT INTO office_invites (office_id, name, email) VALUES (?,?,?)",
+            (current_user["id"], name, email)
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(500, f"Could not store invite: {e}")
+    conn.close()
+    return {"ok": True, "message": f"Invite queued for {name} ({email})"}
+
 @app.get("/broker/office-stats")
 async def broker_office_stats(current_user = Depends(get_current_user)):
     """
