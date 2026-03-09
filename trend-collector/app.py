@@ -559,7 +559,8 @@ import secrets, json as _json
 from datetime import datetime as _dt
 
 @app.post("/demo/create-token")
-async def create_demo_token(request: Request, user=Depends(require_admin)):
+async def create_demo_token(request: Request, user=Depends(get_current_user)):
+    if user.get("role") != "admin": raise HTTPException(403, "Admin only")
     body = await request.json()
     label = (body.get("label") or "").strip()
     if not label:
@@ -576,7 +577,8 @@ async def create_demo_token(request: Request, user=Depends(require_admin)):
     return {"token": token, "label": label}
 
 @app.get("/demo/tokens")
-async def list_demo_tokens(user=Depends(require_admin)):
+async def list_demo_tokens(user=Depends(get_current_user)):
+    if user.get("role") != "admin": raise HTTPException(403, "Admin only")
     conn = database.get_conn()
     c = conn.cursor()
     c.execute("SELECT id, token, label, created_at, open_count, last_opened, ip_log FROM demo_tokens ORDER BY created_at DESC")
@@ -588,7 +590,8 @@ async def list_demo_tokens(user=Depends(require_admin)):
     return {"tokens": rows}
 
 @app.delete("/demo/tokens/{token_id}")
-async def delete_demo_token(token_id: int, user=Depends(require_admin)):
+async def delete_demo_token(token_id: int, user=Depends(get_current_user)):
+    if user.get("role") != "admin": raise HTTPException(403, "Admin only")
     conn = database.get_conn()
     c = conn.cursor()
     c.execute("DELETE FROM demo_tokens WHERE id=?", (token_id,))
