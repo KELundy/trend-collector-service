@@ -543,13 +543,30 @@ def calculate_identity_score(user_id: int, setup: dict) -> dict:
     niches         = niches_raw if isinstance(niches_raw, list) else []
     niche_pts      = 6  if len(niches) >= 2 else (3 if len(niches) == 1 else 0)
 
-    foundation = name_pts + market_pts + bio_pts + voice_pts + niche_pts
+    # Designations — up to 8 pts (2 per designation, max 4 designations)
+    desig_raw  = setup.get("designations", [])
+    desig_list = desig_raw if isinstance(desig_raw, list) else []
+    desig_pts  = min(len(desig_list) * 2, 8)
+
+    # Disclaimer filled — 4 pts (required for full compliance credibility)
+    disclaimer     = setup.get("disclaimer", "") or ""
+    disclaimer_pts = 4 if len(disclaimer.strip()) > 20 else 0
+
+    # Service areas — up to 4 pts (1 per area, max 4)
+    areas_raw  = setup.get("serviceAreas", [])
+    areas_list = areas_raw if isinstance(areas_raw, list) else []
+    areas_pts  = min(len(areas_list), 4)
+
+    foundation = name_pts + market_pts + bio_pts + voice_pts + niche_pts + desig_pts + disclaimer_pts + areas_pts
     foundation_breakdown = {
-        "name":   {"pts": name_pts,   "max": 5,  "label": "Name"},
-        "market": {"pts": market_pts, "max": 5,  "label": "Market"},
-        "bio":    {"pts": bio_pts,    "max": 8,  "label": "Bio"},
-        "voice":  {"pts": voice_pts,  "max": 6,  "label": "Brand Voice"},
-        "niches": {"pts": niche_pts,  "max": 6,  "label": "Niches"},
+        "name":        {"pts": name_pts,       "max": 5,  "label": "Name"},
+        "market":      {"pts": market_pts,      "max": 5,  "label": "Primary Market"},
+        "bio":         {"pts": bio_pts,         "max": 8,  "label": "Bio"},
+        "voice":       {"pts": voice_pts,       "max": 6,  "label": "Brand Voice"},
+        "niches":      {"pts": niche_pts,       "max": 6,  "label": "Niches"},
+        "designations":{"pts": desig_pts,       "max": 8,  "label": "Professional Designations"},
+        "disclaimer":  {"pts": disclaimer_pts,  "max": 4,  "label": "Broker Disclaimer"},
+        "areas":       {"pts": areas_pts,       "max": 4,  "label": "Service Areas"},
     }
 
     # ── PILLAR 2: Integrity (25 pts) ──
