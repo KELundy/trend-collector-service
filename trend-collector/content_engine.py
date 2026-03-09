@@ -34,6 +34,7 @@ class AgentProfileModel(BaseModel):
     wordsAvoid: Optional[str] = Field(None, description="Words or phrases to avoid")
     wordsPrefer: Optional[str] = Field(None, description="Words or phrases to prefer")
     mlsNames: Optional[List[str]] = Field(default_factory=list, description="MLS memberships for compliance")
+    serviceAreas: Optional[List[str]] = Field(default_factory=list, description="Neighborhoods or zip codes served")
 
 
 class ComplianceBadge(BaseModel):
@@ -94,7 +95,12 @@ def _build_content_prompt(payload: ContentRequest) -> str:
     agent_name    = profile.agentName    or "the agent"
     business_name = profile.businessName or ""
     brokerage     = profile.brokerage    or ""
-    market        = profile.market       or "their local market"
+    base_market   = profile.market       or "their local market"
+    service_areas = profile.serviceAreas or []
+    if service_areas:
+        market = f"{base_market} (serving: {', '.join(service_areas)})"
+    else:
+        market = base_market
     brand_voice   = profile.brandVoice   or "conversational and genuine"
     short_bio     = profile.shortBio     or ""
     audience      = profile.audienceDescription or ""
