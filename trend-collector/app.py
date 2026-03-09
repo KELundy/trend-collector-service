@@ -550,6 +550,83 @@ async def download_compliance_report(
 # BROKER OFFICE STATS
 # ─────────────────────────────────────────────
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DEMO TOKEN ENDPOINTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+import secrets, json as _json
+from datetime import datetime as _dt
+
+@app.post("/demo/create-token")
+async def create_demo_token(request: Request, user=Depends(require_admin)):
+    body = await request.json()
+    label = (body.get("label") or "").strip()
+    if not label:
+        raise HTTPException(400, "Label required")
+    token = "tk_" + secrets.token_urlsafe(10)
+    conn = database.get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO demo_tokens (token, label, created_by) VALUES (?,?,?)",
+        (token, label, user["id"])
+    )
+    conn.commit()
+    conn.close()
+    return {"token": token, "label": label}
+
+@app.get("/demo/tokens")
+async def list_demo_tokens(user=Depends(require_admin)):
+    conn = database.get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, token, label, created_at, open_count, last_opened, ip_log FROM demo_tokens ORDER BY created_at DESC")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    for r in rows:
+        try: r["ip_log"] = _json.loads(r["ip_log"] or "[]")
+        except: r["ip_log"] = []
+    return {"tokens": rows}
+
+@app.delete("/demo/tokens/{token_id}")
+async def delete_demo_token(token_id: int, user=Depends(require_admin)):
+    conn = database.get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM demo_tokens WHERE id=?", (token_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.get("/demo/validate")
+async def validate_demo_token(token: str, request: Request):
+    """Public endpoint — validates demo token and logs the access."""
+    if not token or not token.startswith("tk_"):
+        raise HTTPException(403, "Invalid demo token")
+    conn = database.get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, ip_log, open_count FROM demo_tokens WHERE token=?", (token,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(403, "Demo token not found or expired")
+    # Log IP
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    try:
+        ip_log = _json.loads(row["ip_log"] or "[]")
+    except:
+        ip_log = []
+    if client_ip not in ip_log:
+        ip_log.append(client_ip)
+    c.execute(
+        "UPDATE demo_tokens SET open_count=open_count+1, last_opened=?, ip_log=? WHERE id=?",
+        (_dt.utcnow().isoformat(), _json.dumps(ip_log), row["id"])
+    )
+    conn.commit()
+    conn.close()
+    return {"valid": True, "message": "Demo access granted"}
+
 @app.get("/broker/office-stats")
 async def broker_office_stats(current_user = Depends(get_current_user)):
     """
