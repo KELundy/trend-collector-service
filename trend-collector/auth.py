@@ -278,15 +278,20 @@ def login(body: LoginRequest):
         raise HTTPException(status_code=403, detail="Account disabled. Contact support@homebridgegroup.co")
 
     token = create_token(user["id"], user["email"], user.get("role", "agent"))
+    # Determine if this is a new user (no setup data saved yet)
+    from database import get_agent_setup
+    existing_setup = get_agent_setup(user["id"])
+    is_new = not bool(existing_setup)
     return {
         "token": token,
         "user": {
-            "id":         user["id"],
-            "email":      user["email"],
-            "agent_name": user["agent_name"],
-            "brokerage":  user["brokerage"],
-            "role":       user.get("role", "agent"),
-            "broker_id":  user.get("broker_id", None),
+            "id":          user["id"],
+            "email":       user["email"],
+            "agent_name":  user["agent_name"],
+            "brokerage":   user["brokerage"],
+            "role":        user.get("role", "agent"),
+            "broker_id":   user.get("broker_id", None),
+            "is_new_user": is_new,
         }
     }
 
