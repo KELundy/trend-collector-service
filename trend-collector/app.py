@@ -869,4 +869,21 @@ async def broker_agent_report(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
+# ── TEMPORARY ADMIN RESET — REMOVE AFTER USE ──
+@app.get("/auth/emergency-reset")
+def emergency_reset():
+    import bcrypt
+    from database import get_db
+    conn = get_db()
+    c = conn.cursor()
+    new_pw = "HomeBridge2026!"
+    hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    c.execute("UPDATE users SET password_hash=?, is_active=1, role='admin' WHERE email='kevin@kevinlundy.net'", (hashed,))
+    conn.commit()
+    c.execute("SELECT id, email, role, is_active FROM users WHERE email='kevin@kevinlundy.net'")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"status": "ok", "message": f"Password reset. Login: kevin@kevinlundy.net / {new_pw}", "user": dict(row)}
+    return {"status": "error", "message": "User not found — check DB"}
 
