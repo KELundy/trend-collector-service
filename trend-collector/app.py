@@ -128,9 +128,9 @@ async def admin_recover(secret: str = ""):
     if secret != "HB-RECOVER-2026":
         raise HTTPException(status_code=403, detail="Invalid secret")
     try:
-        # Use auth module's own hash function — same one used at registration
-        from auth import get_password_hash
-        new_hash = get_password_hash("HomeBridge2026!")
+        # Hash using bcrypt directly — same library auth.py uses underneath
+        import bcrypt as _bcrypt
+        new_hash = _bcrypt.hashpw("HomeBridge2026!".encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
         conn = sqlite3.connect(DB_NAME)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
