@@ -156,31 +156,25 @@ async def emergency_reset(secret: str = ""):
         raise HTTPException(status_code=403, detail="Forbidden")
     import bcrypt, sqlite3
     db_path = os.environ.get("DATABASE_PATH", "/data/homebridge.db")
-    new_pw   = "HomeBridge2026!"
-    hashed   = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    new_pw  = "HomeBridge2026!"
+    hashed  = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    # Find kevin by email
-    c.execute("SELECT id, email, is_active, role FROM users WHERE email = ?", ("kevin@kevinlundy.net",))
-    user = c.fetchone()
-    if not user:
-        # Return all users so we can diagnose
-        all_users = [dict(r) for r in c.execute("SELECT id, email, role, is_active FROM users").fetchall()]
-        conn.close()
-        return {"error": "User not found", "all_users": all_users, "db_path": db_path}
-    c.execute(
-        "UPDATE users SET password_hash=?, is_active=1, role='admin' WHERE email=?",
-        (hashed, "kevin@kevinlundy.net")
-    )
+    # Update id=2 — the admin account — to Kevin's real email, new password, active, admin
+    c.execute("""
+        UPDATE users
+        SET email=?, password_hash=?, is_active=1, role='admin', agent_name='Kevin Lundy'
+        WHERE id=2
+    """, ("kevin@kevinlundy.net", hashed))
     conn.commit()
+    c.execute("SELECT id, email, role, is_active, agent_name FROM users WHERE id=2")
+    updated = c.fetchone()
     conn.close()
     return {
         "success": True,
-        "message": "Password reset. Login with: kevin@kevinlundy.net / HomeBridge2026!",
-        "user_id": user["id"],
-        "was_active": bool(user["is_active"]),
-        "was_role": user["role"],
+        "message": "Account fixed. Login with: kevin@kevinlundy.net / HomeBridge2026!",
+        "account": dict(updated),
         "db_path": db_path,
     }
 # ── END EMERGENCY RESET ────────────────────────────────────────────────────
