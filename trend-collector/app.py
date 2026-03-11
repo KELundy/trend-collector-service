@@ -146,38 +146,7 @@ async def health():
         "timestamp": datetime.utcnow().isoformat(),
     }
 
-# ── EMERGENCY ADMIN RESET ──────────────────────────────────────────────────
-# Accessible via browser: GET /auth/emergency-reset?secret=HB-RESET-2026
-# Resets kevin@kevinlundy.net password to HomeBridge2026! and forces active+admin
-# REMOVE THIS ENDPOINT after successful login is confirmed
-@app.get("/auth/emergency-reset")
-async def emergency_reset(secret: str = ""):
-    if secret != "HB-RESET-2026":
-        raise HTTPException(status_code=403, detail="Forbidden")
-    import bcrypt, sqlite3
-    db_path = os.environ.get("DATABASE_PATH", "/data/homebridge.db")
-    new_pw  = "HomeBridge2026!"
-    hashed  = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    # Update id=2 — the admin account — to Kevin's real email, new password, active, admin
-    c.execute("""
-        UPDATE users
-        SET email=?, password_hash=?, is_active=1, role='admin', agent_name='Kevin Lundy'
-        WHERE id=2
-    """, ("kevin@kevinlundy.net", hashed))
-    conn.commit()
-    c.execute("SELECT id, email, role, is_active, agent_name FROM users WHERE id=2")
-    updated = c.fetchone()
-    conn.close()
-    return {
-        "success": True,
-        "message": "Account fixed. Login with: kevin@kevinlundy.net / HomeBridge2026!",
-        "account": dict(updated),
-        "db_path": db_path,
-    }
-# ── END EMERGENCY RESET ────────────────────────────────────────────────────
+
 
 @app.get("/")
 async def root():
@@ -902,21 +871,5 @@ async def broker_agent_report(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
-# ── TEMPORARY ADMIN RESET — REMOVE AFTER USE ──
-@app.get("/auth/emergency-reset")
-def emergency_reset():
-    import bcrypt
-    from database import get_db
-    conn = get_db()
-    c = conn.cursor()
-    new_pw = "HomeBridge2026!"
-    hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
-    c.execute("UPDATE users SET password_hash=?, is_active=1, role='admin' WHERE email='kevin@kevinlundy.net'", (hashed,))
-    conn.commit()
-    c.execute("SELECT id, email, role, is_active FROM users WHERE email='kevin@kevinlundy.net'")
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {"status": "ok", "message": f"Password reset. Login: kevin@kevinlundy.net / {new_pw}", "user": dict(row)}
-    return {"status": "error", "message": "User not found — check DB"}
+
 
