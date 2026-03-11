@@ -119,61 +119,6 @@ async def root():
     return {"service": "HomeBridge Content Engine", "status": "running", "timestamp": datetime.utcnow().isoformat()}
 
 
-# ─────────────────────────────────────────────
-# ── TEMPORARY ADMIN RECOVERY — REMOVE AFTER USE ──
-# Hit: https://api.homebridgegroup.co/auth/recover?secret=HB-RECOVER-2026
-# ─────────────────────────────────────────────
-@app.get("/auth/recover")
-async def admin_recover(secret: str = ""):
-    if secret != "HB-RECOVER-2026":
-        raise HTTPException(status_code=403, detail="Invalid secret")
-    try:
-        # Hash using bcrypt directly — same library auth.py uses underneath
-        import bcrypt as _bcrypt
-        new_hash = _bcrypt.hashpw("HomeBridge2026!".encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
-        conn = sqlite3.connect(DB_NAME)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        # Show current state before changing anything
-        c.execute("SELECT id, email, role, is_active FROM users")
-        users_before = [dict(r) for r in c.fetchall()]
-        # Reset kevin — update by email if exists, otherwise upsert on id=2
-        c.execute("SELECT id FROM users WHERE email = ?", ("kevin@kevinlundy.net",))
-        row = c.fetchone()
-        if row:
-            c.execute(
-                "UPDATE users SET password_hash=?, role='admin', is_active=1 WHERE email=?",
-                (new_hash, "kevin@kevinlundy.net")
-            )
-        else:
-            # Try id=2
-            c.execute("SELECT id FROM users WHERE id=2")
-            row2 = c.fetchone()
-            if row2:
-                c.execute(
-                    "UPDATE users SET email='kevin@kevinlundy.net', password_hash=?, role='admin', is_active=1, agent_name='Kevin Lundy' WHERE id=2",
-                    (new_hash,)
-                )
-            else:
-                # Create fresh admin
-                c.execute(
-                    "INSERT INTO users (email, password_hash, agent_name, role, is_active) VALUES (?,?,'Kevin Lundy','admin',1)",
-                    ("kevin@kevinlundy.net", new_hash)
-                )
-        conn.commit()
-        c.execute("SELECT id, email, role, is_active FROM users")
-        users_after = [dict(r) for r in c.fetchall()]
-        conn.close()
-        return {
-            "status": "RECOVERY COMPLETE",
-            "email": "kevin@kevinlundy.net",
-            "password": "HomeBridge2026!",
-            "before": users_before,
-            "after": users_after,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recovery failed: {str(e)}")
-# ── END TEMPORARY ADMIN RECOVERY ──
 
 
 class LibraryPatchRequest(BaseModel):
