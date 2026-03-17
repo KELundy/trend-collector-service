@@ -53,6 +53,7 @@ import database
 from database import (
     init_db, save_trends, get_latest_trends,
     migrate_add_niche_column,
+    migrate_platform_connections,
     library_save, library_get_all, library_get_item,
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
@@ -62,10 +63,14 @@ from database import (
     get_broker_office_stats,
     save_agent_setup, get_agent_setup,
     get_user_results,
+    save_platform_connection, get_platform_connections,
+    get_platform_connection, delete_platform_connection,
+    log_platform_post,
     DB_NAME,
 )
 from auth import router as auth_router, get_current_user
 from content_engine import router as content_engine_router, generate_content_core
+from social import router as social_router
 
 from collectors.google_trends import fetch_google_trends
 from collectors.youtube_trends import fetch_youtube_trends
@@ -94,6 +99,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(content_engine_router)
+app.include_router(social_router)
 
 
 @app.on_event("startup")
@@ -101,6 +107,7 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
+    migrate_platform_connections()
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
