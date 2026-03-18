@@ -3,8 +3,8 @@ HomeBridge — Social Platform OAuth + Posting
 Handles: LinkedIn, Google Business, Facebook/Instagram (when approved)
 
 Flow per platform:
-  1. GET  /social/{platform}/connect      → redirects user to platform OAuth
-  2. GET  /social/{platform}/callback     → receives code, exchanges for token, stores
+  1. GET  /social/{platform}/connect      → returns {"auth_url": "..."} for frontend to redirect
+  2. GET  /social/{platform}/callback     → receives code, exchanges for token, stores, redirects to frontend
   3. GET  /social/connections             → returns all connected platforms for this user
   4. POST /social/{platform}/disconnect   → revokes and removes token
   5. POST /social/post                    → posts approved content to connected platform(s)
@@ -44,39 +44,40 @@ BACKEND_URL            = os.getenv("BACKEND_URL", "https://api.homebridgegroup.c
 # ─────────────────────────────────────────────
 PLATFORMS = {
     "linkedin": {
-        "auth_url":    "https://www.linkedin.com/oauth/v2/authorization",
-        "token_url":   "https://www.linkedin.com/oauth/v2/accessToken",
-        "scopes":      "openid profile w_member_social",
-        "client_id":   LINKEDIN_CLIENT_ID,
+        "auth_url":      "https://www.linkedin.com/oauth/v2/authorization",
+        "token_url":     "https://www.linkedin.com/oauth/v2/accessToken",
+        "scopes":        "openid profile w_member_social",
+        "client_id":     LINKEDIN_CLIENT_ID,
         "client_secret": LINKEDIN_CLIENT_SECRET,
-        "redirect_uri": f"{BACKEND_URL}/social/linkedin/callback",
-        "enabled":     bool(LINKEDIN_CLIENT_ID),
+        "redirect_uri":  f"{BACKEND_URL}/social/linkedin/callback",
+        "enabled":       bool(LINKEDIN_CLIENT_ID),
     },
     "google": {
-        "auth_url":    "https://accounts.google.com/o/oauth2/v2/auth",
-        "token_url":   "https://oauth2.googleapis.com/token",
-        "scopes":      "openid email profile https://www.googleapis.com/auth/business.manage",
-        "client_id":   GOOGLE_CLIENT_ID,
+        "auth_url":      "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url":     "https://oauth2.googleapis.com/token",
+        "scopes":        "openid email profile https://www.googleapis.com/auth/business.manage",
+        "client_id":     GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": f"{BACKEND_URL}/social/google/callback",
-        "enabled":     bool(GOOGLE_CLIENT_ID),
+        "redirect_uri":  f"{BACKEND_URL}/social/google/callback",
+        "enabled":       bool(GOOGLE_CLIENT_ID),
     },
     "facebook": {
-        "auth_url":    "https://www.facebook.com/v19.0/dialog/oauth",
-        "token_url":   "https://graph.facebook.com/v19.0/oauth/access_token",
-        "scopes":      "pages_manage_posts,pages_read_engagement,instagram_content_publish,instagram_basic",
-        "client_id":   META_APP_ID,
+        "auth_url":      "https://www.facebook.com/v19.0/dialog/oauth",
+        "token_url":     "https://graph.facebook.com/v19.0/oauth/access_token",
+        "scopes":        "pages_manage_posts,pages_read_engagement,instagram_content_publish,instagram_basic",
+        "client_id":     META_APP_ID,
         "client_secret": META_APP_SECRET,
-        "redirect_uri": f"{BACKEND_URL}/social/facebook/callback",
-        "enabled":     bool(META_APP_ID),
+        "redirect_uri":  f"{BACKEND_URL}/social/facebook/callback",
+        "enabled":       bool(META_APP_ID),
     },
 }
 
 # ─────────────────────────────────────────────
-# OAUTH STATE — temporary store (in-memory, good enough for low volume)
+# OAUTH STATE — temporary in-memory store
+# state_token -> {user_id, platform, expires}
 # For scale: move to Redis or DB
 # ─────────────────────────────────────────────
-_oauth_states: dict = {}  # state_token → {user_id, platform, expires}
+_oauth_states: dict = {}
 
 def _store_state(user_id: int, platform: str) -> str:
     state = secrets.token_urlsafe(24)
@@ -95,8 +96,11 @@ def _consume_state(state: str) -> dict:
         raise HTTPException(400, "OAuth session expired. Please try connecting again.")
     return entry
 
+
 # ─────────────────────────────────────────────
 # ROUTE 1: Initiate OAuth
+# Returns {"auth_url": "..."} so frontend can redirect the browser itself.
+# This keeps the JWT in the Authorization header via authFetch — never in the URL.
 # ─────────────────────────────────────────────
 @router.get("/{platform}/connect")
 async def connect_platform(platform: str, current_user=Depends(get_current_user)):
@@ -115,17 +119,20 @@ async def connect_platform(platform: str, current_user=Depends(get_current_user)
         "scope":         cfg["scopes"],
         "state":         state,
     }
-    # LinkedIn requires explicit access_type
     if platform == "google":
         params["access_type"] = "offline"
         params["prompt"]      = "consent"
 
-    url = cfg["auth_url"] + "?" + urlencode(params)
-    return RedirectResponse(url)
+    auth_url = cfg["auth_url"] + "?" + urlencode(params)
+
+    # Return URL as JSON — frontend does the browser redirect
+    return {"auth_url": auth_url}
 
 
 # ─────────────────────────────────────────────
-# ROUTE 2: OAuth Callback — exchange code for token, store
+# ROUTE 2: OAuth Callback
+# Receives code from platform, exchanges for token, stores, redirects to frontend
+# Frontend detects ?connected=platform and shows success state
 # ─────────────────────────────────────────────
 @router.get("/{platform}/callback")
 async def oauth_callback(platform: str, request: Request):
@@ -135,18 +142,18 @@ async def oauth_callback(platform: str, request: Request):
     error  = params.get("error")
 
     if error:
-        return RedirectResponse(f"{FRONTEND_URL}?social_error={platform}&reason={error}")
+        return RedirectResponse(f"{FRONTEND_URL}?oauth_error={error}")
 
     if not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}?social_error={platform}&reason=missing_params")
+        return RedirectResponse(f"{FRONTEND_URL}?oauth_error=missing_params")
 
     try:
         session = _consume_state(state)
     except HTTPException:
-        return RedirectResponse(f"{FRONTEND_URL}?social_error={platform}&reason=invalid_state")
+        return RedirectResponse(f"{FRONTEND_URL}?oauth_error=invalid_state")
 
-    user_id  = session["user_id"]
-    cfg      = PLATFORMS[platform]
+    user_id = session["user_id"]
+    cfg     = PLATFORMS[platform]
 
     # Exchange code for token
     async with httpx.AsyncClient() as client:
@@ -159,8 +166,8 @@ async def oauth_callback(platform: str, request: Request):
                 "client_secret": cfg["client_secret"],
             }, headers={"Accept": "application/json"})
             token_data = resp.json()
-        except Exception as e:
-            return RedirectResponse(f"{FRONTEND_URL}?social_error={platform}&reason=token_exchange_failed")
+        except Exception:
+            return RedirectResponse(f"{FRONTEND_URL}?oauth_error=token_exchange_failed")
 
     access_token  = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token", "")
@@ -168,38 +175,45 @@ async def oauth_callback(platform: str, request: Request):
     expires_at    = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
 
     if not access_token:
-        return RedirectResponse(f"{FRONTEND_URL}?social_error={platform}&reason=no_access_token")
+        return RedirectResponse(f"{FRONTEND_URL}?oauth_error=no_access_token")
 
-    # Fetch platform profile info (handle/name)
+    # Fetch platform profile info
     platform_user_id = ""
     platform_handle  = ""
 
     async with httpx.AsyncClient() as client:
         try:
             if platform == "linkedin":
-                me = await client.get("https://api.linkedin.com/v2/userinfo",
-                    headers={"Authorization": f"Bearer {access_token}"})
-                me_data = me.json()
+                me               = await client.get(
+                    "https://api.linkedin.com/v2/userinfo",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+                me_data          = me.json()
                 platform_user_id = me_data.get("sub", "")
                 platform_handle  = me_data.get("name", "")
 
             elif platform == "google":
-                me = await client.get("https://www.googleapis.com/oauth2/v3/userinfo",
-                    headers={"Authorization": f"Bearer {access_token}"})
-                me_data = me.json()
+                me               = await client.get(
+                    "https://www.googleapis.com/oauth2/v3/userinfo",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+                me_data          = me.json()
                 platform_user_id = me_data.get("sub", "")
                 platform_handle  = me_data.get("email", "")
 
             elif platform == "facebook":
-                me = await client.get("https://graph.facebook.com/me",
-                    params={"fields": "id,name", "access_token": access_token})
-                me_data = me.json()
+                me               = await client.get(
+                    "https://graph.facebook.com/me",
+                    params={"fields": "id,name", "access_token": access_token}
+                )
+                me_data          = me.json()
                 platform_user_id = me_data.get("id", "")
                 platform_handle  = me_data.get("name", "")
-        except Exception:
-            pass  # Profile fetch failure is non-fatal
 
-    # Store in DB
+        except Exception:
+            pass  # Profile fetch failure is non-fatal — token is still stored
+
+    # Store connection in DB
     database.save_platform_connection(
         user_id=user_id,
         platform=platform,
@@ -210,24 +224,25 @@ async def oauth_callback(platform: str, request: Request):
         platform_handle=platform_handle,
     )
 
-    return RedirectResponse(f"{FRONTEND_URL}?social_connected={platform}&handle={platform_handle}")
+    # Redirect to frontend — ?connected=linkedin matches checkOAuthCallback() in frontend
+    return RedirectResponse(f"{FRONTEND_URL}?connected={platform}&handle={platform_handle}")
 
 
 # ─────────────────────────────────────────────
 # ROUTE 3: Get all connections for current user
+# Never returns tokens — status and metadata only
 # ─────────────────────────────────────────────
 @router.get("/connections")
 async def get_connections(current_user=Depends(get_current_user)):
     connections = database.get_platform_connections(current_user["id"])
-    # Never return tokens to frontend — return status only
     safe = []
     for c in connections:
         safe.append({
-            "platform":       c["platform"],
-            "handle":         c["platform_handle"],
-            "connected_at":   c["connected_at"],
-            "expires_at":     c["expires_at"],
-            "is_expired":     _is_expired(c["expires_at"]),
+            "platform":     c["platform"],
+            "handle":       c.get("platform_handle", ""),
+            "connected_at": c.get("connected_at", ""),
+            "expires_at":   c.get("expires_at", ""),
+            "is_expired":   _is_expired(c.get("expires_at", "")),
         })
     return {"connections": safe}
 
@@ -245,64 +260,68 @@ async def disconnect_platform(platform: str, current_user=Depends(get_current_us
 # ROUTE 5: Post content to a platform
 # ─────────────────────────────────────────────
 class PostRequest(BaseModel):
-    library_item_id: int
+    library_item_id: Optional[int] = None
     platform: str
-    content_override: Optional[str] = None  # If user edited the copy in modal
+    content: Optional[str] = None          # Direct text from frontend modal
+    content_override: Optional[str] = None # Legacy field name
 
 @router.post("/post")
 async def post_to_platform(body: PostRequest, current_user=Depends(get_current_user)):
     platform = body.platform.lower()
 
-    # Get the connection
     conn_data = database.get_platform_connection(current_user["id"], platform)
     if not conn_data:
         raise HTTPException(400, f"No {platform} account connected. Connect it in Profile first.")
-    if _is_expired(conn_data["expires_at"]):
-        raise HTTPException(401, f"Your {platform} connection has expired. Please reconnect.")
+    if _is_expired(conn_data.get("expires_at", "")):
+        raise HTTPException(401, f"Your {platform} connection has expired. Please reconnect in Profile.")
 
-    # Get the library item
-    item = database.library_get_item(body.library_item_id, current_user["id"])
-    if not item:
-        raise HTTPException(404, "Content item not found.")
-    if item["status"] not in ("approved", "published"):
-        raise HTTPException(400, "Content must be approved before posting.")
-
-    content = item.get("content", {})
-    post_text = body.content_override or _format_post_text(content, platform)
     access_token = conn_data["access_token"]
+
+    # Determine post text: direct content > content_override > library item
+    post_text = body.content or body.content_override
+
+    if not post_text and body.library_item_id:
+        item = database.library_get_item(body.library_item_id, current_user["id"])
+        if not item:
+            raise HTTPException(404, "Content item not found.")
+        if item["status"] not in ("approved", "published"):
+            raise HTTPException(400, "Content must be approved before posting.")
+        post_text = _format_post_text(item.get("content", {}), platform)
+
+    if not post_text:
+        raise HTTPException(400, "No content provided to post.")
 
     # Platform-specific posting
     try:
         if platform == "linkedin":
-            result = await _post_linkedin(access_token, conn_data["platform_user_id"], post_text)
+            result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text)
         elif platform == "google":
             result = await _post_google(access_token, post_text)
         elif platform == "facebook":
-            result = await _post_facebook(access_token, conn_data["platform_user_id"], post_text)
+            result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text)
         else:
-            raise HTTPException(400, f"Posting to {platform} is not yet supported.")
+            raise HTTPException(400, f"Direct posting to {platform} is not yet supported.")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"Failed to post to {platform}: {str(e)}")
 
-    # Mark as published in library
-    database.library_update(body.library_item_id, current_user["id"], {
-        "status":       "published",
-        "published_at": datetime.utcnow().isoformat(),
-    })
-
-    # Log the post
-    database.log_platform_post(
-        user_id=current_user["id"],
-        library_item_id=body.library_item_id,
-        platform=platform,
-        post_id=result.get("id", ""),
-        post_url=result.get("url", ""),
-    )
+    # Mark library item as published
+    if body.library_item_id:
+        database.library_update(body.library_item_id, current_user["id"], {
+            "status":       "published",
+            "published_at": datetime.utcnow().isoformat(),
+        })
+        database.log_platform_post(
+            user_id=current_user["id"],
+            library_item_id=body.library_item_id,
+            platform=platform,
+            post_id=result.get("id", ""),
+            post_url=result.get("url", ""),
+        )
 
     return {
-        "ok":      True,
+        "ok":       True,
         "platform": platform,
         "post_id":  result.get("id", ""),
         "post_url": result.get("url", ""),
@@ -313,6 +332,8 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
 # PLATFORM POSTING — LinkedIn
 # ─────────────────────────────────────────────
 async def _post_linkedin(access_token: str, person_urn: str, text: str) -> dict:
+    if not person_urn:
+        raise HTTPException(400, "LinkedIn user ID not found. Please reconnect your LinkedIn account.")
     if not person_urn.startswith("urn:"):
         person_urn = f"urn:li:person:{person_urn}"
 
@@ -335,14 +356,14 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str) -> dict:
             "https://api.linkedin.com/v2/ugcPosts",
             json=payload,
             headers={
-                "Authorization":  f"Bearer {access_token}",
-                "Content-Type":   "application/json",
+                "Authorization":             f"Bearer {access_token}",
+                "Content-Type":              "application/json",
                 "X-Restli-Protocol-Version": "2.0.0",
             }
         )
 
     if resp.status_code not in (200, 201):
-        raise HTTPException(502, f"LinkedIn API error: {resp.text}")
+        raise HTTPException(502, f"LinkedIn API error {resp.status_code}: {resp.text}")
 
     post_id = resp.headers.get("x-restli-id", "")
     return {
@@ -355,9 +376,8 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str) -> dict:
 # PLATFORM POSTING — Google Business Profile
 # ─────────────────────────────────────────────
 async def _post_google(access_token: str, text: str) -> dict:
-    # First get the account's locations
     async with httpx.AsyncClient() as client:
-        accts = await client.get(
+        accts     = await client.get(
             "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
             headers={"Authorization": f"Bearer {access_token}"}
         )
@@ -365,13 +385,12 @@ async def _post_google(access_token: str, text: str) -> dict:
 
     accounts = acct_data.get("accounts", [])
     if not accounts:
-        raise HTTPException(400, "No Google Business Profile account found. Make sure your account has a verified business location.")
+        raise HTTPException(400, "No Google Business Profile account found.")
 
     account_name = accounts[0]["name"]
 
-    # Get locations
     async with httpx.AsyncClient() as client:
-        locs = await client.get(
+        locs     = await client.get(
             f"https://mybusinessbusinessinformation.googleapis.com/v1/{account_name}/locations",
             params={"readMask": "name,title"},
             headers={"Authorization": f"Bearer {access_token}"}
@@ -384,10 +403,9 @@ async def _post_google(access_token: str, text: str) -> dict:
 
     location_name = locations[0]["name"]
 
-    # Post
     payload = {
         "languageCode": "en-US",
-        "summary":      text[:1500],  # GBP limit
+        "summary":      text[:1500],
         "topicType":    "STANDARD",
     }
 
@@ -402,7 +420,7 @@ async def _post_google(access_token: str, text: str) -> dict:
         )
 
     if resp.status_code not in (200, 201):
-        raise HTTPException(502, f"Google Business API error: {resp.text}")
+        raise HTTPException(502, f"Google Business API error {resp.status_code}: {resp.text}")
 
     result = resp.json()
     return {
@@ -415,9 +433,8 @@ async def _post_google(access_token: str, text: str) -> dict:
 # PLATFORM POSTING — Facebook Page
 # ─────────────────────────────────────────────
 async def _post_facebook(access_token: str, user_id: str, text: str) -> dict:
-    # Get managed pages
     async with httpx.AsyncClient() as client:
-        pages = await client.get(
+        pages     = await client.get(
             f"https://graph.facebook.com/v19.0/{user_id}/accounts",
             params={"access_token": access_token}
         )
@@ -425,7 +442,7 @@ async def _post_facebook(access_token: str, user_id: str, text: str) -> dict:
 
     page_list = page_data.get("data", [])
     if not page_list:
-        raise HTTPException(400, "No Facebook Pages found. You need a Facebook Page (not a personal profile) to post.")
+        raise HTTPException(400, "No Facebook Pages found. You need a Facebook Page to post.")
 
     page       = page_list[0]
     page_id    = page["id"]
@@ -438,13 +455,13 @@ async def _post_facebook(access_token: str, user_id: str, text: str) -> dict:
         )
 
     if resp.status_code not in (200, 201):
-        raise HTTPException(502, f"Facebook API error: {resp.text}")
+        raise HTTPException(502, f"Facebook API error {resp.status_code}: {resp.text}")
 
-    result = resp.json()
+    result  = resp.json()
     post_id = result.get("id", "")
     return {
         "id":  post_id,
-        "url": f"https://www.facebook.com/{post_id.replace('_','/')}" if post_id else "",
+        "url": f"https://www.facebook.com/{post_id.replace('_', '/')}" if post_id else "",
     }
 
 
@@ -459,22 +476,21 @@ def _is_expired(expires_at: str) -> bool:
     except Exception:
         return False
 
+
 def _format_post_text(content: dict, platform: str) -> str:
-    """Build the post text from content fields, platform-appropriate."""
-    post      = content.get("post", "")
-    cta       = content.get("cta", "")
-    hashtags  = content.get("hashtags", "")
-    headline  = content.get("headline", "")
+    """Build platform-appropriate post text from content fields."""
+    post     = content.get("post", "")
+    cta      = content.get("cta", "")
+    hashtags = content.get("hashtags", "")
+    headline = content.get("headline", "")
 
     if platform == "linkedin":
         parts = [p for p in [headline, post, cta, hashtags] if p]
-        return "\n\n".join(parts)
     elif platform in ("facebook", "google"):
         parts = [p for p in [post, cta] if p]
-        return "\n\n".join(parts)
     elif platform == "instagram":
         parts = [p for p in [post, cta, hashtags] if p]
-        return "\n\n".join(parts)
     else:
         parts = [p for p in [post, cta] if p]
-        return "\n\n".join(parts)
+
+    return "\n\n".join(parts)
