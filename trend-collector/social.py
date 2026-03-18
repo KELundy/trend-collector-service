@@ -264,6 +264,7 @@ class PostRequest(BaseModel):
     platform: str
     content: Optional[str] = None          # Direct text from frontend modal
     content_override: Optional[str] = None # Legacy field name
+    image_url: Optional[str] = None        # Generated image to attach
 
 @router.post("/post")
 async def post_to_platform(body: PostRequest, current_user=Depends(get_current_user)):
@@ -292,13 +293,15 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
         raise HTTPException(400, "No content provided to post.")
 
     # Platform-specific posting
+    image_url = body.image_url or None
+
     try:
         if platform == "linkedin":
-            result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text)
+            result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
         elif platform == "google":
             result = await _post_google(access_token, post_text)
         elif platform == "facebook":
-            result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text)
+            result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
         else:
             raise HTTPException(400, f"Direct posting to {platform} is not yet supported.")
     except HTTPException:
@@ -331,25 +334,81 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
 # ─────────────────────────────────────────────
 # PLATFORM POSTING — LinkedIn
 # ─────────────────────────────────────────────
-async def _post_linkedin(access_token: str, person_urn: str, text: str) -> dict:
+async def _post_linkedin(access_token: str, person_urn: str, text: str, image_url: str = None) -> dict:
     if not person_urn:
         raise HTTPException(400, "LinkedIn user ID not found. Please reconnect your LinkedIn account.")
     if not person_urn.startswith("urn:"):
         person_urn = f"urn:li:person:{person_urn}"
 
-    payload = {
-        "author": person_urn,
-        "lifecycleState": "PUBLISHED",
-        "specificContent": {
-            "com.linkedin.ugc.ShareContent": {
-                "shareCommentary": {"text": text},
-                "shareMediaCategory": "NONE",
-            }
-        },
-        "visibility": {
-            "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-        },
-    }
+    # If image provided, register it with LinkedIn first
+    media_asset = None
+    if image_url:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Step 1: Register upload
+                reg = await client.post(
+                    "https://api.linkedin.com/v2/assets?action=registerUpload",
+                    json={
+                        "registerUploadRequest": {
+                            "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+                            "owner": person_urn,
+                            "serviceRelationships": [{
+                                "relationshipType": "OWNER",
+                                "identifier": "urn:li:userGeneratedContent"
+                            }]
+                        }
+                    },
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type":  "application/json",
+                        "X-Restli-Protocol-Version": "2.0.0",
+                    }
+                )
+                if reg.status_code in (200, 201):
+                    reg_data     = reg.json()
+                    upload_url   = reg_data["value"]["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
+                    media_asset  = reg_data["value"]["asset"]
+                    # Step 2: Upload image bytes
+                    img_resp = await client.get(image_url)
+                    await client.put(
+                        upload_url,
+                        content=img_resp.content,
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+        except Exception:
+            media_asset = None  # Image upload failed — fall back to text-only post
+
+    # Build payload
+    if media_asset:
+        payload = {
+            "author": person_urn,
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": text},
+                    "shareMediaCategory": "IMAGE",
+                    "media": [{
+                        "status": "READY",
+                        "description": {"text": text[:200]},
+                        "media": media_asset,
+                        "title": {"text": text.split("\n")[0][:100]}
+                    }]
+                }
+            },
+            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+        }
+    else:
+        payload = {
+            "author": person_urn,
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": text},
+                    "shareMediaCategory": "NONE",
+                }
+            },
+            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+        }
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -432,7 +491,7 @@ async def _post_google(access_token: str, text: str) -> dict:
 # ─────────────────────────────────────────────
 # PLATFORM POSTING — Facebook Page
 # ─────────────────────────────────────────────
-async def _post_facebook(access_token: str, user_id: str, text: str) -> dict:
+async def _post_facebook(access_token: str, user_id: str, text: str, image_url: str = None) -> dict:
     async with httpx.AsyncClient() as client:
         pages     = await client.get(
             f"https://graph.facebook.com/v19.0/{user_id}/accounts",
@@ -448,11 +507,16 @@ async def _post_facebook(access_token: str, user_id: str, text: str) -> dict:
     page_id    = page["id"]
     page_token = page["access_token"]
 
+    post_data = {"message": text, "access_token": page_token}
+    fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/feed"
+    if image_url:
+        # Post with photo
+        fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/photos"
+        post_data["url"]     = image_url
+        post_data["caption"] = text
+
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://graph.facebook.com/v19.0/{page_id}/feed",
-            data={"message": text, "access_token": page_token}
-        )
+        resp = await client.post(fb_endpoint, data=post_data)
 
     if resp.status_code not in (200, 201):
         raise HTTPException(502, f"Facebook API error {resp.status_code}: {resp.text}")
