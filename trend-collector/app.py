@@ -53,7 +53,6 @@ import database
 from database import (
     init_db, save_trends, get_latest_trends,
     migrate_add_niche_column,
-    migrate_platform_connections,
     library_save, library_get_all, library_get_item,
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
@@ -63,14 +62,10 @@ from database import (
     get_broker_office_stats,
     save_agent_setup, get_agent_setup,
     get_user_results,
-    save_platform_connection, get_platform_connections,
-    get_platform_connection, delete_platform_connection,
-    log_platform_post,
     DB_NAME,
 )
 from auth import router as auth_router, get_current_user
 from content_engine import router as content_engine_router, generate_content_core
-from social import router as social_router
 
 from collectors.google_trends import fetch_google_trends
 from collectors.youtube_trends import fetch_youtube_trends
@@ -99,7 +94,70 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(content_engine_router)
+from social import router as social_router
 app.include_router(social_router)
+
+
+# ─────────────────────────────────────────────
+# IMAGE GENERATION
+# ─────────────────────────────────────────────
+import httpx as _httpx
+
+class ImageGenRequest(BaseModel):
+    library_item_id: int
+    headline: str
+    niche: str
+    market: str
+
+@app.post("/image/generate")
+async def generate_image(req: ImageGenRequest, current_user=Depends(get_current_user)):
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        raise HTTPException(503, "Image generation is not configured.")
+
+    # Build a prompt that creates a professional real estate social graphic
+    niche_clean  = req.niche.strip() or "residential real estate"
+    market_clean = req.market.strip() or "your market"
+    headline     = req.headline.strip()[:120]
+
+    prompt = (
+        f"A clean, modern, professional real estate social media graphic for a post about: '{headline}'. "
+        f"Market: {market_clean}. Niche: {niche_clean}. "
+        f"Style: sophisticated, minimal, photo-realistic. "
+        f"No text overlays. Warm natural light. High-end residential photography aesthetic. "
+        f"Suitable for LinkedIn and Facebook. Aspect ratio 1:1."
+    )
+
+    async with _httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model":   "dall-e-3",
+                "prompt":  prompt,
+                "n":       1,
+                "size":    "1024x1024",
+                "quality": "standard",
+            }
+        )
+
+    if resp.status_code != 200:
+        detail = resp.json().get("error", {}).get("message", "Image generation failed.")
+        raise HTTPException(502, detail)
+
+    image_url = resp.json()["data"][0]["url"]
+
+    # Store image URL on the library item
+    if req.library_item_id:
+        try:
+            library_update(req.library_item_id, current_user["id"], {"image_url": image_url})
+        except Exception:
+            pass  # Non-fatal — return URL even if DB update fails
+
+    return {"image_url": image_url}
 
 
 @app.on_event("startup")
@@ -107,7 +165,6 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
-    migrate_platform_connections()
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
