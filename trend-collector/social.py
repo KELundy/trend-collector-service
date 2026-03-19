@@ -1,6 +1,6 @@
 """
 HomeBridge — Social Platform OAuth + Posting
-Handles: LinkedIn, Google Business, Facebook/Instagram (when approved)
+Handles: LinkedIn, Google Business, Facebook/Instagram, YouTube
 
 Flow per platform:
   1. GET  /social/{platform}/connect      → returns {"auth_url": "..."} for frontend to redirect
@@ -36,6 +36,8 @@ GOOGLE_CLIENT_ID       = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET   = os.getenv("GOOGLE_CLIENT_SECRET", "")
 META_APP_ID            = os.getenv("META_APP_ID", "")
 META_APP_SECRET        = os.getenv("META_APP_SECRET", "")
+YOUTUBE_CLIENT_ID      = os.getenv("YOUTUBE_CLIENT_ID", os.getenv("GOOGLE_CLIENT_ID", ""))
+YOUTUBE_CLIENT_SECRET  = os.getenv("YOUTUBE_CLIENT_SECRET", os.getenv("GOOGLE_CLIENT_SECRET", ""))
 FRONTEND_URL           = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
 BACKEND_URL            = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
 
@@ -70,12 +72,19 @@ PLATFORMS = {
         "redirect_uri":  f"{BACKEND_URL}/social/facebook/callback",
         "enabled":       bool(META_APP_ID),
     },
+    "youtube": {
+        "auth_url":      "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url":     "https://oauth2.googleapis.com/token",
+        "scopes":        "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.upload",
+        "client_id":     YOUTUBE_CLIENT_ID,
+        "client_secret": YOUTUBE_CLIENT_SECRET,
+        "redirect_uri":  f"{BACKEND_URL}/social/youtube/callback",
+        "enabled":       bool(YOUTUBE_CLIENT_ID),
+    },
 }
 
 # ─────────────────────────────────────────────
 # OAUTH STATE — temporary in-memory store
-# state_token -> {user_id, platform, expires}
-# For scale: move to Redis or DB
 # ─────────────────────────────────────────────
 _oauth_states: dict = {}
 
@@ -99,8 +108,6 @@ def _consume_state(state: str) -> dict:
 
 # ─────────────────────────────────────────────
 # ROUTE 1: Initiate OAuth
-# Returns {"auth_url": "..."} so frontend can redirect the browser itself.
-# This keeps the JWT in the Authorization header via authFetch — never in the URL.
 # ─────────────────────────────────────────────
 @router.get("/{platform}/connect")
 async def connect_platform(platform: str, current_user=Depends(get_current_user)):
@@ -119,20 +126,16 @@ async def connect_platform(platform: str, current_user=Depends(get_current_user)
         "scope":         cfg["scopes"],
         "state":         state,
     }
-    if platform == "google":
+    if platform in ("google", "youtube"):
         params["access_type"] = "offline"
         params["prompt"]      = "consent"
 
     auth_url = cfg["auth_url"] + "?" + urlencode(params)
-
-    # Return URL as JSON — frontend does the browser redirect
     return {"auth_url": auth_url}
 
 
 # ─────────────────────────────────────────────
 # ROUTE 2: OAuth Callback
-# Receives code from platform, exchanges for token, stores, redirects to frontend
-# Frontend detects ?connected=platform and shows success state
 # ─────────────────────────────────────────────
 @router.get("/{platform}/callback")
 async def oauth_callback(platform: str, request: Request):
@@ -143,7 +146,6 @@ async def oauth_callback(platform: str, request: Request):
 
     if error:
         return RedirectResponse(f"{FRONTEND_URL}?oauth_error={error}")
-
     if not code or not state:
         return RedirectResponse(f"{FRONTEND_URL}?oauth_error=missing_params")
 
@@ -155,7 +157,6 @@ async def oauth_callback(platform: str, request: Request):
     user_id = session["user_id"]
     cfg     = PLATFORMS[platform]
 
-    # Exchange code for token
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(cfg["token_url"], data={
@@ -177,43 +178,40 @@ async def oauth_callback(platform: str, request: Request):
     if not access_token:
         return RedirectResponse(f"{FRONTEND_URL}?oauth_error=no_access_token")
 
-    # Fetch platform profile info
     platform_user_id = ""
     platform_handle  = ""
 
     async with httpx.AsyncClient() as client:
         try:
             if platform == "linkedin":
-                me               = await client.get(
-                    "https://api.linkedin.com/v2/userinfo",
-                    headers={"Authorization": f"Bearer {access_token}"}
-                )
+                me               = await client.get("https://api.linkedin.com/v2/userinfo", headers={"Authorization": f"Bearer {access_token}"})
                 me_data          = me.json()
                 platform_user_id = me_data.get("sub", "")
                 platform_handle  = me_data.get("name", "")
 
             elif platform == "google":
-                me               = await client.get(
-                    "https://www.googleapis.com/oauth2/v3/userinfo",
-                    headers={"Authorization": f"Bearer {access_token}"}
-                )
+                me               = await client.get("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {access_token}"})
                 me_data          = me.json()
                 platform_user_id = me_data.get("sub", "")
                 platform_handle  = me_data.get("email", "")
 
             elif platform == "facebook":
-                me               = await client.get(
-                    "https://graph.facebook.com/me",
-                    params={"fields": "id,name", "access_token": access_token}
-                )
+                me               = await client.get("https://graph.facebook.com/me", params={"fields": "id,name", "access_token": access_token})
                 me_data          = me.json()
                 platform_user_id = me_data.get("id", "")
                 platform_handle  = me_data.get("name", "")
 
-        except Exception:
-            pass  # Profile fetch failure is non-fatal — token is still stored
+            elif platform == "youtube":
+                me               = await client.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"}, headers={"Authorization": f"Bearer {access_token}"})
+                me_data          = me.json()
+                items            = me_data.get("items", [])
+                if items:
+                    platform_user_id = items[0].get("id", "")
+                    platform_handle  = items[0].get("snippet", {}).get("title", "")
 
-    # Store connection in DB
+        except Exception:
+            pass
+
     database.save_platform_connection(
         user_id=user_id,
         platform=platform,
@@ -224,13 +222,11 @@ async def oauth_callback(platform: str, request: Request):
         platform_handle=platform_handle,
     )
 
-    # Redirect to frontend — ?connected=linkedin matches checkOAuthCallback() in frontend
     return RedirectResponse(f"{FRONTEND_URL}?connected={platform}&handle={platform_handle}")
 
 
 # ─────────────────────────────────────────────
-# ROUTE 3: Get all connections for current user
-# Never returns tokens — status and metadata only
+# ROUTE 3: Get all connections
 # ─────────────────────────────────────────────
 @router.get("/connections")
 async def get_connections(current_user=Depends(get_current_user)):
@@ -248,7 +244,7 @@ async def get_connections(current_user=Depends(get_current_user)):
 
 
 # ─────────────────────────────────────────────
-# ROUTE 4: Disconnect a platform
+# ROUTE 4: Disconnect
 # ─────────────────────────────────────────────
 @router.post("/{platform}/disconnect")
 async def disconnect_platform(platform: str, current_user=Depends(get_current_user)):
@@ -257,14 +253,14 @@ async def disconnect_platform(platform: str, current_user=Depends(get_current_us
 
 
 # ─────────────────────────────────────────────
-# ROUTE 5: Post content to a platform
+# ROUTE 5: Post content
 # ─────────────────────────────────────────────
 class PostRequest(BaseModel):
     library_item_id: Optional[int] = None
     platform: str
-    content: Optional[str] = None          # Direct text from frontend modal
-    content_override: Optional[str] = None # Legacy field name
-    image_url: Optional[str] = None        # Generated image to attach
+    content: Optional[str] = None
+    content_override: Optional[str] = None
+    image_url: Optional[str] = None
 
 @router.post("/post")
 async def post_to_platform(body: PostRequest, current_user=Depends(get_current_user)):
@@ -277,9 +273,7 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
         raise HTTPException(401, f"Your {platform} connection has expired. Please reconnect in Profile.")
 
     access_token = conn_data["access_token"]
-
-    # Determine post text: direct content > content_override > library item
-    post_text = body.content or body.content_override
+    post_text    = body.content or body.content_override
 
     if not post_text and body.library_item_id:
         item = database.library_get_item(body.library_item_id, current_user["id"])
@@ -292,7 +286,6 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
     if not post_text:
         raise HTTPException(400, "No content provided to post.")
 
-    # Platform-specific posting
     image_url = body.image_url or None
 
     try:
@@ -302,6 +295,8 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
             result = await _post_google(access_token, post_text)
         elif platform == "facebook":
             result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
+        elif platform == "youtube":
+            result = await _post_youtube(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
         else:
             raise HTTPException(400, f"Direct posting to {platform} is not yet supported.")
     except HTTPException:
@@ -309,7 +304,8 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
     except Exception as e:
         raise HTTPException(500, f"Failed to post to {platform}: {str(e)}")
 
-    # Mark library item as published
+    # Mark as published for all outcomes — including script_ready
+    # (the script was "sent" — it's done from HomeBridge's perspective)
     if body.library_item_id:
         database.library_update(body.library_item_id, current_user["id"], {
             "status":       "published",
@@ -328,6 +324,8 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
         "platform": platform,
         "post_id":  result.get("id", ""),
         "post_url": result.get("url", ""),
+        "message":  result.get("message", ""),
+        "action":   result.get("action", "posted"),
     }
 
 
@@ -340,95 +338,55 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
     if not person_urn.startswith("urn:"):
         person_urn = f"urn:li:person:{person_urn}"
 
-    # If image provided, register it with LinkedIn first
     media_asset = None
     if image_url:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # Step 1: Register upload
                 reg = await client.post(
                     "https://api.linkedin.com/v2/assets?action=registerUpload",
-                    json={
-                        "registerUploadRequest": {
-                            "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-                            "owner": person_urn,
-                            "serviceRelationships": [{
-                                "relationshipType": "OWNER",
-                                "identifier": "urn:li:userGeneratedContent"
-                            }]
-                        }
-                    },
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Content-Type":  "application/json",
-                        "X-Restli-Protocol-Version": "2.0.0",
-                    }
+                    json={"registerUploadRequest": {
+                        "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+                        "owner": person_urn,
+                        "serviceRelationships": [{"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}]
+                    }},
+                    headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "X-Restli-Protocol-Version": "2.0.0"}
                 )
                 if reg.status_code in (200, 201):
-                    reg_data     = reg.json()
-                    upload_url   = reg_data["value"]["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
-                    media_asset  = reg_data["value"]["asset"]
-                    # Step 2: Upload image bytes
-                    img_resp = await client.get(image_url)
-                    await client.put(
-                        upload_url,
-                        content=img_resp.content,
-                        headers={"Authorization": f"Bearer {access_token}"}
-                    )
+                    reg_data    = reg.json()
+                    upload_url  = reg_data["value"]["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
+                    media_asset = reg_data["value"]["asset"]
+                    img_resp    = await client.get(image_url)
+                    await client.put(upload_url, content=img_resp.content, headers={"Authorization": f"Bearer {access_token}"})
         except Exception:
-            media_asset = None  # Image upload failed — fall back to text-only post
+            media_asset = None
 
-    # Build payload
     if media_asset:
         payload = {
-            "author": person_urn,
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {
-                "com.linkedin.ugc.ShareContent": {
-                    "shareCommentary": {"text": text},
-                    "shareMediaCategory": "IMAGE",
-                    "media": [{
-                        "status": "READY",
-                        "description": {"text": text[:200]},
-                        "media": media_asset,
-                        "title": {"text": text.split("\n")[0][:100]}
-                    }]
-                }
-            },
+            "author": person_urn, "lifecycleState": "PUBLISHED",
+            "specificContent": {"com.linkedin.ugc.ShareContent": {
+                "shareCommentary": {"text": text}, "shareMediaCategory": "IMAGE",
+                "media": [{"status": "READY", "description": {"text": text[:200]}, "media": media_asset, "title": {"text": text.split("\n")[0][:100]}}]
+            }},
             "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
         }
     else:
         payload = {
-            "author": person_urn,
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {
-                "com.linkedin.ugc.ShareContent": {
-                    "shareCommentary": {"text": text},
-                    "shareMediaCategory": "NONE",
-                }
-            },
+            "author": person_urn, "lifecycleState": "PUBLISHED",
+            "specificContent": {"com.linkedin.ugc.ShareContent": {"shareCommentary": {"text": text}, "shareMediaCategory": "NONE"}},
             "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
         }
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            "https://api.linkedin.com/v2/ugcPosts",
-            json=payload,
-            headers={
-                "Authorization":             f"Bearer {access_token}",
-                "Content-Type":              "application/json",
-                "X-Restli-Protocol-Version": "2.0.0",
-            }
+            "https://api.linkedin.com/v2/ugcPosts", json=payload,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "X-Restli-Protocol-Version": "2.0.0"}
         )
 
     if resp.status_code not in (200, 201):
         raise HTTPException(502, f"LinkedIn API error {resp.status_code}: {resp.text}")
 
     post_id = resp.headers.get("x-restli-id", "")
-    return {
-        "id":  post_id,
-        "url": f"https://www.linkedin.com/feed/update/{post_id}/" if post_id else "",
-    }
+    return {"id": post_id, "url": f"https://www.linkedin.com/feed/update/{post_id}/" if post_id else "", "action": "posted"}
 
 
 # ─────────────────────────────────────────────
@@ -436,10 +394,7 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
 # ─────────────────────────────────────────────
 async def _post_google(access_token: str, text: str) -> dict:
     async with httpx.AsyncClient() as client:
-        accts     = await client.get(
-            "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
-            headers={"Authorization": f"Bearer {access_token}"}
-        )
+        accts = await client.get("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", headers={"Authorization": f"Bearer {access_token}"})
         acct_data = accts.json()
 
     accounts = acct_data.get("accounts", [])
@@ -449,11 +404,7 @@ async def _post_google(access_token: str, text: str) -> dict:
     account_name = accounts[0]["name"]
 
     async with httpx.AsyncClient() as client:
-        locs     = await client.get(
-            f"https://mybusinessbusinessinformation.googleapis.com/v1/{account_name}/locations",
-            params={"readMask": "name,title"},
-            headers={"Authorization": f"Bearer {access_token}"}
-        )
+        locs     = await client.get(f"https://mybusinessbusinessinformation.googleapis.com/v1/{account_name}/locations", params={"readMask": "name,title"}, headers={"Authorization": f"Bearer {access_token}"})
         loc_data = locs.json()
 
     locations = loc_data.get("locations", [])
@@ -462,30 +413,18 @@ async def _post_google(access_token: str, text: str) -> dict:
 
     location_name = locations[0]["name"]
 
-    payload = {
-        "languageCode": "en-US",
-        "summary":      text[:1500],
-        "topicType":    "STANDARD",
-    }
-
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"https://mybusiness.googleapis.com/v4/{location_name}/localPosts",
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type":  "application/json",
-            }
+            json={"languageCode": "en-US", "summary": text[:1500], "topicType": "STANDARD"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         )
 
     if resp.status_code not in (200, 201):
         raise HTTPException(502, f"Google Business API error {resp.status_code}: {resp.text}")
 
     result = resp.json()
-    return {
-        "id":  result.get("name", ""),
-        "url": result.get("searchUrl", ""),
-    }
+    return {"id": result.get("name", ""), "url": result.get("searchUrl", ""), "action": "posted"}
 
 
 # ─────────────────────────────────────────────
@@ -493,10 +432,7 @@ async def _post_google(access_token: str, text: str) -> dict:
 # ─────────────────────────────────────────────
 async def _post_facebook(access_token: str, user_id: str, text: str, image_url: str = None) -> dict:
     async with httpx.AsyncClient() as client:
-        pages     = await client.get(
-            f"https://graph.facebook.com/v19.0/{user_id}/accounts",
-            params={"access_token": access_token}
-        )
+        pages     = await client.get(f"https://graph.facebook.com/v19.0/{user_id}/accounts", params={"access_token": access_token})
         page_data = pages.json()
 
     page_list = page_data.get("data", [])
@@ -507,11 +443,10 @@ async def _post_facebook(access_token: str, user_id: str, text: str, image_url: 
     page_id    = page["id"]
     page_token = page["access_token"]
 
-    post_data = {"message": text, "access_token": page_token}
+    post_data   = {"message": text, "access_token": page_token}
     fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/feed"
     if image_url:
-        # Post with photo
-        fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/photos"
+        fb_endpoint          = f"https://graph.facebook.com/v19.0/{page_id}/photos"
         post_data["url"]     = image_url
         post_data["caption"] = text
 
@@ -523,9 +458,64 @@ async def _post_facebook(access_token: str, user_id: str, text: str, image_url: 
 
     result  = resp.json()
     post_id = result.get("id", "")
+    return {"id": post_id, "url": f"https://www.facebook.com/{post_id.replace('_', '/')}" if post_id else "", "action": "posted"}
+
+
+# ─────────────────────────────────────────────
+# PLATFORM POSTING — YouTube
+#
+# YouTube is a VIDEO platform. The API does not support text-only posts.
+# Two paths:
+#   1. Community Posts — works if channel has Brand Account + 500 subscribers
+#   2. Script Ready — returns guidance to film and upload manually via YouTube Studio
+#
+# The script HomeBridge generates IS the content. The agent films it.
+# HomeBridge marks the item as published either way — the script was prepared.
+# ─────────────────────────────────────────────
+async def _post_youtube(access_token: str, channel_id: str, text: str, image_url: str = None) -> dict:
+
+    # Attempt Community Post (works for qualifying channels)
+    community_payload = {
+        "snippet": {
+            "type": "textPost",
+            "textOriginalContent": text[:2000],
+        }
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://www.googleapis.com/youtube/v3/communityPosts",
+                params={"part": "snippet"},
+                json=community_payload,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            )
+
+        if resp.status_code in (200, 201):
+            result  = resp.json()
+            post_id = result.get("id", "")
+            channel = channel_id or ""
+            return {
+                "id":      post_id,
+                "url":     f"https://www.youtube.com/channel/{channel}/community" if channel else "https://www.youtube.com",
+                "action":  "posted",
+                "message": "Posted to your YouTube Community tab.",
+            }
+
+    except Exception:
+        pass
+
+    # Community posts not available — return script_ready
+    # Frontend detects action="script_ready" and shows Film This workflow
     return {
-        "id":  post_id,
-        "url": f"https://www.facebook.com/{post_id.replace('_', '/')}" if post_id else "",
+        "id":      "",
+        "url":     "https://studio.youtube.com",
+        "action":  "script_ready",
+        "message": (
+            "Your YouTube script is ready to film. YouTube requires video content — "
+            "open YouTube Studio, create a Short, and use your script. "
+            "Your script is saved in My Content."
+        ),
     }
 
 
@@ -547,6 +537,7 @@ def _format_post_text(content: dict, platform: str) -> str:
     cta      = content.get("cta", "")
     hashtags = content.get("hashtags", "")
     headline = content.get("headline", "")
+    script   = content.get("script", "")
 
     if platform == "linkedin":
         parts = [p for p in [headline, post, cta, hashtags] if p]
@@ -554,6 +545,10 @@ def _format_post_text(content: dict, platform: str) -> str:
         parts = [p for p in [post, cta] if p]
     elif platform == "instagram":
         parts = [p for p in [post, cta, hashtags] if p]
+    elif platform == "youtube":
+        # Use script if available (generated for YouTube), else post body
+        base  = script or post
+        parts = [p for p in [headline, base, cta] if p]
     else:
         parts = [p for p in [post, cta] if p]
 
