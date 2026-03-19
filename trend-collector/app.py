@@ -108,6 +108,8 @@ class ImageGenRequest(BaseModel):
     headline: str
     niche: str
     market: str
+    thumbnail_idea: str = ""
+    post_excerpt: str = ""
 
 @app.post("/image/generate")
 async def generate_image(req: ImageGenRequest, current_user=Depends(get_current_user)):
@@ -115,18 +117,33 @@ async def generate_image(req: ImageGenRequest, current_user=Depends(get_current_
     if not openai_key:
         raise HTTPException(503, "Image generation is not configured.")
 
-    # Build a prompt that creates a professional real estate social graphic
-    niche_clean  = req.niche.strip() or "residential real estate"
-    market_clean = req.market.strip() or "your market"
-    headline     = req.headline.strip()[:120]
+    # Build a prompt — thumbnailIdea is the AI's own creative brief for this post
+    niche_clean      = req.niche.strip() or "residential real estate"
+    market_clean     = req.market.strip() or "your market"
+    headline         = req.headline.strip()[:120]
+    thumbnail_idea   = req.thumbnail_idea.strip()[:300]
+    post_excerpt     = req.post_excerpt.strip()[:200]
 
-    prompt = (
-        f"A clean, modern, professional real estate social media graphic for a post about: '{headline}'. "
-        f"Market: {market_clean}. Niche: {niche_clean}. "
-        f"Style: sophisticated, minimal, photo-realistic. "
-        f"No text overlays. Warm natural light. High-end residential photography aesthetic. "
-        f"Suitable for LinkedIn and Facebook. Aspect ratio 1:1."
-    )
+    if thumbnail_idea:
+        # Use the AI-generated thumbnail idea as the primary creative brief
+        prompt = (
+            f"Professional real estate social media photo for LinkedIn/Facebook. "
+            f"Creative brief: {thumbnail_idea}. "
+            f"Post topic: {headline}. "
+            f"Market: {market_clean}. "
+            f"Style: high-end real estate photography, sophisticated, minimal composition. "
+            f"Photo-realistic. No text, no words, no overlays. Natural light. Square format."
+        )
+    else:
+        # Fallback: build from headline + niche + post excerpt
+        context = post_excerpt or headline
+        prompt = (
+            f"Professional real estate social media photo for LinkedIn/Facebook. "
+            f"Topic: {context}. "
+            f"Niche: {niche_clean}. Market: {market_clean}. "
+            f"Style: high-end real estate photography, sophisticated, minimal composition. "
+            f"Photo-realistic. No text, no words, no overlays. Natural light. Square format."
+        )
 
     async with _httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
