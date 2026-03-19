@@ -48,7 +48,7 @@ PLATFORMS = {
     "linkedin": {
         "auth_url":      "https://www.linkedin.com/oauth/v2/authorization",
         "token_url":     "https://www.linkedin.com/oauth/v2/accessToken",
-        "scopes":        "openid profile w_member_social",
+        "scopes":        "openid profile w_member_social w_organization_social rw_organization_admin",
         "client_id":     LINKEDIN_CLIENT_ID,
         "client_secret": LINKEDIN_CLIENT_SECRET,
         "redirect_uri":  f"{BACKEND_URL}/social/linkedin/callback",
@@ -260,7 +260,8 @@ class PostRequest(BaseModel):
     platform: str
     content: Optional[str] = None
     content_override: Optional[str] = None
-    image_url: Optional[str] = None
+    image_url: Optional[str] = None        # Generated image to attach
+    org_urn: Optional[str] = None          # LinkedIn org URN for company page posting
 
 @router.post("/post")
 async def post_to_platform(body: PostRequest, current_user=Depends(get_current_user)):
@@ -290,7 +291,7 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
 
     try:
         if platform == "linkedin":
-            result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
+            result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text, image_url, body.org_urn)
         elif platform == "google":
             result = await _post_google(access_token, post_text)
         elif platform == "facebook":
@@ -332,11 +333,14 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
 # ─────────────────────────────────────────────
 # PLATFORM POSTING — LinkedIn
 # ─────────────────────────────────────────────
-async def _post_linkedin(access_token: str, person_urn: str, text: str, image_url: str = None) -> dict:
-    if not person_urn:
-        raise HTTPException(400, "LinkedIn user ID not found. Please reconnect your LinkedIn account.")
-    if not person_urn.startswith("urn:"):
-        person_urn = f"urn:li:person:{person_urn}"
+async def _post_linkedin(access_token: str, person_urn: str, text: str, image_url: str = None, org_urn: str = None) -> dict:
+    # Determine author — use org URN for company page posting, person URN for personal
+    if org_urn:
+        author = org_urn if org_urn.startswith("urn:") else f"urn:li:organization:{org_urn}"
+    else:
+        if not person_urn:
+            raise HTTPException(400, "LinkedIn user ID not found. Please reconnect your LinkedIn account.")
+        author = person_urn if person_urn.startswith("urn:") else f"urn:li:person:{person_urn}"
 
     media_asset = None
     if image_url:
@@ -346,7 +350,7 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
                     "https://api.linkedin.com/v2/assets?action=registerUpload",
                     json={"registerUploadRequest": {
                         "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-                        "owner": person_urn,
+                        "owner": author,
                         "serviceRelationships": [{"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}]
                     }},
                     headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "X-Restli-Protocol-Version": "2.0.0"}
@@ -362,7 +366,7 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
 
     if media_asset:
         payload = {
-            "author": person_urn, "lifecycleState": "PUBLISHED",
+            "author": author, "lifecycleState": "PUBLISHED",
             "specificContent": {"com.linkedin.ugc.ShareContent": {
                 "shareCommentary": {"text": text}, "shareMediaCategory": "IMAGE",
                 "media": [{"status": "READY", "description": {"text": text[:200]}, "media": media_asset, "title": {"text": text.split("\n")[0][:100]}}]
@@ -371,7 +375,7 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
         }
     else:
         payload = {
-            "author": person_urn, "lifecycleState": "PUBLISHED",
+            "author": author, "lifecycleState": "PUBLISHED",
             "specificContent": {"com.linkedin.ugc.ShareContent": {"shareCommentary": {"text": text}, "shareMediaCategory": "NONE"}},
             "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
         }
