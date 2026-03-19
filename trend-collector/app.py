@@ -662,3 +662,69 @@ async def public_agent_profile(user_id: int):
         raise
     except Exception as e:
         raise HTTPException(500, f"Profile lookup failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# WAITLIST / FIRST LOOK — Public endpoint
+# No auth required. Stores lead + sends email via SendGrid.
+# ─────────────────────────────────────────────
+@app.post("/waitlist")
+async def submit_waitlist(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid request body.")
+
+    name    = str(body.get("name",    "")).strip()[:120]
+    email   = str(body.get("email",   "")).strip()[:200]
+    role    = str(body.get("role",    "")).strip()[:120]
+    company = str(body.get("company", "")).strip()[:200]
+    message = str(body.get("message", "")).strip()[:1000]
+
+    if not name or not email:
+        raise HTTPException(400, "Name and email are required.")
+
+    # Store in DB
+    try:
+        from database import get_conn
+        conn = get_conn()
+        c    = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS waitlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT, email TEXT, role TEXT, company TEXT,
+                message TEXT, submitted_at TEXT
+            )
+        """)
+        from datetime import datetime
+        c.execute(
+            "INSERT INTO waitlist (name, email, role, company, message, submitted_at) VALUES (?,?,?,?,?,?)",
+            (name, email, role, company, message, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Waitlist] DB error: {e}")
+
+    # Send email via SendGrid
+    try:
+        import httpx as _httpx
+        sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
+        sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "support@homebridgegroup.co")
+        if sendgrid_key:
+            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\nRole: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
+            await _httpx.AsyncClient().post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={"Authorization": f"Bearer {sendgrid_key}", "Content-Type": "application/json"},
+                json={
+                    "personalizations": [{"to": [{"email": "support@homebridgegroup.co"}]}],
+                    "from": {"email": sendgrid_from, "name": "HomeBridge Waitlist"},
+                    "subject": f"First Look Request: {name} — {company or role}",
+                    "content": [{"type": "text/plain", "value": email_body}]
+                },
+                timeout=10
+            )
+    except Exception as e:
+        print(f"[Waitlist] SendGrid error: {e}")
+
+    return {"ok": True, "message": "Request received. We'll be in touch shortly."}
