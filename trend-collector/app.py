@@ -99,6 +99,50 @@ app.include_router(social_router)
 
 
 # ─────────────────────────────────────────────
+# CIR VERIFICATION — public endpoint, no auth required
+# ─────────────────────────────────────────────
+@app.get("/verify/{cir_id}")
+async def verify_post(cir_id: str):
+    """Public endpoint — verifies a HomeBridge CIR post record."""
+    try:
+        from database import get_conn
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""
+            SELECT li.id, li.niche, li.approved_at, li.published_at, li.cir_id,
+                   u.agent_name, u.brokerage, u.email,
+                   s.setup_json
+            FROM library_items li
+            JOIN users u ON u.id = li.user_id
+            LEFT JOIN agent_setup s ON s.user_id = li.user_id
+            WHERE li.cir_id = ?
+        """, (cir_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(404, "Verification record not found.")
+        setup = {}
+        try: setup = json.loads(row["setup_json"] or "{}")
+        except Exception: pass
+        return {
+            "cir_id":       row["cir_id"],
+            "agent_name":   row["agent_name"],
+            "brokerage":    row["brokerage"],
+            "market":       setup.get("market", ""),
+            "niche":        row["niche"],
+            "approved_at":  row["approved_at"],
+            "published_at": row["published_at"],
+            "status":       "verified",
+            "platform":     "HomeBridge",
+            "statement":    "This content was reviewed and approved by a licensed real estate professional before publishing.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Verification lookup failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────
 # IMAGE GENERATION
 # ─────────────────────────────────────────────
 import httpx as _httpx
@@ -182,6 +226,25 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
+    # Migrate new columns — safe to run on every startup (IF NOT EXISTS pattern)
+    try:
+        from database import get_conn
+        conn = get_conn()
+        c = conn.cursor()
+        # Add cir_id column if missing
+        try: c.execute("ALTER TABLE library_items ADD COLUMN cir_id TEXT")
+        except Exception: pass
+        # Add image_url column if missing
+        try: c.execute("ALTER TABLE library_items ADD COLUMN image_url TEXT")
+        except Exception: pass
+        # Add licensed_state column to agent_setup if missing
+        try: c.execute("ALTER TABLE agent_setup ADD COLUMN licensed_state TEXT DEFAULT ''")
+        except Exception: pass
+        conn.commit()
+        conn.close()
+        print("[Startup] ✓ Schema migrations complete")
+    except Exception as e:
+        print(f"[Startup] Schema migration warning: {e}")
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
@@ -236,7 +299,18 @@ async def update_library_item(item_id: int, body: LibraryPatchRequest, current_u
     if body.content is not None: updates["content"] = body.content
     if body.compliance is not None: updates["compliance"] = body.compliance
     if body.copiedPlatforms is not None: updates["copied_platforms"] = body.copiedPlatforms
-    if body.approvedAt is not None: updates["approved_at"] = body.approvedAt
+    if body.approvedAt is not None:
+        updates["approved_at"] = body.approvedAt
+        # Generate CIR ID at approval time if not already set
+        try:
+            existing = database.library_get_item(item_id, current_user["id"])
+            if existing and not existing.get("cir_id"):
+                import hashlib, time
+                raw = f"HB-{current_user['id']}-{item_id}-{int(time.time())}"
+                cir_id = "HB-" + hashlib.sha256(raw.encode()).hexdigest()[:10].upper()
+                updates["cir_id"] = cir_id
+        except Exception:
+            pass
     if body.publishedAt is not None: updates["published_at"] = body.publishedAt
     item = library_update(item_id, current_user["id"], updates)
     if not item:
