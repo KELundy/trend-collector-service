@@ -94,131 +94,6 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(content_engine_router)
-from social import router as social_router
-app.include_router(social_router)
-
-
-# ─────────────────────────────────────────────
-# CIR VERIFICATION — public endpoint, no auth required
-# ─────────────────────────────────────────────
-@app.get("/verify/{cir_id}")
-async def verify_post(cir_id: str):
-    """Public endpoint — verifies a HomeBridge CIR post record."""
-    try:
-        from database import get_conn
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("""
-            SELECT li.id, li.niche, li.approved_at, li.published_at, li.cir_id,
-                   u.agent_name, u.brokerage, u.email,
-                   s.setup_json
-            FROM library_items li
-            JOIN users u ON u.id = li.user_id
-            LEFT JOIN agent_setup s ON s.user_id = li.user_id
-            WHERE li.cir_id = ?
-        """, (cir_id,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            raise HTTPException(404, "Verification record not found.")
-        setup = {}
-        try: setup = json.loads(row["setup_json"] or "{}")
-        except Exception: pass
-        return {
-            "cir_id":       row["cir_id"],
-            "agent_name":   row["agent_name"],
-            "brokerage":    row["brokerage"],
-            "market":       setup.get("market", ""),
-            "niche":        row["niche"],
-            "approved_at":  row["approved_at"],
-            "published_at": row["published_at"],
-            "status":       "verified",
-            "platform":     "HomeBridge",
-            "statement":    "This content was reviewed and approved by a licensed real estate professional before publishing.",
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Verification lookup failed: {str(e)}")
-
-
-# ─────────────────────────────────────────────
-# IMAGE GENERATION
-# ─────────────────────────────────────────────
-import httpx as _httpx
-
-class ImageGenRequest(BaseModel):
-    library_item_id: int
-    headline: str
-    niche: str
-    market: str
-    thumbnail_idea: str = ""
-    post_excerpt: str = ""
-
-@app.post("/image/generate")
-async def generate_image(req: ImageGenRequest, current_user=Depends(get_current_user)):
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    if not openai_key:
-        raise HTTPException(503, "Image generation is not configured.")
-
-    # Build a prompt — thumbnailIdea is the AI's own creative brief for this post
-    niche_clean      = req.niche.strip() or "residential real estate"
-    market_clean     = req.market.strip() or "your market"
-    headline         = req.headline.strip()[:120]
-    thumbnail_idea   = req.thumbnail_idea.strip()[:300]
-    post_excerpt     = req.post_excerpt.strip()[:200]
-
-    if thumbnail_idea:
-        # Use the AI-generated thumbnail idea as the primary creative brief
-        prompt = (
-            f"Professional real estate social media photo for LinkedIn/Facebook. "
-            f"Creative brief: {thumbnail_idea}. "
-            f"Post topic: {headline}. "
-            f"Market: {market_clean}. "
-            f"Style: high-end real estate photography, sophisticated, minimal composition. "
-            f"Photo-realistic. No text, no words, no overlays. Natural light. Square format."
-        )
-    else:
-        # Fallback: build from headline + niche + post excerpt
-        context = post_excerpt or headline
-        prompt = (
-            f"Professional real estate social media photo for LinkedIn/Facebook. "
-            f"Topic: {context}. "
-            f"Niche: {niche_clean}. Market: {market_clean}. "
-            f"Style: high-end real estate photography, sophisticated, minimal composition. "
-            f"Photo-realistic. No text, no words, no overlays. Natural light. Square format."
-        )
-
-    async with _httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/images/generations",
-            headers={
-                "Authorization": f"Bearer {openai_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model":   "dall-e-3",
-                "prompt":  prompt,
-                "n":       1,
-                "size":    "1024x1024",
-                "quality": "standard",
-            }
-        )
-
-    if resp.status_code != 200:
-        detail = resp.json().get("error", {}).get("message", "Image generation failed.")
-        raise HTTPException(502, detail)
-
-    image_url = resp.json()["data"][0]["url"]
-
-    # Store image URL on the library item
-    if req.library_item_id:
-        try:
-            library_update(req.library_item_id, current_user["id"], {"image_url": image_url})
-        except Exception:
-            pass  # Non-fatal — return URL even if DB update fails
-
-    return {"image_url": image_url}
 
 
 @app.on_event("startup")
@@ -226,25 +101,6 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
-    # Migrate new columns — safe to run on every startup (IF NOT EXISTS pattern)
-    try:
-        from database import get_conn
-        conn = get_conn()
-        c = conn.cursor()
-        # Add cir_id column if missing
-        try: c.execute("ALTER TABLE library_items ADD COLUMN cir_id TEXT")
-        except Exception: pass
-        # Add image_url column if missing
-        try: c.execute("ALTER TABLE library_items ADD COLUMN image_url TEXT")
-        except Exception: pass
-        # Add licensed_state column to agent_setup if missing
-        try: c.execute("ALTER TABLE agent_setup ADD COLUMN licensed_state TEXT DEFAULT ''")
-        except Exception: pass
-        conn.commit()
-        conn.close()
-        print("[Startup] ✓ Schema migrations complete")
-    except Exception as e:
-        print(f"[Startup] Schema migration warning: {e}")
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
@@ -299,18 +155,7 @@ async def update_library_item(item_id: int, body: LibraryPatchRequest, current_u
     if body.content is not None: updates["content"] = body.content
     if body.compliance is not None: updates["compliance"] = body.compliance
     if body.copiedPlatforms is not None: updates["copied_platforms"] = body.copiedPlatforms
-    if body.approvedAt is not None:
-        updates["approved_at"] = body.approvedAt
-        # Generate CIR ID at approval time if not already set
-        try:
-            existing = database.library_get_item(item_id, current_user["id"])
-            if existing and not existing.get("cir_id"):
-                import hashlib, time
-                raw = f"HB-{current_user['id']}-{item_id}-{int(time.time())}"
-                cir_id = "HB-" + hashlib.sha256(raw.encode()).hexdigest()[:10].upper()
-                updates["cir_id"] = cir_id
-        except Exception:
-            pass
+    if body.approvedAt is not None: updates["approved_at"] = body.approvedAt
     if body.publishedAt is not None: updates["published_at"] = body.publishedAt
     item = library_update(item_id, current_user["id"], updates)
     if not item:
@@ -703,3 +548,117 @@ async def broker_agent_report(req: dict, current_user=Depends(get_current_user))
     pdf_bytes = generate_compliance_pdf(user_id=agent["id"], agent_name=agent["agent_name"], brokerage=agent["brokerage"], email=agent["email"], setup={})
     filename = f"Compliance_{agent['agent_name'].replace(' ','_')}.pdf"
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ─────────────────────────────────────────────
+# PUBLIC AGENT PROFILE — CIR™ Verified
+# No auth required. Safe public data only.
+# Never returns email, phone, tokens, or scores.
+# Called by homebridgegroup.co/agent-profile.html?id={user_id}
+# ─────────────────────────────────────────────
+@app.get("/profile/{user_id}")
+async def public_agent_profile(user_id: int):
+    try:
+        from database import get_conn
+        from datetime import datetime, timedelta
+        conn = get_conn()
+        c    = conn.cursor()
+
+        # User basics — agent or broker only
+        c.execute("SELECT id, agent_name, brokerage, role FROM users WHERE id = ?", (user_id,))
+        user = c.fetchone()
+        if not user or user["role"] not in ("agent", "broker"):
+            raise HTTPException(404, "Profile not found.")
+
+        # Setup data
+        c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+        setup_row = c.fetchone()
+        setup = {}
+        try:
+            if setup_row:
+                setup = json.loads(setup_row["setup_json"] or "{}")
+        except Exception:
+            pass
+
+        # Library stats
+        now       = datetime.utcnow()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        c.execute("""
+            SELECT id, status, approved_at, published_at, niche, content, cir_id, compliance
+            FROM library_items
+            WHERE user_id = ? AND status IN ('approved','published')
+            ORDER BY approved_at DESC
+        """, (user_id,))
+        all_items = [dict(r) for r in c.fetchall()]
+
+        posts_total     = len(all_items)
+        posts_30_days   = sum(1 for i in all_items if (i.get("approved_at") or "") >= month_ago)
+        posts_published = sum(1 for i in all_items if i.get("status") == "published")
+        cir_count       = sum(1 for i in all_items if i.get("cir_id"))
+
+        # Compliance pct — clean passes only
+        clean_count = 0
+        for item in all_items:
+            try:
+                comp = json.loads(item.get("compliance") or "{}")
+                if comp.get("overallStatus") in ("compliant", "pass"):
+                    clean_count += 1
+            except Exception:
+                clean_count += 1
+        compliance_pct = round((clean_count / posts_total * 100)) if posts_total > 0 else 100
+
+        # Recent headlines — last 3, title only, no full content
+        recent_headlines = []
+        for item in all_items[:3]:
+            try:
+                content  = json.loads(item.get("content") or "{}")
+                headline = content.get("headline", "")
+                if headline:
+                    recent_headlines.append({
+                        "headline": headline,
+                        "niche":    item.get("niche", ""),
+                        "date":     (item.get("approved_at") or "")[:10],
+                        "cir_id":   item.get("cir_id", ""),
+                    })
+            except Exception:
+                pass
+
+        # Member since
+        c.execute("SELECT MIN(approved_at) as earliest FROM library_items WHERE user_id = ?", (user_id,))
+        earliest_row = c.fetchone()
+        member_since = ""
+        if earliest_row and earliest_row["earliest"]:
+            try:
+                dt = datetime.fromisoformat(earliest_row["earliest"])
+                member_since = dt.strftime("%B %Y")
+            except Exception:
+                pass
+
+        conn.close()
+
+        return {
+            "id":               user_id,
+            "agent_name":       user["agent_name"] or "",
+            "brokerage":        user["brokerage"]  or "",
+            "market":           setup.get("market", ""),
+            "business_name":    setup.get("businessName", ""),
+            "short_bio":        setup.get("shortBio", ""),
+            "service_areas":    setup.get("serviceAreas", []),
+            "niches":           setup.get("primaryNiches", []),
+            "designations":     setup.get("designations", []),
+            "posts_total":      posts_total,
+            "posts_30_days":    posts_30_days,
+            "posts_published":  posts_published,
+            "cir_count":        cir_count,
+            "compliance_pct":   compliance_pct,
+            "member_since":     member_since,
+            "recent_headlines": recent_headlines,
+            "cir_verified":     cir_count > 0,
+            "profile_url":      f"https://homebridgegroup.co/agent-profile.html?id={user_id}",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Profile lookup failed: {str(e)}")
