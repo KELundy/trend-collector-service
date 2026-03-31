@@ -112,6 +112,11 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
+    migrate_context_column()
+    tag_existing_as_marketing(2)
+    migrate_context_column()
+    # Option A: tag user_id=2 existing content as hb_marketing
+    tag_existing_as_marketing(2)
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
@@ -142,13 +147,17 @@ class LibraryPatchRequest(BaseModel):
 
 
 @app.get("/library")
-async def get_library(current_user=Depends(get_current_user)):
-    items = library_get_all(current_user["id"])
+async def get_library(context: str = "agent", current_user=Depends(get_current_user)):
+    items = library_get_all(current_user["id"], context=context)
     return {"items": items, "count": len(items)}
 
 
 @app.post("/library")
 async def save_to_library(payload: dict, current_user=Depends(get_current_user)):
+    # context comes from payload or defaults to agent
+    _ctx = str(payload.get("context", "agent"))
+    if _ctx not in ("agent", "hb_marketing"): _ctx = "agent"
+    payload["context"] = _ctx
     niche      = payload.get("niche", "")
     content    = payload.get("content", {})
     compliance = payload.get("compliance", {})
