@@ -346,6 +346,28 @@ class SetupSaveRequest(BaseModel):
 @app.post("/setup/save")
 async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_user)):
     save_agent_setup(current_user["id"], body.setup)
+
+    # Auto-generate slug if this agent doesn't have one yet
+    from database import get_conn as _gc_slug
+    _conn_s = _gc_slug()
+    _c_s    = _conn_s.cursor()
+    _c_s.execute("SELECT agent_slug FROM users WHERE id = ?", (current_user["id"],))
+    _slug_row = _c_s.fetchone()
+    if not (_slug_row and _slug_row["agent_slug"]):
+        _auto_slug = _make_slug(
+            current_user.get("agent_name","agent"),
+            (body.setup or {}).get("market","")
+        )
+        # Ensure uniqueness
+        _c_s.execute("SELECT id FROM users WHERE agent_slug = ? AND id != ?",
+                     (_auto_slug, current_user["id"]))
+        if _c_s.fetchone():
+            _auto_slug = f"{_auto_slug}-{current_user['id']}"
+        _c_s.execute("UPDATE users SET agent_slug = ? WHERE id = ?",
+                     (_auto_slug, current_user["id"]))
+        _conn_s.commit()
+    _conn_s.close()
+
     return {"success": True}
 
 @app.get("/setup/get")
@@ -852,6 +874,339 @@ async def oauth_status(current_user: dict = Depends(get_current_user)):
         "credentials": checks,
         "connected_platforms": connected,
     }
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# AGENT AUTHORITY PAGES — Public SEO infrastructure
+# Every agent gets: {slug}.homebridgegroup.co
+# Slug = firstname-lastname-primarycity (auto-generated, customizable)
+# These endpoints are PUBLIC — no auth required.
+# They power Google ranking, AI search citation, and agent presence.
+# ═══════════════════════════════════════════════════════════════
+
+import re as _re
+
+def _make_slug(agent_name: str, market: str) -> str:
+    """Generate a URL slug from agent name + primary market city."""
+    name = _re.sub(r"[^a-z0-9]+", "-", agent_name.lower().strip()).strip("-")
+    city = ""
+    if market:
+        # Take the first word before any comma, dash, or 'metro'
+        raw = market.split(",")[0].split("-")[0]
+        raw = _re.sub(r"(?i)\bmetro\b|\barea\b|\bcounty\b", "", raw).strip()
+        words = raw.split()
+        city  = words[0].lower() if words else ""
+        city  = _re.sub(r"[^a-z0-9]+", "", city)
+    slug = f"{name}-{city}" if city else name
+    return slug[:60]
+
+def _get_agent_by_slug(slug: str) -> dict | None:
+    """Look up a user by their agent_slug. Returns user row or None."""
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM users WHERE agent_slug = ? AND is_active = 1", (slug,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+@app.get("/public/agent/{slug}")
+async def public_agent_profile(slug: str):
+    """
+    Public agent authority page data.
+    Powers SEO landing pages at {slug}.homebridgegroup.co
+    Returns full agent identity + all verified posts (full text).
+    No auth required — this is intentionally public for Google/AI indexing.
+    """
+    import json as _json
+    from database import get_conn as _gc
+
+    user = _get_agent_by_slug(slug)
+    if not user:
+        raise HTTPException(404, "Agent profile not found.")
+
+    user_id = user["id"]
+    conn    = _gc()
+    c       = conn.cursor()
+
+    # Setup data
+    c.execute("SELECT setup_data FROM user_setup WHERE user_id = ?", (user_id,))
+    row   = c.fetchone()
+    setup = {}
+    if row:
+        try:
+            setup = _json.loads(row["setup_data"] or "{}")
+        except Exception:
+            pass
+
+    # All approved/published posts — FULL TEXT for SEO
+    now       = datetime.utcnow()
+    month_ago = (now - timedelta(days=30)).isoformat()
+
+    c.execute("""
+        SELECT id, niche, content, compliance, cir_id,
+               approved_at, published_at, status
+        FROM library_items
+        WHERE user_id = ? AND status IN ('approved','published')
+        ORDER BY approved_at DESC
+        LIMIT 50
+    """, (user_id,))
+    items = [dict(r) for r in c.fetchall()]
+
+    # Stats
+    posts_total   = len(items)
+    posts_30_days = sum(1 for i in items if (i.get("approved_at") or "") >= month_ago)
+    cir_count     = sum(1 for i in items if i.get("cir_id"))
+
+    clean_count = 0
+    for item in items:
+        try:
+            comp = _json.loads(item.get("compliance") or "{}")
+            if comp.get("overallStatus") in ("compliant","pass"):
+                clean_count += 1
+        except Exception:
+            clean_count += 1
+    compliance_pct = round((clean_count / posts_total * 100)) if posts_total > 0 else 100
+
+    # Member since
+    member_since = ""
+    if items:
+        oldest = min((i.get("approved_at") or "") for i in items if i.get("approved_at"))
+        if oldest:
+            try:
+                member_since = datetime.fromisoformat(oldest).strftime("%B %Y")
+            except Exception:
+                pass
+
+    # Build posts array with full text
+    posts = []
+    for item in items:
+        try:
+            cd = _json.loads(item.get("content") or "{}")
+        except Exception:
+            cd = {}
+        body      = cd.get("body","") or cd.get("post","") or cd.get("content","")
+        headline  = cd.get("headline","") or cd.get("title","")
+        if not body and not headline:
+            continue
+        posts.append({
+            "id":          item["id"],
+            "headline":    headline,
+            "body":        body,
+            "niche":       item.get("niche",""),
+            "cir_id":      item.get("cir_id",""),
+            "approved_at": (item.get("approved_at") or "")[:10],
+            "verify_url":  f"https://homebridgegroup.co/verify.html?cir={item.get('cir_id','')}" if item.get("cir_id") else "",
+        })
+
+    conn.close()
+
+    return {
+        "slug":          slug,
+        "agent_name":    user["agent_name"],
+        "brokerage":     user.get("brokerage",""),
+        "market":        setup.get("market",""),
+        "short_bio":     setup.get("shortBio",""),
+        "niches":        setup.get("primaryNiches",[]),
+        "designations":  setup.get("designations",[]),
+        "service_areas": setup.get("serviceAreas",[]),
+        "website":       setup.get("websiteUrl",""),
+        "posts_total":   posts_total,
+        "posts_30_days": posts_30_days,
+        "cir_count":     cir_count,
+        "compliance_pct":compliance_pct,
+        "member_since":  member_since,
+        "posts":         posts,
+        "profile_url":   f"https://{slug}.homebridgegroup.co",
+        "rss_url":       f"https://api.homebridgegroup.co/public/agent/{slug}/feed",
+        "cir_verified":  cir_count > 0,
+    }
+
+
+@app.get("/public/agent/{slug}/feed")
+async def public_agent_rss(slug: str):
+    """
+    RSS feed for an agent's verified posts.
+    URL: {slug}.homebridgegroup.co/feed
+    (Frontend agent.html intercepts /feed path and proxies to this endpoint)
+    Can be pointed at by any WordPress/Squarespace/Wix site.
+    """
+    import json as _json
+    from fastapi.responses import Response as _Response
+    from database import get_conn as _gc
+
+    user = _get_agent_by_slug(slug)
+    if not user:
+        raise HTTPException(404, "Agent not found.")
+
+    user_id = user["id"]
+    conn    = _gc()
+    c       = conn.cursor()
+
+    # Setup
+    c.execute("SELECT setup_data FROM user_setup WHERE user_id = ?", (user_id,))
+    row   = c.fetchone()
+    setup = {}
+    if row:
+        try: setup = _json.loads(row["setup_data"] or "{}")
+        except: pass
+
+    market = setup.get("market","")
+
+    c.execute("""
+        SELECT id, niche, content, cir_id, approved_at
+        FROM library_items
+        WHERE user_id = ? AND status IN ('approved','published')
+        ORDER BY approved_at DESC
+        LIMIT 20
+    """, (user_id,))
+    items = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    def esc(s):
+        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+
+    items_xml = ""
+    for item in items:
+        try: cd = _json.loads(item.get("content") or "{}")
+        except: cd = {}
+        headline = cd.get("headline","") or cd.get("title","") or "Update"
+        body     = cd.get("body","") or cd.get("post","") or cd.get("content","")
+        pub_date = ""
+        try:
+            pub_date = datetime.fromisoformat(item["approved_at"]).strftime(
+                "%a, %d %b %Y %H:%M:%S +0000"
+            )
+        except: pass
+        link = f"https://{slug}.homebridgegroup.co"
+        if item.get("cir_id"):
+            link = f"https://homebridgegroup.co/verify.html?cir={item['cir_id']}"
+        items_xml += f"""
+  <item>
+    <title>{esc(headline)}</title>
+    <link>{link}</link>
+    <description>{esc(body[:500])}</description>
+    <pubDate>{pub_date}</pubDate>
+    <guid isPermaLink="false">hb-{item['id']}</guid>
+    <author>agent@homebridgegroup.co ({esc(user['agent_name'])})</author>
+    <category>{esc(item.get('niche','Real Estate'))}</category>
+  </item>"""
+
+    agent_name = user["agent_name"]
+    rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>{esc(agent_name)} — Real Estate Insights</title>
+    <link>https://{slug}.homebridgegroup.co</link>
+    <description>Verified real estate content by {esc(agent_name)}, {esc(market)}. CIR-certified by HomeBridge.</description>
+    <language>en-us</language>
+    <atom:link href="https://api.homebridgegroup.co/public/agent/{slug}/feed" rel="self" type="application/rss+xml"/>
+    <managingEditor>support@homebridgegroup.co ({esc(agent_name)})</managingEditor>
+    <generator>HomeBridge CIR Platform</generator>
+{items_xml}
+  </channel>
+</rss>"""
+
+    return _Response(content=rss, media_type="application/rss+xml")
+
+
+@app.post("/setup/slug")
+async def set_agent_slug(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Let an agent set or customize their URL slug.
+    Called on setup save if no slug exists yet, or when they customize it.
+    Slug is validated for uniqueness and URL-safety.
+    """
+    import json as _json
+    from database import get_conn as _gc
+
+    body = await request.json()
+    requested = str(body.get("slug","")).lower().strip()
+
+    # Auto-generate if not provided
+    if not requested:
+        from database import get_conn as _gc2
+        conn2 = _gc2()
+        c2    = conn2.cursor()
+        c2.execute("SELECT setup_data FROM user_setup WHERE user_id = ?", (current_user["id"],))
+        row2 = c2.fetchone()
+        conn2.close()
+        setup2 = {}
+        if row2:
+            try: setup2 = _json.loads(row2["setup_data"] or "{}")
+            except: pass
+        requested = _make_slug(
+            current_user.get("agent_name","agent"),
+            setup2.get("market","")
+        )
+
+    # Sanitize
+    slug = _re.sub(r"[^a-z0-9-]+", "-", requested).strip("-")[:60]
+    if not slug:
+        raise HTTPException(400, "Invalid slug.")
+
+    # Check uniqueness (allow same user to re-set their own slug)
+    from database import get_conn as _gc3
+    conn3 = _gc3()
+    c3    = conn3.cursor()
+    c3.execute("SELECT id FROM users WHERE agent_slug = ? AND id != ?",
+               (slug, current_user["id"]))
+    conflict = c3.fetchone()
+    if conflict:
+        # Append user id to make unique
+        slug = f"{slug}-{current_user['id']}"
+
+    c3.execute("UPDATE users SET agent_slug = ? WHERE id = ?",
+               (slug, current_user["id"]))
+    conn3.commit()
+    conn3.close()
+
+    return {
+        "ok":   True,
+        "slug": slug,
+        "url":  f"https://{slug}.homebridgegroup.co",
+    }
+
+
+@app.get("/setup/my-slug")
+async def get_my_slug(current_user: dict = Depends(get_current_user)):
+    """Return the agent's current slug and authority URL."""
+    import json as _json
+    from database import get_conn as _gc
+
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("SELECT agent_slug FROM users WHERE id = ?", (current_user["id"],))
+    row  = c.fetchone()
+    conn.close()
+
+    slug = row["agent_slug"] if row and row["agent_slug"] else None
+
+    # Auto-generate if none exists yet
+    if not slug:
+        c2conn = _gc()
+        c2     = c2conn.cursor()
+        c2.execute("SELECT setup_data FROM user_setup WHERE user_id = ?", (current_user["id"],))
+        row2 = c2.fetchone()
+        c2conn.close()
+        setup2 = {}
+        if row2:
+            try: setup2 = _json.loads(row2["setup_data"] or "{}")
+            except: pass
+        slug = _make_slug(
+            current_user.get("agent_name","agent"),
+            setup2.get("market","")
+        )
+
+    return {
+        "slug": slug,
+        "url":  f"https://{slug}.homebridgegroup.co",
+        "rss":  f"https://api.homebridgegroup.co/public/agent/{slug}/feed",
+        "set":  bool(row and row["agent_slug"]),
+    }
+
 
 @app.post("/waitlist")
 async def submit_waitlist(request: Request):
