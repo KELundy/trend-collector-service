@@ -597,6 +597,32 @@ async def public_agent_profile(user_id: int):
         posts_published = sum(1 for i in all_items if i.get("status") == "published")
         cir_count       = sum(1 for i in all_items if i.get("cir_id"))
 
+        # ── Weekly streak calculation ──
+        # A week counts if the user approved at least 1 post in that Mon-Sun window.
+        week_streak = 0
+        if all_items:
+            from collections import defaultdict
+            week_set = set()
+            for item in all_items:
+                approved = item.get("approved_at") or ""
+                if approved:
+                    try:
+                        dt = datetime.fromisoformat(approved[:19])
+                        # ISO week key e.g. "2026-W12"
+                        week_key = dt.strftime("%G-W%V")
+                        week_set.add(week_key)
+                    except Exception:
+                        pass
+            # Count consecutive weeks ending this week
+            check = now
+            while True:
+                wk = check.strftime("%G-W%V")
+                if wk in week_set:
+                    week_streak += 1
+                    check -= timedelta(weeks=1)
+                else:
+                    break
+
         # Compliance pct — clean passes only
         clean_count = 0
         for item in all_items:
@@ -655,6 +681,7 @@ async def public_agent_profile(user_id: int):
             "member_since":     member_since,
             "recent_headlines": recent_headlines,
             "cir_verified":     cir_count > 0,
+            "week_streak":      week_streak,
             "profile_url":      f"https://homebridgegroup.co/agent-profile.html?id={user_id}",
         }
 
@@ -668,6 +695,164 @@ async def public_agent_profile(user_id: int):
 # WAITLIST / FIRST LOOK — Public endpoint
 # No auth required. Stores lead + sends email via SendGrid.
 # ─────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────
+# WEEKLY PROMPT — surfaces this week's suggested situation
+# Called on dashboard load. Returns a curated situation,
+# the user's streak, and a motivational nudge.
+# ─────────────────────────────────────────────────────────
+@app.get("/weekly-prompt")
+async def weekly_prompt(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    conn = get_conn()
+    c = conn.cursor()
+
+    # Get user setup for niche
+    c.execute("SELECT setup_data FROM user_setup WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    setup = {}
+    if row:
+        try:
+            import json as _json
+            setup = _json.loads(row["setup_data"] or "{}")
+        except Exception:
+            pass
+
+    niches = setup.get("primaryNiches", [])
+    primary_niche = niches[0] if niches else None
+
+    # Get streak
+    c.execute("""
+        SELECT approved_at FROM library_items
+        WHERE user_id = ? AND approved_at IS NOT NULL
+        ORDER BY approved_at DESC LIMIT 200
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    week_streak = 0
+    if rows:
+        week_set = set()
+        for r in rows:
+            try:
+                dt = datetime.fromisoformat(str(r["approved_at"])[:19])
+                week_set.add(dt.strftime("%G-W%V"))
+            except Exception:
+                pass
+        check = now
+        while True:
+            wk = check.strftime("%G-W%V")
+            if wk in week_set:
+                week_streak += 1
+                check -= timedelta(weeks=1)
+            else:
+                break
+
+    # Pick a situation — every 6th prompt is Lighter Side
+    import random
+    from content_engine import NICHE_SITUATIONS, LIGHTER_SIDE_SITUATIONS, DEFAULT_SITUATIONS
+
+    # Lighter Side every ~6 weeks (use week number mod 6)
+    week_num = int(now.strftime("%V"))
+    use_lighter = (week_num % 6 == 0)
+
+    if use_lighter:
+        situation = random.choice(LIGHTER_SIDE_SITUATIONS)
+        situation_type = "lighter"
+    elif primary_niche and primary_niche in NICHE_SITUATIONS:
+        pool = NICHE_SITUATIONS[primary_niche]
+        situation = random.choice(pool)
+        situation_type = "niche"
+    else:
+        situation = random.choice(DEFAULT_SITUATIONS)
+        situation_type = "default"
+
+    # Streak message
+    if week_streak == 0:
+        nudge = "This week is a great time to start."
+    elif week_streak == 1:
+        nudge = "You posted last week. Keep the momentum going."
+    elif week_streak < 4:
+        nudge = f"{week_streak} weeks in a row. You're building something real."
+    elif week_streak < 12:
+        nudge = f"{week_streak} consecutive weeks. Your presence is compounding."
+    else:
+        nudge = f"{week_streak} weeks straight. That's a track record most agents never build."
+
+    return {
+        "situation":      situation,
+        "situation_type": situation_type,
+        "week_streak":    week_streak,
+        "nudge":          nudge,
+        "niche":          primary_niche or "General",
+    }
+
+
+
+# ─────────────────────────────────────────────
+# OAUTH DIAGNOSTIC — checks credential config
+# GET /oauth-status  (authenticated)
+# Returns which platforms are configured with
+# credentials in env vars, without exposing keys.
+# ─────────────────────────────────────────────
+@app.get("/oauth-status")
+async def oauth_status(current_user: dict = Depends(get_current_user)):
+    import os as _os
+    checks = {
+        "google": {
+            "client_id_set":     bool(_os.getenv("GOOGLE_CLIENT_ID")),
+            "client_secret_set": bool(_os.getenv("GOOGLE_CLIENT_SECRET")),
+            "redirect_uri":      f"{_os.getenv('BACKEND_URL', 'https://api.homebridgegroup.co')}/social/google/callback",
+        },
+        "linkedin": {
+            "client_id_set":     bool(_os.getenv("LINKEDIN_CLIENT_ID")),
+            "client_secret_set": bool(_os.getenv("LINKEDIN_CLIENT_SECRET")),
+            "redirect_uri":      f"{_os.getenv('BACKEND_URL', 'https://api.homebridgegroup.co')}/social/linkedin/callback",
+        },
+        "facebook": {
+            "client_id_set":     bool(_os.getenv("META_APP_ID")),
+            "client_secret_set": bool(_os.getenv("META_APP_SECRET")),
+            "redirect_uri":      f"{_os.getenv('BACKEND_URL', 'https://api.homebridgegroup.co')}/social/facebook/callback",
+        },
+        "youtube": {
+            "client_id_set":     bool(_os.getenv("YOUTUBE_CLIENT_ID") or _os.getenv("GOOGLE_CLIENT_ID")),
+            "client_secret_set": bool(_os.getenv("YOUTUBE_CLIENT_SECRET") or _os.getenv("GOOGLE_CLIENT_SECRET")),
+            "redirect_uri":      f"{_os.getenv('BACKEND_URL', 'https://api.homebridgegroup.co')}/social/youtube/callback",
+        },
+        "sendgrid": {
+            "api_key_set": bool(_os.getenv("SENDGRID_API_KEY")),
+        },
+        "stripe": {
+            "secret_key_set": bool(_os.getenv("STRIPE_SECRET_KEY")),
+        },
+    }
+
+    # Also check DB connections for this user
+    try:
+        from database import get_conn as _get_conn
+        _conn = _get_conn()
+        _c    = _conn.cursor()
+        _c.execute(
+            "SELECT platform, platform_handle, expires_at FROM platform_connections WHERE user_id = ?",
+            (current_user["id"],)
+        )
+        connected = [
+            {"platform": r["platform"], "handle": r["platform_handle"], "expires_at": r["expires_at"]}
+            for r in _c.fetchall()
+        ]
+        _conn.close()
+    except Exception:
+        connected = []
+
+    return {
+        "user_id":    current_user["id"],
+        "credentials": checks,
+        "connected_platforms": connected,
+    }
+
 @app.post("/waitlist")
 async def submit_waitlist(request: Request):
     try:
