@@ -161,6 +161,42 @@ def migrate_add_niche_column():
     conn.close()
 
 
+def migrate_context_column():
+    """
+    Adds context column to content_library.
+    context = 'agent' (personal real estate content)
+              'hb_marketing' (HomeBridge platform content)
+    Default is 'agent' for all existing records.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    try:
+        c.execute("ALTER TABLE content_library ADD COLUMN context TEXT DEFAULT 'agent'")
+        conn.commit()
+        print("[DB] context column added to content_library")
+    except Exception:
+        pass  # Already exists
+    conn.close()
+
+
+def tag_existing_as_marketing(user_id: int):
+    """
+    One-time migration — tags all existing content for a user as hb_marketing.
+    Used for Option A: treat all existing content as marketing context.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute(
+        "UPDATE content_library SET context = 'hb_marketing' WHERE user_id = ? AND (context IS NULL OR context = 'agent')",
+        (user_id,)
+    )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    print(f"[DB] Tagged {affected} existing posts as hb_marketing for user {user_id}")
+    return affected
+
+
 def migrate_platform_connections():
     """Creates platform_connections and platform_posts tables if they don't exist."""
     conn = get_conn()
@@ -441,19 +477,23 @@ def get_latest_trends(limit=200):
 # CONTENT LIBRARY
 # ─────────────────────────────────────────────
 def library_save(user_id: int, niche: str, content: dict,
-                 compliance: dict, source: str = "manual") -> dict:
+                 compliance: dict, source: str = "manual",
+                 context: str = "agent") -> dict:
     conn = get_conn()
     c = conn.cursor()
+    if context not in ("agent", "hb_marketing"):
+        context = "agent"
     c.execute("""
         INSERT INTO content_library
-            (user_id, niche, status, content, compliance, source, saved_at)
-        VALUES (?, ?, 'pending', ?, ?, ?, ?)
+            (user_id, niche, status, content, compliance, source, saved_at, context)
+        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
     """, (
         user_id, niche,
         json.dumps(content),
         json.dumps(compliance),
         source,
-        datetime.utcnow().isoformat()
+        datetime.utcnow().isoformat(),
+        context
     ))
     conn.commit()
     item_id = c.lastrowid
@@ -461,14 +501,19 @@ def library_save(user_id: int, niche: str, content: dict,
     return library_get_item(item_id)
 
 
-def library_get_all(user_id: int) -> list:
+def library_get_all(user_id: int, context: str = "agent") -> list:
+    """
+    Fetch all library items for a user filtered by context.
+    context = 'agent'        — personal real estate content
+    context = 'hb_marketing' — HomeBridge platform content
+    """
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
         SELECT * FROM content_library
-        WHERE user_id = ?
+        WHERE user_id = ? AND (context = ? OR (context IS NULL AND ? = 'agent'))
         ORDER BY saved_at DESC
-    """, (user_id,))
+    """, (user_id, context, context))
     rows = c.fetchall()
     conn.close()
     return [_row_to_item(r) for r in rows]
@@ -531,6 +576,9 @@ def library_delete(item_id: int, user_id: int) -> bool:
 
 
 def _row_to_item(row) -> dict:
+    ctx = "agent"
+    try: ctx = row["context"] or "agent"
+    except Exception: pass
     return {
         "id":              row["id"],
         "userId":          row["user_id"],
@@ -543,6 +591,7 @@ def _row_to_item(row) -> dict:
         "approvedAt":      row["approved_at"],
         "publishedAt":     row["published_at"],
         "source":          row["source"] or "manual",
+        "context":         ctx,
     }
 
 
