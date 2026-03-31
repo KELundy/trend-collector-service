@@ -49,7 +49,9 @@ def init_db():
         ("trial_ends_at",  "TEXT DEFAULT NULL"),
         ("stripe_customer_id",     "TEXT DEFAULT NULL"),
         ("stripe_subscription_id", "TEXT DEFAULT NULL"),
-        ("agent_slug",     "TEXT DEFAULT NULL"),
+        ("agent_slug",          "TEXT DEFAULT NULL"),
+        ("is_licensed",         "INTEGER DEFAULT 1"),
+        ("staff_type",          "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -110,6 +112,20 @@ def init_db():
             setup_json TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
+    # Assistant → Agent linking table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS assistant_agents (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            assistant_id INTEGER NOT NULL,
+            agent_id     INTEGER NOT NULL,
+            granted_at   TEXT DEFAULT (datetime('now')),
+            granted_by   INTEGER,
+            UNIQUE(assistant_id, agent_id),
+            FOREIGN KEY (assistant_id) REFERENCES users(id),
+            FOREIGN KEY (agent_id)     REFERENCES users(id)
         )
     """)
 
