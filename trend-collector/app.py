@@ -53,6 +53,7 @@ import database
 from database import (
     init_db, save_trends, get_latest_trends,
     migrate_add_niche_column,
+    migrate_context_column, tag_existing_as_marketing,
     library_save, library_get_all, library_get_item,
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
@@ -64,6 +65,16 @@ from database import (
     get_user_results,
     DB_NAME,
 )
+
+# ── Safe fallbacks in case database.py is older version ──
+try:
+    from database import migrate_context_column, tag_existing_as_marketing
+except ImportError:
+    def migrate_context_column():
+        print("[Startup] migrate_context_column not available in this database.py version")
+    def tag_existing_as_marketing(user_id):
+        print(f"[Startup] tag_existing_as_marketing not available — push updated database.py")
+
 from auth import router as auth_router, get_current_user
 from content_engine import router as content_engine_router, generate_content_core
 
@@ -112,11 +123,11 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
-    migrate_context_column()
-    tag_existing_as_marketing(2)
-    migrate_context_column()
-    # Option A: tag user_id=2 existing content as hb_marketing
-    tag_existing_as_marketing(2)
+    try:
+        migrate_context_column()
+        tag_existing_as_marketing(2)  # Option A: tags Kevin's existing posts as hb_marketing
+    except Exception as _ctx_e:
+        print(f"[Startup] Context migration skipped: {_ctx_e}")
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
