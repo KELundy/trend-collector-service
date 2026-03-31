@@ -167,6 +167,13 @@ BANNED FOREVER:
 - Hype phrases: "game-changer", "incredible opportunity", "the market is on fire"
 - Generic prompts to "like, share, and follow"
 
+LIGHTER SIDE SPECIAL INSTRUCTION:
+If the situation starts with "Lighter Side:", write with warmth and genuine humor.
+The tone should feel like a funny, self-aware professional — not a stand-up comedian.
+Think: the kind of post a trusted colleague sends that makes you smile and share it.
+Keep it short. One sharp observation or a tight list. End with something that invites
+a reply or a smile — never a hard sell. The humor should be relatable, never mean.
+
 WHAT GREAT CONTENT SOUNDS LIKE:
 - An observation the agent genuinely made: "Something I've been noticing in {market} lately..."
 - A nuanced take only someone in the field would have: "Most people assume X, but what's actually happening is Y..."
@@ -1299,16 +1306,46 @@ DEFAULT_SITUATIONS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────
+# LIGHTER SIDE — occasional humor to break up the feed
+# Appears roughly 1-in-6 situations when selected.
+# Keeps content human, memorable, and actually enjoyable
+# to follow. Real estate has genuinely good material.
+# ─────────────────────────────────────────────────────────
+LIGHTER_SIDE_SITUATIONS = [
+    "Lighter Side: Why real estate agents make great comedians — we always have an open house",
+    "Lighter Side: The five stages of buying a home (hint: stage 3 is eating cereal on the floor)",
+    "Lighter Side: Things buyers say that agents hear differently — a translation guide",
+    "Lighter Side: You know it's a seller's market when... (a list only insiders will recognize)",
+    "Lighter Side: The honest timeline of every home renovation project ever",
+    "Lighter Side: What HGTV taught buyers vs. what actually happens at closing",
+    "Lighter Side: Signs you've been in real estate too long (affectionate edition)",
+    "Lighter Side: A field guide to open house visitors — the archetypes every agent knows",
+    "Lighter Side: Why moving is basically just paying people to judge how much stuff you own",
+    "Lighter Side: Real estate terms translated into plain English for the first-time buyer",
+    "Lighter Side: The emotional stages of making an offer in today's market",
+    "Lighter Side: Things I've seen at inspections that I cannot legally describe but will never forget",
+]
+
 @router.get("/situations")
-async def get_situations(niche: Optional[str] = None):
+async def get_situations(niche: Optional[str] = None, include_lighter: bool = True):
     if niche and niche in NICHE_SITUATIONS:
-        situations = NICHE_SITUATIONS[niche]
+        situations = list(NICHE_SITUATIONS[niche])
     else:
         matched = next(
             (v for k, v in NICHE_SITUATIONS.items() if niche and niche.lower() in k.lower()),
             None
         )
-        situations = matched if matched else DEFAULT_SITUATIONS
+        situations = list(matched) if matched else list(DEFAULT_SITUATIONS)
+
+    # Inject one Lighter Side situation roughly every 6 items
+    if include_lighter and len(situations) >= 5:
+        import random
+        lighter = random.choice(LIGHTER_SIDE_SITUATIONS)
+        # Insert at position 5 so it appears naturally in the list
+        insert_at = min(5, len(situations) - 1)
+        situations.insert(insert_at, lighter)
+
     return {"niche": niche, "situations": situations}
 
 
