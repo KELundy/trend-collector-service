@@ -49,6 +49,7 @@ def init_db():
         ("trial_ends_at",  "TEXT DEFAULT NULL"),
         ("stripe_customer_id",     "TEXT DEFAULT NULL"),
         ("stripe_subscription_id", "TEXT DEFAULT NULL"),
+        ("agent_slug",     "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
