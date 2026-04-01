@@ -639,7 +639,7 @@ async def public_agent_profile(user_id: int):
 
         c.execute("""
             SELECT id, status, approved_at, published_at, niche, content, cir_id, compliance
-            FROM library_items
+            FROM content_library
             WHERE user_id = ? AND status IN ('approved','published')
             ORDER BY approved_at DESC
         """, (user_id,))
@@ -704,7 +704,7 @@ async def public_agent_profile(user_id: int):
                 pass
 
         # Member since
-        c.execute("SELECT MIN(approved_at) as earliest FROM library_items WHERE user_id = ?", (user_id,))
+        c.execute("SELECT MIN(approved_at) as earliest FROM content_library WHERE user_id = ?", (user_id,))
         earliest_row = c.fetchone()
         member_since = ""
         if earliest_row and earliest_row["earliest"]:
@@ -778,7 +778,7 @@ async def weekly_prompt(current_user: dict = Depends(get_current_user)):
 
     # Get streak
     c.execute("""
-        SELECT approved_at FROM library_items
+        SELECT approved_at FROM content_library
         WHERE user_id = ? AND approved_at IS NOT NULL
         ORDER BY approved_at DESC LIMIT 200
     """, (user_id,))
@@ -980,7 +980,7 @@ async def public_agent_profile(slug: str):
     c.execute("""
         SELECT id, niche, content, compliance, cir_id,
                approved_at, published_at, status
-        FROM library_items
+        FROM content_library
         WHERE user_id = ? AND status IN ('approved','published')
         ORDER BY approved_at DESC
         LIMIT 50
@@ -1089,7 +1089,7 @@ async def public_agent_rss(slug: str):
 
     c.execute("""
         SELECT id, niche, content, cir_id, approved_at
-        FROM library_items
+        FROM content_library
         WHERE user_id = ? AND status IN ('approved','published')
         ORDER BY approved_at DESC
         LIMIT 20
