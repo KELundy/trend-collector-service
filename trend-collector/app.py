@@ -763,13 +763,13 @@ async def weekly_prompt(current_user: dict = Depends(get_current_user)):
     c = conn.cursor()
 
     # Get user setup for niche
-    c.execute("SELECT setup_data FROM user_setup WHERE user_id = ?", (user_id,))
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     setup = {}
     if row:
         try:
             import json as _json
-            setup = _json.loads(row["setup_data"] or "{}")
+            setup = _json.loads(row["setup_json"] or "{}")
         except Exception:
             pass
 
