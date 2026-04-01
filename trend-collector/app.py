@@ -9,7 +9,7 @@ from typing import Dict, Any
 
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse
 import io
 from pydantic import BaseModel
 from typing import Optional
@@ -63,7 +63,6 @@ from database import (
     get_broker_office_stats,
     save_agent_setup, get_agent_setup,
     get_user_results,
-    log_audit_event,
     DB_NAME,
 )
 
@@ -108,323 +107,9 @@ app.include_router(auth_router)
 app.include_router(content_engine_router)
 
 
-# ── Agent Authority Page Middleware ──────────────────────────────────────────
-# Intercepts requests to *.homebridgegroup.co subdomains and serves
-# the agent's public authority page. All other traffic passes through unchanged.
-
-_EXCLUDED_SUBDOMAINS = {"api", "app", "www", "mail"}
-_BASE_DOMAIN = "homebridgegroup.co"
-
-def _build_agent_page(slug: str) -> tuple[str, int]:
-    """
-    Look up agent by slug, build and return (html, status_code).
-    Returns a 404 page if slug not found.
-    """
-    try:
-        from database import get_conn
-        conn = get_conn()
-        c    = conn.cursor()
-
-        # Look up agent by slug
-        c.execute("""
-            SELECT id, agent_name, brokerage, email
-            FROM users
-            WHERE agent_slug = ? AND is_active = 1
-        """, (slug,))
-        agent = c.fetchone()
-
-        if not agent:
-            conn.close()
-            return _build_404_page(slug), 404
-
-        user_id    = agent["id"]
-        agent_name = agent["agent_name"] or ""
-        brokerage  = agent["brokerage"] or ""
-        email      = agent["email"] or ""
-
-        # Load agent setup JSON
-        c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
-        setup_row = c.fetchone()
-        setup     = json.loads(setup_row["setup_json"]) if setup_row else {}
-
-        # Load recent approved content (last 5)
-        c.execute("""
-            SELECT content, approved_at FROM content_library
-            WHERE user_id = ? AND status = 'approved' AND context = 'agent'
-            ORDER BY approved_at DESC LIMIT 5
-        """, (user_id,))
-        posts = c.fetchall()
-        conn.close()
-
-        market       = setup.get("market", "")
-        license_num  = setup.get("licenseNumber", "")
-        license_state= setup.get("licenseState", "")
-        short_bio    = setup.get("shortBio", "")
-        phone        = setup.get("phone", "")
-        website      = setup.get("website", "")
-        headshot_url = setup.get("headshotUrl", "")
-        niches       = setup.get("niches", [])
-        if isinstance(niches, str):
-            niches = [n.strip() for n in niches.split(",") if n.strip()]
-
-        page_url = f"https://{slug}.{_BASE_DOMAIN}"
-
-        # Build approved posts HTML
-        posts_html = ""
-        if posts:
-            posts_html = '<section class="posts"><h2>Recent Content</h2>'
-            for post in posts:
-                try:
-                    content_data = json.loads(post["content"]) if isinstance(post["content"], str) else post["content"]
-                    post_text    = content_data.get("linkedin") or content_data.get("facebook") or content_data.get("body") or ""
-                    if post_text:
-                        post_text  = post_text[:300] + ("…" if len(post_text) > 300 else "")
-                        approved   = (post["approved_at"] or "")[:10]
-                        posts_html += f'<div class="post"><p>{post_text}</p><span class="post-date">{approved}</span></div>'
-                except Exception:
-                    pass
-            posts_html += "</section>"
-
-        # Specialties list
-        specialties_html = ""
-        if niches:
-            items = "".join(f"<li>{n}</li>" for n in niches[:6])
-            specialties_html = f'<section class="specialties"><h2>Specialties</h2><ul>{items}</ul></section>'
-
-        # Schema.org JSON-LD
-        schema = {
-            "@context": "https://schema.org",
-            "@type": "RealEstateAgent",
-            "name": agent_name,
-            "url": page_url,
-            "worksFor": {"@type": "Organization", "name": brokerage},
-            "areaServed": market,
-            "description": short_bio or f"{agent_name} is a licensed real estate professional serving {market}.",
-        }
-        if email:      schema["email"]       = email
-        if phone:      schema["telephone"]   = phone
-        if website:    schema["sameAs"]      = [website]
-        if license_num:schema["identifier"]  = f"{license_state} License {license_num}"
-
-        schema_json = json.dumps(schema, indent=2)
-
-        html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{agent_name} | Licensed Real Estate Agent{' — ' + market if market else ''}</title>
-  <meta name="description" content="{short_bio or f'{agent_name} is a licensed real estate professional serving {market}. Verified by HomeBridge.'}">
-  <meta property="og:title" content="{agent_name} | Real Estate Agent">
-  <meta property="og:description" content="{short_bio or f'Licensed real estate professional serving {market}.'}">
-  <meta property="og:url" content="{page_url}">
-  <meta property="og:type" content="profile">
-  <script type="application/ld+json">{schema_json}</script>
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #F5F5F7;
-      color: #0A0A0A;
-      line-height: 1.6;
-    }}
-    .hero {{
-      background: #0A0A0A;
-      color: #fff;
-      padding: 60px 24px 48px;
-      text-align: center;
-    }}
-    .headshot {{
-      width: 120px; height: 120px;
-      border-radius: 50%;
-      object-fit: cover;
-      border: 3px solid #fff;
-      margin-bottom: 20px;
-    }}
-    .headshot-placeholder {{
-      width: 120px; height: 120px;
-      border-radius: 50%;
-      background: #333;
-      margin: 0 auto 20px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 40px; color: #999;
-    }}
-    h1 {{ font-size: 2rem; font-weight: 700; margin-bottom: 8px; }}
-    .brokerage {{ font-size: 1rem; color: #aaa; margin-bottom: 4px; }}
-    .market {{ font-size: 0.95rem; color: #888; }}
-    .badge {{
-      display: inline-block;
-      margin-top: 16px;
-      background: #0066CC;
-      color: #fff;
-      font-size: 0.75rem;
-      font-weight: 600;
-      padding: 4px 12px;
-      border-radius: 20px;
-      letter-spacing: 0.05em;
-    }}
-    .container {{
-      max-width: 720px;
-      margin: 0 auto;
-      padding: 40px 24px;
-    }}
-    .card {{
-      background: #fff;
-      border-radius: 12px;
-      padding: 28px;
-      margin-bottom: 24px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-    }}
-    h2 {{
-      font-size: 1.1rem;
-      font-weight: 700;
-      margin-bottom: 16px;
-      color: #0A0A0A;
-    }}
-    .bio {{ font-size: 0.95rem; color: #444; }}
-    .contact-list {{ list-style: none; }}
-    .contact-list li {{ margin-bottom: 8px; font-size: 0.95rem; }}
-    .contact-list a {{ color: #0066CC; text-decoration: none; }}
-    .license {{
-      font-size: 0.85rem;
-      color: #666;
-      padding-top: 12px;
-      border-top: 1px solid #eee;
-      margin-top: 16px;
-    }}
-    .specialties ul {{ list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }}
-    .specialties li {{
-      background: #F5F5F7;
-      border-radius: 20px;
-      padding: 4px 14px;
-      font-size: 0.85rem;
-      color: #444;
-    }}
-    .post {{
-      padding: 16px 0;
-      border-bottom: 1px solid #eee;
-    }}
-    .post:last-child {{ border-bottom: none; }}
-    .post p {{ font-size: 0.9rem; color: #444; margin-bottom: 6px; }}
-    .post-date {{ font-size: 0.75rem; color: #999; }}
-    .cir-footer {{
-      text-align: center;
-      padding: 24px;
-      font-size: 0.8rem;
-      color: #999;
-    }}
-    .cir-footer a {{ color: #0066CC; text-decoration: none; }}
-  </style>
-</head>
-<body>
-
-<div class="hero">
-  {'<img class="headshot" src="' + headshot_url + '" alt="' + agent_name + '">' if headshot_url else '<div class="headshot-placeholder">👤</div>'}
-  <h1>{agent_name}</h1>
-  {'<p class="brokerage">' + brokerage + '</p>' if brokerage else ''}
-  {'<p class="market">' + market + '</p>' if market else ''}
-  <span class="badge">✓ HomeBridge Verified</span>
-</div>
-
-<div class="container">
-
-  {'<div class="card"><h2>About</h2><p class="bio">' + short_bio + '</p></div>' if short_bio else ''}
-
-  <div class="card">
-    <h2>Contact</h2>
-    <ul class="contact-list">
-      {'<li>📧 <a href="mailto:' + email + '">' + email + '</a></li>' if email else ''}
-      {'<li>📞 <a href="tel:' + phone + '">' + phone + '</a></li>' if phone else ''}
-      {'<li>🌐 <a href="' + website + '" target="_blank">' + website + '</a></li>' if website else ''}
-    </ul>
-    {'<p class="license">License: ' + license_state + ' ' + license_num + '</p>' if license_num else ''}
-  </div>
-
-  {('<div class="card specialties">' + specialties_html + '</div>') if specialties_html else ''}
-
-  {('<div class="card posts">' + posts_html + '</div>') if posts_html else ''}
-
-</div>
-
-<div class="cir-footer">
-  This agent's identity and content are verified by
-  <a href="https://homebridgegroup.co">HomeBridge</a> CIR™
-</div>
-
-</body>
-</html>"""
-
-        return html, 200
-
-    except Exception as e:
-        print(f"[AgentPage] Error building page for slug '{slug}': {e}")
-        return _build_404_page(slug), 404
-
-
-def _build_404_page(slug: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Agent Not Found | HomeBridge</title>
-  <style>
-    body {{ font-family: -apple-system, sans-serif; background: #F5F5F7; color: #0A0A0A;
-           display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
-    .box {{ text-align: center; padding: 40px; }}
-    h1 {{ font-size: 1.5rem; margin-bottom: 12px; }}
-    p {{ color: #666; margin-bottom: 24px; }}
-    a {{ color: #0066CC; text-decoration: none; font-weight: 600; }}
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h1>Agent page not found</h1>
-    <p>No verified agent profile exists at this address.</p>
-    <a href="https://homebridgegroup.co">Learn about HomeBridge →</a>
-  </div>
-</body>
-</html>"""
-
-
-@app.middleware("http")
-async def agent_subdomain_middleware(request: Request, call_next):
-    """
-    Intercepts requests to {slug}.homebridgegroup.co and serves the
-    agent authority page. All other traffic passes through unchanged.
-    """
-    host = request.headers.get("host", "").lower().split(":")[0]  # strip port if present
-
-    if host.endswith(f".{_BASE_DOMAIN}"):
-        subdomain = host[: -(len(_BASE_DOMAIN) + 1)]  # everything before .homebridgegroup.co
-        if subdomain and subdomain not in _EXCLUDED_SUBDOMAINS:
-            html, status = _build_agent_page(subdomain)
-            return HTMLResponse(content=html, status_code=status)
-
-    return await call_next(request)
-
-
 @app.on_event("startup")
 async def startup_event():
-    print("[Startup] Initializing database...")
-    init_db()
-    migrate_add_niche_column()
-
-    # Context column + tag Kevin's existing posts as hb_marketing
-    try:
-        migrate_context_column()
-        tag_existing_as_marketing(2)
-    except Exception as _ctx_e:
-        print(f"[Startup] Context migration skipped: {_ctx_e}")
-
-    # Migrate legacy staff_licensed / staff_marketing → admin
-    try:
-        from database import migrate_roles_to_new_system as _migrate_roles
-        _migrate_roles()
-    except Exception as _r_e:
-        print(f"[Startup] Role migration skipped: {_r_e}")
-
-    # Ensure super admin is always correct — runs last so it wins
+    # Ensure super admin account is always set correctly
     try:
         from database import get_conn as _gc_sa
         _sa_conn = _gc_sa()
@@ -433,10 +118,16 @@ async def startup_event():
         )
         _sa_conn.commit()
         _sa_conn.close()
-        print("[Startup] Super admin confirmed: user_id=2")
     except Exception as _sa_e:
         print(f"[Startup] Super admin check: {_sa_e}")
-
+    print("[Startup] Initializing database...")
+    init_db()
+    migrate_add_niche_column()
+    try:
+        migrate_context_column()
+        tag_existing_as_marketing(2)  # Option A: tags Kevin's existing posts as hb_marketing
+    except Exception as _ctx_e:
+        print(f"[Startup] Context migration skipped: {_ctx_e}")
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
@@ -744,7 +435,7 @@ from datetime import datetime as _dt
 
 @app.post("/demo/create-token")
 async def create_demo_token(request: Request, user=Depends(get_current_user)):
-    if user.get("role") not in ("admin","super_admin","support"): raise HTTPException(403, "Admin only")
+    if user.get("role") not in ("admin","super_admin","staff"): raise HTTPException(403, "Admin only")
     body = await request.json()
     label = (body.get("label") or "").strip()
     if not label: raise HTTPException(400, "Label required")
@@ -758,7 +449,7 @@ async def create_demo_token(request: Request, user=Depends(get_current_user)):
 
 @app.get("/demo/tokens")
 async def list_demo_tokens(user=Depends(get_current_user)):
-    if user.get("role") not in ("admin","super_admin","support"): raise HTTPException(403, "Admin only")
+    if user.get("role") not in ("admin","super_admin","staff"): raise HTTPException(403, "Admin only")
     conn = database.get_conn()
     c = conn.cursor()
     c.execute("SELECT id, token, label, created_at, open_count, last_opened, ip_log FROM demo_tokens ORDER BY created_at DESC")
@@ -771,7 +462,7 @@ async def list_demo_tokens(user=Depends(get_current_user)):
 
 @app.delete("/demo/tokens/{token_id}")
 async def delete_demo_token(token_id: int, user=Depends(get_current_user)):
-    if user.get("role") not in ("admin","super_admin","support"): raise HTTPException(403, "Admin only")
+    if user.get("role") not in ("admin","super_admin","staff"): raise HTTPException(403, "Admin only")
     conn = database.get_conn()
     c = conn.cursor()
     c.execute("DELETE FROM demo_tokens WHERE id=?", (token_id,))
@@ -804,7 +495,7 @@ async def validate_demo_token(token: str, request: Request):
 
 @app.post("/office/invite")
 async def invite_agent(request: Request, current_user=Depends(get_current_user)):
-    if current_user.get("role") not in ("broker", "admin", "super_admin", "support"):
+    if current_user.get("role") not in ("broker", "admin", "super_admin", "staff"):
         raise HTTPException(403, "Office managers only")
     body  = await request.json()
     name  = (body.get("name")  or "").strip()
@@ -888,7 +579,7 @@ async def stripe_webhook(request: Request):
 
 @app.get("/broker/office-stats")
 async def broker_office_stats(current_user=Depends(get_current_user)):
-    if current_user.get("role") not in ("broker", "admin", "super_admin", "support"):
+    if current_user.get("role") not in ("broker", "admin", "super_admin", "staff"):
         raise HTTPException(status_code=403, detail="Broker accounts only.")
     stats = get_broker_office_stats(current_user["id"])
     return {"agents": stats, "count": len(stats)}
@@ -896,7 +587,7 @@ async def broker_office_stats(current_user=Depends(get_current_user)):
 
 @app.post("/broker/agent-compliance-report")
 async def broker_agent_report(req: dict, current_user=Depends(get_current_user)):
-    if current_user.get("role") not in ("broker", "admin", "super_admin", "support"):
+    if current_user.get("role") not in ("broker", "admin", "super_admin", "staff"):
         raise HTTPException(status_code=403, detail="Broker accounts only.")
     agent_id = req.get("agent_id")
     if not agent_id: raise HTTPException(status_code=400, detail="agent_id required.")
@@ -1066,8 +757,9 @@ async def public_agent_profile(user_id: int):
 # ─────────────────────────────────────────────────────────
 @app.get("/weekly-prompt")
 async def weekly_prompt(current_user: dict = Depends(get_current_user)):
+    from database import get_conn as _gc_wp
     user_id = current_user["id"]
-    conn = get_conn()
+    conn = _gc_wp()
     c = conn.cursor()
 
     # Get user setup for niche
@@ -1551,22 +1243,11 @@ async def get_my_slug(current_user: dict = Depends(get_current_user)):
 
 
 # ═══════════════════════════════════════════════════════════════
-# ROLE SYSTEM
-# ───────────────────────────────────────────────────────────────
-# super_admin  — Kevin only. Full control incl. billing & termination.
-#                Set on every startup. Cannot be changed via UI.
-# admin        — Business partners Kevin invites. Can access all
-#                customer data, support, office view, HB Marketing.
-#                Agent profile available if is_licensed=1.
-# support      — Support staff. Can view all customer accounts,
-#                reset passwords, troubleshoot. All actions audit-logged.
-#                No content approval.
-# broker       — Employing brokers. See their agents only.
-# agent        — Standard agents. Their content only.
-# assistant    — Linked to agent(s). Draft only. Cannot approve/publish.
+# ROLE MANAGEMENT SYSTEM
+# Super Admin controls all roles. Nobody else can change roles.
+# Roles: super_admin, staff_licensed, staff_marketing,
+#        broker, agent, assistant
 # ═══════════════════════════════════════════════════════════════
-
-VALID_ROLES = ("super_admin", "admin", "support", "broker", "agent", "assistant")
 
 def _is_super_admin(user: dict) -> bool:
     return user.get("role") == "super_admin"
@@ -1575,95 +1256,120 @@ def _require_super_admin(user: dict):
     if not _is_super_admin(user):
         raise HTTPException(403, "Super admin access required.")
 
-def _is_admin_or_above(user: dict) -> bool:
-    return user.get("role") in ("super_admin", "admin")
-
 def _is_staff_or_above(user: dict) -> bool:
-    """Staff-or-above: can see admin dashboard and user list."""
-    return user.get("role") in ("super_admin", "admin", "support")
-
-def _require_staff_or_above(user: dict):
-    if not _is_staff_or_above(user):
-        raise HTTPException(403, "Staff access required.")
+    return user.get("role") in ("super_admin", "staff_licensed", "staff_marketing")
 
 def _can_use_hb_marketing(user: dict) -> bool:
-    """HB Marketing context: super_admin and admin only."""
-    return user.get("role") in ("super_admin", "admin")
+    """Only super_admin, staff_licensed, and staff_marketing can use HB Marketing context."""
+    return user.get("role") in ("super_admin", "staff_licensed", "staff_marketing")
 
 def _can_have_agent_profile(user: dict) -> bool:
-    """Agent profile available to licensed users: super_admin, admin (if licensed), agent."""
-    if user.get("role") in ("super_admin", "agent"):
-        return True
-    if user.get("role") == "admin" and user.get("is_licensed"):
-        return True
-    return False
+    """Only licensed roles can generate CIR-verified content as themselves."""
+    return user.get("role") in ("super_admin", "staff_licensed", "agent")
 
 def _can_approve_content(user: dict) -> bool:
-    """Only licensed professionals can approve content and create CIR records."""
-    return bool(user.get("is_licensed")) and user.get("role") in ("super_admin", "admin", "agent")
+    """Only licensed professionals can approve content and generate CIR records."""
+    return user.get("role") in ("super_admin", "staff_licensed", "agent")
 
 
 @app.post("/admin/set-role")
 async def set_user_role(request: Request, current_user: dict = Depends(get_current_user)):
-    """Super admin only — set any user's role."""
+    """
+    Super admin only — set any user's role.
+    Also sets is_licensed based on role.
+    """
     _require_super_admin(current_user)
     body = await request.json()
 
     target_id = int(body.get("user_id", 0))
     new_role   = str(body.get("role", "")).strip()
 
-    if new_role not in VALID_ROLES:
-        raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}")
+    valid_roles = ("super_admin", "staff_licensed", "staff_marketing",
+                   "broker", "agent", "assistant")
+    if new_role not in valid_roles:
+        raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
 
     if not target_id:
         raise HTTPException(400, "user_id required.")
 
-    # is_licensed follows the user's flag for admin; true for super_admin/agent by default
+    # is_licensed is true for roles that can generate CIR-verified content
+    is_licensed = 1 if new_role in ("super_admin", "staff_licensed", "agent") else 0
+
+    # staff_type for display
+    staff_type = None
+    if new_role == "staff_licensed":    staff_type = "licensed"
+    elif new_role == "staff_marketing": staff_type = "marketing"
+
     from database import get_conn as _gc
     conn = _gc()
     c    = conn.cursor()
-    c.execute("SELECT id, email, agent_name, role, is_licensed FROM users WHERE id = ?", (target_id,))
+    c.execute("SELECT id, email, agent_name, role FROM users WHERE id = ?", (target_id,))
     target = c.fetchone()
     if not target:
         conn.close()
         raise HTTPException(404, "User not found.")
 
-    # For admin: preserve existing is_licensed flag (set separately)
-    # For agent/super_admin: always licensed
-    # For all others: not licensed
-    if new_role in ("super_admin", "agent"):
-        is_licensed = 1
-    elif new_role == "admin":
-        is_licensed = target["is_licensed"]  # preserve
-    else:
-        is_licensed = 0
-
-    c.execute(
-        "UPDATE users SET role = ?, is_licensed = ?, staff_type = NULL WHERE id = ?",
-        (new_role, is_licensed, target_id)
-    )
+    c.execute("""
+        UPDATE users
+        SET role = ?, is_licensed = ?, staff_type = ?
+        WHERE id = ?
+    """, (new_role, is_licensed, staff_type, target_id))
     conn.commit()
     conn.close()
 
-    log_audit_event(
-        actor_id=current_user["id"],
-        action="set_role",
-        target_id=target_id,
-        detail=f"{target['role']} → {new_role}"
-    )
-
     return {
-        "ok":          True,
-        "user_id":     target_id,
-        "email":       target["email"],
-        "agent_name":  target["agent_name"],
-        "new_role":    new_role,
+        "ok":         True,
+        "user_id":    target_id,
+        "email":      target["email"],
+        "agent_name": target["agent_name"],
+        "new_role":   new_role,
         "is_licensed": bool(is_licensed),
     }
 
 
+@app.get("/admin/users")
+async def list_all_users(current_user: dict = Depends(get_current_user)):
+    """
+    Super admin and staff — see all users.
+    Super admin sees billing status too.
+    Staff see basic info only.
+    """
+    if not _is_staff_or_above(current_user):
+        raise HTTPException(403, "Staff access required.")
 
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, email, agent_name, brokerage, role, is_licensed,
+               staff_type, plan, sub_status, created_at, is_active
+        FROM users
+        ORDER BY created_at DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
 
+    # Strip billing data for non-super-admins
+    is_super = _is_super_admin(current_user)
+    result = []
+    for r in rows:
+        user_data = {
+            "id":          r["id"],
+            "email":       r["email"],
+            "agent_name":  r["agent_name"],
+            "brokerage":   r["brokerage"],
+            "role":        r["role"],
+            "is_licensed": bool(r.get("is_licensed", 1)),
+            "staff_type":  r.get("staff_type"),
+            "is_active":   bool(r.get("is_active", 1)),
+            "created_at":  r["created_at"],
+        }
+        if is_super:
+            user_data["plan"]       = r.get("plan")
+            user_data["sub_status"] = r.get("sub_status")
+        result.append(user_data)
+
+    return {"users": result, "total": len(result)}
 
 
 @app.post("/admin/suspend-user")
@@ -1711,16 +1417,14 @@ async def my_role_capabilities(current_user: dict = Depends(get_current_user)):
     role = current_user.get("role", "agent")
     return {
         "role":                  role,
-        "is_super_admin":         _is_super_admin(current_user),
-        "is_admin_or_above":      _is_admin_or_above(current_user),
-        "is_staff_or_above":      _is_staff_or_above(current_user),
-        "can_use_hb_marketing":   _can_use_hb_marketing(current_user),
-        "can_have_agent_profile": _can_have_agent_profile(current_user),
-        "can_approve_content":    _can_approve_content(current_user),
-        "can_manage_users":       _is_super_admin(current_user),
-        "can_see_billing":        _is_super_admin(current_user),
-        "can_support_customers":  _is_staff_or_above(current_user),
-        "can_demo_platform":      _is_admin_or_above(current_user),
+        "is_super_admin":        _is_super_admin(current_user),
+        "is_staff_or_above":     _is_staff_or_above(current_user),
+        "can_use_hb_marketing":  _can_use_hb_marketing(current_user),
+        "can_have_agent_profile":_can_have_agent_profile(current_user),
+        "can_approve_content":   _can_approve_content(current_user),
+        "can_manage_users":      _is_super_admin(current_user),
+        "can_see_billing":       _is_super_admin(current_user),
+        "can_demo_platform":     _is_staff_or_above(current_user),
     }
 
 
@@ -1786,133 +1490,57 @@ async def get_my_agents(current_user: dict = Depends(get_current_user)):
 
 
 # ═══════════════════════════════════════════════════════════════
-# SUPPORT ENDPOINTS
-# Support users can view any customer account and reset passwords.
-# All actions are audit-logged automatically.
+# ROLE SYSTEM
+# Roles: super_admin > staff > broker > agent > assistant
+#
+# super_admin  — full control including billing and termination
+# staff        — HB Marketing context only, no agent profile
+# broker       — their office agents only
+# agent        — their own content only
+# assistant    — generate/draft for assigned agents only, no approve
 # ═══════════════════════════════════════════════════════════════
 
-@app.get("/support/user/{user_id}")
-async def support_view_user(user_id: int, request: Request,
-                             current_user: dict = Depends(get_current_user)):
-    """Support and admin: view any customer account for troubleshooting."""
-    if not _is_staff_or_above(current_user):
-        raise HTTPException(403, "Support access required.")
-    from database import get_conn as _gc
-    conn = _gc()
-    c    = conn.cursor()
-    c.execute("""
-        SELECT id, email, agent_name, brokerage, phone, role, is_active,
-               is_licensed, plan, sub_status, trial_ends_at, created_at,
-               agent_slug
-        FROM users WHERE id = ?
-    """, (user_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(404, "User not found.")
-    user_data = dict(row)
-    # Strip Stripe IDs from support — only super_admin sees billing
-    if not _is_super_admin(current_user):
-        user_data.pop("plan", None)
-        user_data.pop("sub_status", None)
-        user_data.pop("trial_ends_at", None)
-    # Setup data
-    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
-    setup_row = c.fetchone()
-    setup = {}
-    try:
-        if setup_row: setup = json.loads(setup_row["setup_json"] or "{}")
-    except Exception:
-        pass
-    # Content stats
-    c.execute("""
-        SELECT COUNT(*) as total,
-               SUM(CASE WHEN status='approved'  THEN 1 ELSE 0 END) as approved,
-               SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published
-        FROM content_library WHERE user_id = ?
-    """, (user_id,))
-    stats = dict(c.fetchone())
-    conn.close()
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    log_audit_event(current_user["id"], "support_view_account", user_id,
-                    detail=f"viewed by {current_user['email']}", ip_address=ip)
-    return {"user": user_data, "setup": setup, "content_stats": stats}
+def _is_super_admin(user: dict) -> bool:
+    return user.get("role") == "super_admin"
 
+def _is_admin_or_above(user: dict) -> bool:
+    return user.get("role") in ("super_admin", "admin")
 
-@app.post("/support/reset-password/{user_id}")
-async def support_reset_password(user_id: int, request: Request,
-                                  current_user: dict = Depends(get_current_user)):
-    """
-    Support and admin: issue a temporary password reset token for a customer.
-    Does NOT change the password directly — sends a reset link.
-    All uses are audit-logged.
-    """
-    if not _is_staff_or_above(current_user):
-        raise HTTPException(403, "Support access required.")
-    if user_id == current_user["id"]:
-        raise HTTPException(400, "Cannot reset your own password via support endpoint.")
-    from database import get_conn as _gc, create_reset_token
-    conn = _gc()
-    c    = conn.cursor()
-    c.execute("SELECT id, email, agent_name, role FROM users WHERE id = ?", (user_id,))
-    target = c.fetchone()
-    conn.close()
-    if not target:
-        raise HTTPException(404, "User not found.")
-    if target["role"] == "super_admin":
-        raise HTTPException(403, "Cannot reset a super admin password via support.")
-    token = create_reset_token(user_id)
-    reset_url = f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}/reset?token={token}"
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    log_audit_event(current_user["id"], "support_reset_password", user_id,
-                    detail=f"reset issued by {current_user['email']}", ip_address=ip)
-    return {"ok": True, "reset_url": reset_url, "expires_in": "1 hour",
-            "target_email": target["email"]}
+def _is_staff_or_above(user: dict) -> bool:
+    return user.get("role") in ("super_admin", "admin", "staff")
 
+def _require_super_admin(user: dict):
+    if not _is_super_admin(user):
+        raise HTTPException(403, "Super admin access required.")
 
-@app.get("/support/audit-log")
-async def get_audit_log(limit: int = 100, current_user: dict = Depends(get_current_user)):
-    """Super admin and admin: view the support audit log."""
-    if not _is_admin_or_above(current_user):
-        raise HTTPException(403, "Admin access required.")
-    from database import get_conn as _gc
-    conn = _gc()
-    c    = conn.cursor()
-    c.execute("""
-        SELECT al.id, al.actor_id, u.email as actor_email, al.action,
-               al.target_id, al.detail, al.ip_address, al.created_at
-        FROM audit_log al
-        LEFT JOIN users u ON u.id = al.actor_id
-        ORDER BY al.created_at DESC
-        LIMIT ?
-    """, (min(limit, 500),))
-    rows = [dict(r) for r in c.fetchall()]
-    conn.close()
-    return {"entries": rows, "count": len(rows)}
-
-
+def _require_staff_or_above(user: dict):
+    if not _is_staff_or_above(user):
+        raise HTTPException(403, "Staff access required.")
 
 
 @app.get("/admin/users")
-async def list_admin_users(current_user: dict = Depends(get_current_user)):
-    """
-    Return all users for the admin/support panel.
-    Requires admin, support, or super_admin role.
-    """
-    if not _is_staff_or_above(current_user):
-        raise HTTPException(403, "Staff access required.")
+async def admin_list_users(current_user: dict = Depends(get_current_user)):
+    """List all users — super_admin and staff can view."""
+    _require_staff_or_above(current_user)
     from database import get_conn as _gc
     conn = _gc()
     c    = conn.cursor()
     c.execute("""
-        SELECT id, email, agent_name, brokerage, role, is_licensed,
-               is_active, plan, sub_status, agent_slug, created_at
+        SELECT id, email, agent_name, brokerage, role,
+               is_active, created_at, plan, sub_status,
+               trial_ends_at, is_licensed, staff_type, agent_slug
         FROM users
         ORDER BY created_at DESC
     """)
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
-    return rows
+    # Remove sensitive fields for staff (non super_admin)
+    if not _is_super_admin(current_user):
+        for r in rows:
+            r.pop("plan", None)
+            r.pop("sub_status", None)
+            r.pop("trial_ends_at", None)
+    return {"users": rows, "total": len(rows)}
 
 
 @app.post("/admin/users/{user_id}/role")
@@ -1922,7 +1550,7 @@ async def admin_set_role(user_id: int, request: Request,
     _require_super_admin(current_user)
     body = await request.json()
     new_role = str(body.get("role", "")).strip()
-    valid_roles = VALID_ROLES
+    valid_roles = ("super_admin", "admin", "staff", "broker", "agent", "assistant")
     if new_role not in valid_roles:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
     # Cannot demote yourself
@@ -2059,7 +1687,7 @@ async def admin_create_user(request: Request,
 
     if not email or not password or not agent_name:
         raise HTTPException(400, "email, password, and agent_name are required.")
-    valid_roles = VALID_ROLES
+    valid_roles = ("super_admin","admin","staff","broker","agent","assistant")
     if role not in valid_roles:
         raise HTTPException(400, f"Invalid role.")
 
@@ -2082,35 +1710,23 @@ async def admin_create_user(request: Request,
     return {"ok": True, "user_id": new_id, "email": email, "role": role}
 
 
+# ── Startup: ensure user_id=2 is super_admin ──
+# This runs once on every deploy — safe and idempotent.
+@app.on_event("startup")
+async def ensure_super_admin():
+    try:
+        from database import get_conn as _gc
+        conn = _gc()
+        conn.execute(
+            "UPDATE users SET role = 'super_admin' WHERE id = 2 AND role != 'super_admin'"
+        )
+        conn.commit()
+        conn.close()
+        print("[HomeBridge] Super admin confirmed: user_id=2")
+    except Exception as e:
+        print(f"[HomeBridge] Super admin check failed: {e}")
 
 
-
-@app.get("/admin/users")
-async def admin_list_users(current_user: dict = Depends(get_current_user)):
-    """
-    List all users with content counts — admin and above only.
-    Returns the full user table for the admin dashboard.
-    """
-    if not _is_staff_or_above(current_user):
-        raise HTTPException(403, "Admin access required.")
-    from database import get_conn as _gc
-    conn = _gc()
-    c    = conn.cursor()
-    c.execute("""
-        SELECT
-            u.id, u.email, u.agent_name, u.brokerage,
-            u.role, u.is_licensed, u.is_active,
-            u.plan, u.sub_status, u.agent_slug,
-            u.created_at,
-            COUNT(cl.id) as content_count
-        FROM users u
-        LEFT JOIN content_library cl ON cl.user_id = u.id
-        GROUP BY u.id
-        ORDER BY u.created_at DESC
-    """)
-    rows = [dict(r) for r in c.fetchall()]
-    conn.close()
-    return rows
 
 
 @app.get("/admin/stats")
@@ -2124,6 +1740,7 @@ async def admin_stats(current_user: dict = Depends(get_current_user)):
     now  = datetime.utcnow()
     m30  = (now - timedelta(days=30)).isoformat()
     w7   = (now - timedelta(days=7)).isoformat()
+
     c.execute("SELECT COUNT(*) as n FROM users WHERE is_active=1")
     total_users = c.fetchone()["n"]
     c.execute("SELECT COUNT(*) as n FROM users WHERE is_active=1 AND created_at >= ?", (m30,))
@@ -2142,15 +1759,16 @@ async def admin_stats(current_user: dict = Depends(get_current_user)):
     active_schedules = c.fetchone()["n"]
     conn.close()
     return {
-        "total_users":       total_users,
-        "new_users_30d":     new_30,
-        "total_brokers":     total_brokers,
-        "total_agents":      total_agents,
-        "total_content":     total_content,
-        "content_this_week": content_week,
-        "total_published":   total_published,
-        "active_schedules":  active_schedules,
+        "total_users":      total_users,
+        "new_users_30d":    new_30,
+        "total_brokers":    total_brokers,
+        "total_agents":     total_agents,
+        "total_content":    total_content,
+        "content_this_week":content_week,
+        "total_published":  total_published,
+        "active_schedules": active_schedules,
     }
+
 
 @app.post("/admin/set-active")
 async def set_user_active(request: Request, current_user: dict = Depends(get_current_user)):
