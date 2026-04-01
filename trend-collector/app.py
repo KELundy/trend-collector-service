@@ -1893,6 +1893,28 @@ async def get_audit_log(limit: int = 100, current_user: dict = Depends(get_curre
 
 
 
+@app.get("/admin/users")
+async def list_admin_users(current_user: dict = Depends(get_current_user)):
+    """
+    Return all users for the admin/support panel.
+    Requires admin, support, or super_admin role.
+    """
+    if not _is_staff_or_above(current_user):
+        raise HTTPException(403, "Staff access required.")
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, email, agent_name, brokerage, role, is_licensed,
+               is_active, plan, sub_status, agent_slug, created_at
+        FROM users
+        ORDER BY created_at DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
 @app.post("/admin/users/{user_id}/role")
 async def admin_set_role(user_id: int, request: Request,
                          current_user: dict = Depends(get_current_user)):
@@ -2061,6 +2083,34 @@ async def admin_create_user(request: Request,
 
 
 
+
+
+@app.get("/admin/users")
+async def admin_list_users(current_user: dict = Depends(get_current_user)):
+    """
+    List all users with content counts — admin and above only.
+    Returns the full user table for the admin dashboard.
+    """
+    if not _is_staff_or_above(current_user):
+        raise HTTPException(403, "Admin access required.")
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT
+            u.id, u.email, u.agent_name, u.brokerage,
+            u.role, u.is_licensed, u.is_active,
+            u.plan, u.sub_status, u.agent_slug,
+            u.created_at,
+            COUNT(cl.id) as content_count
+        FROM users u
+        LEFT JOIN content_library cl ON cl.user_id = u.id
+        GROUP BY u.id
+        ORDER BY u.created_at DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
 
 
 @app.get("/admin/stats")
