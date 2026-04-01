@@ -142,6 +142,19 @@ def init_db():
         )
     """)
 
+    # Audit log — records all privileged support/admin actions
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_id   INTEGER NOT NULL,
+            action     TEXT    NOT NULL,
+            target_id  INTEGER,
+            detail     TEXT,
+            ip_address TEXT,
+            created_at TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -197,7 +210,57 @@ def tag_existing_as_marketing(user_id: int):
     return affected
 
 
-def migrate_platform_connections():
+def migrate_roles_to_new_system():
+    """
+    One-time migration: converts legacy staff_licensed and staff_marketing
+    roles to the unified 'admin' role introduced in the new role architecture.
+    staff_licensed  → admin (is_licensed=1, staff_type=NULL)
+    staff_marketing → admin (is_licensed=0, staff_type=NULL)
+    Safe to call on every startup — only updates rows that still have old roles.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    try:
+        c.execute("""
+            UPDATE users
+            SET role = 'admin', staff_type = NULL
+            WHERE role IN ('staff_licensed', 'staff_marketing')
+        """)
+        affected = c.rowcount
+        conn.commit()
+        if affected:
+            print(f"[DB] Role migration: {affected} user(s) moved to 'admin' role")
+    except Exception as e:
+        print(f"[DB] Role migration error: {e}")
+    finally:
+        conn.close()
+
+
+def log_audit_event(actor_id: int, action: str,
+                    target_id: int = None, detail: str = None,
+                    ip_address: str = None):
+    """
+    Write an entry to the audit_log table.
+    Called automatically on all support and privileged admin actions.
+    actor_id   — the user performing the action
+    action     — short string e.g. 'support_view_account', 'support_reset_password'
+    target_id  — the user being acted upon (if applicable)
+    detail     — optional free-text detail
+    ip_address — caller IP if available
+    """
+    try:
+        conn = get_conn()
+        conn.execute(
+            """INSERT INTO audit_log (actor_id, action, target_id, detail, ip_address)
+               VALUES (?, ?, ?, ?, ?)""",
+            (actor_id, action, target_id, detail, ip_address)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Audit] Log failed: {e}")
+
+
     """Creates platform_connections and platform_posts tables if they don't exist."""
     conn = get_conn()
     c = conn.cursor()
