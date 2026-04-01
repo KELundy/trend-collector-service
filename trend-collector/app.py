@@ -9,7 +9,7 @@ from typing import Dict, Any
 
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 import io
 from pydantic import BaseModel
 from typing import Optional
@@ -106,6 +106,302 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(content_engine_router)
+
+
+# ── Agent Authority Page Middleware ──────────────────────────────────────────
+# Intercepts requests to *.homebridgegroup.co subdomains and serves
+# the agent's public authority page. All other traffic passes through unchanged.
+
+_EXCLUDED_SUBDOMAINS = {"api", "app", "www", "mail"}
+_BASE_DOMAIN = "homebridgegroup.co"
+
+def _build_agent_page(slug: str) -> tuple[str, int]:
+    """
+    Look up agent by slug, build and return (html, status_code).
+    Returns a 404 page if slug not found.
+    """
+    try:
+        from database import get_conn
+        conn = get_conn()
+        c    = conn.cursor()
+
+        # Look up agent by slug
+        c.execute("""
+            SELECT id, agent_name, brokerage, email
+            FROM users
+            WHERE agent_slug = ? AND is_active = 1
+        """, (slug,))
+        agent = c.fetchone()
+
+        if not agent:
+            conn.close()
+            return _build_404_page(slug), 404
+
+        user_id    = agent["id"]
+        agent_name = agent["agent_name"] or ""
+        brokerage  = agent["brokerage"] or ""
+        email      = agent["email"] or ""
+
+        # Load agent setup JSON
+        c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+        setup_row = c.fetchone()
+        setup     = json.loads(setup_row["setup_json"]) if setup_row else {}
+
+        # Load recent approved content (last 5)
+        c.execute("""
+            SELECT content, approved_at FROM content_library
+            WHERE user_id = ? AND status = 'approved' AND context = 'agent'
+            ORDER BY approved_at DESC LIMIT 5
+        """, (user_id,))
+        posts = c.fetchall()
+        conn.close()
+
+        market       = setup.get("market", "")
+        license_num  = setup.get("licenseNumber", "")
+        license_state= setup.get("licenseState", "")
+        short_bio    = setup.get("shortBio", "")
+        phone        = setup.get("phone", "")
+        website      = setup.get("website", "")
+        headshot_url = setup.get("headshotUrl", "")
+        niches       = setup.get("niches", [])
+        if isinstance(niches, str):
+            niches = [n.strip() for n in niches.split(",") if n.strip()]
+
+        page_url = f"https://{slug}.{_BASE_DOMAIN}"
+
+        # Build approved posts HTML
+        posts_html = ""
+        if posts:
+            posts_html = '<section class="posts"><h2>Recent Content</h2>'
+            for post in posts:
+                try:
+                    content_data = json.loads(post["content"]) if isinstance(post["content"], str) else post["content"]
+                    post_text    = content_data.get("linkedin") or content_data.get("facebook") or content_data.get("body") or ""
+                    if post_text:
+                        post_text  = post_text[:300] + ("…" if len(post_text) > 300 else "")
+                        approved   = (post["approved_at"] or "")[:10]
+                        posts_html += f'<div class="post"><p>{post_text}</p><span class="post-date">{approved}</span></div>'
+                except Exception:
+                    pass
+            posts_html += "</section>"
+
+        # Specialties list
+        specialties_html = ""
+        if niches:
+            items = "".join(f"<li>{n}</li>" for n in niches[:6])
+            specialties_html = f'<section class="specialties"><h2>Specialties</h2><ul>{items}</ul></section>'
+
+        # Schema.org JSON-LD
+        schema = {
+            "@context": "https://schema.org",
+            "@type": "RealEstateAgent",
+            "name": agent_name,
+            "url": page_url,
+            "worksFor": {"@type": "Organization", "name": brokerage},
+            "areaServed": market,
+            "description": short_bio or f"{agent_name} is a licensed real estate professional serving {market}.",
+        }
+        if email:      schema["email"]       = email
+        if phone:      schema["telephone"]   = phone
+        if website:    schema["sameAs"]      = [website]
+        if license_num:schema["identifier"]  = f"{license_state} License {license_num}"
+
+        schema_json = json.dumps(schema, indent=2)
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{agent_name} | Licensed Real Estate Agent{' — ' + market if market else ''}</title>
+  <meta name="description" content="{short_bio or f'{agent_name} is a licensed real estate professional serving {market}. Verified by HomeBridge.'}">
+  <meta property="og:title" content="{agent_name} | Real Estate Agent">
+  <meta property="og:description" content="{short_bio or f'Licensed real estate professional serving {market}.'}">
+  <meta property="og:url" content="{page_url}">
+  <meta property="og:type" content="profile">
+  <script type="application/ld+json">{schema_json}</script>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #F5F5F7;
+      color: #0A0A0A;
+      line-height: 1.6;
+    }}
+    .hero {{
+      background: #0A0A0A;
+      color: #fff;
+      padding: 60px 24px 48px;
+      text-align: center;
+    }}
+    .headshot {{
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 3px solid #fff;
+      margin-bottom: 20px;
+    }}
+    .headshot-placeholder {{
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      background: #333;
+      margin: 0 auto 20px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; color: #999;
+    }}
+    h1 {{ font-size: 2rem; font-weight: 700; margin-bottom: 8px; }}
+    .brokerage {{ font-size: 1rem; color: #aaa; margin-bottom: 4px; }}
+    .market {{ font-size: 0.95rem; color: #888; }}
+    .badge {{
+      display: inline-block;
+      margin-top: 16px;
+      background: #0066CC;
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 20px;
+      letter-spacing: 0.05em;
+    }}
+    .container {{
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 40px 24px;
+    }}
+    .card {{
+      background: #fff;
+      border-radius: 12px;
+      padding: 28px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }}
+    h2 {{
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+      color: #0A0A0A;
+    }}
+    .bio {{ font-size: 0.95rem; color: #444; }}
+    .contact-list {{ list-style: none; }}
+    .contact-list li {{ margin-bottom: 8px; font-size: 0.95rem; }}
+    .contact-list a {{ color: #0066CC; text-decoration: none; }}
+    .license {{
+      font-size: 0.85rem;
+      color: #666;
+      padding-top: 12px;
+      border-top: 1px solid #eee;
+      margin-top: 16px;
+    }}
+    .specialties ul {{ list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }}
+    .specialties li {{
+      background: #F5F5F7;
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 0.85rem;
+      color: #444;
+    }}
+    .post {{
+      padding: 16px 0;
+      border-bottom: 1px solid #eee;
+    }}
+    .post:last-child {{ border-bottom: none; }}
+    .post p {{ font-size: 0.9rem; color: #444; margin-bottom: 6px; }}
+    .post-date {{ font-size: 0.75rem; color: #999; }}
+    .cir-footer {{
+      text-align: center;
+      padding: 24px;
+      font-size: 0.8rem;
+      color: #999;
+    }}
+    .cir-footer a {{ color: #0066CC; text-decoration: none; }}
+  </style>
+</head>
+<body>
+
+<div class="hero">
+  {'<img class="headshot" src="' + headshot_url + '" alt="' + agent_name + '">' if headshot_url else '<div class="headshot-placeholder">👤</div>'}
+  <h1>{agent_name}</h1>
+  {'<p class="brokerage">' + brokerage + '</p>' if brokerage else ''}
+  {'<p class="market">' + market + '</p>' if market else ''}
+  <span class="badge">✓ HomeBridge Verified</span>
+</div>
+
+<div class="container">
+
+  {'<div class="card"><h2>About</h2><p class="bio">' + short_bio + '</p></div>' if short_bio else ''}
+
+  <div class="card">
+    <h2>Contact</h2>
+    <ul class="contact-list">
+      {'<li>📧 <a href="mailto:' + email + '">' + email + '</a></li>' if email else ''}
+      {'<li>📞 <a href="tel:' + phone + '">' + phone + '</a></li>' if phone else ''}
+      {'<li>🌐 <a href="' + website + '" target="_blank">' + website + '</a></li>' if website else ''}
+    </ul>
+    {'<p class="license">License: ' + license_state + ' ' + license_num + '</p>' if license_num else ''}
+  </div>
+
+  {('<div class="card specialties">' + specialties_html + '</div>') if specialties_html else ''}
+
+  {('<div class="card posts">' + posts_html + '</div>') if posts_html else ''}
+
+</div>
+
+<div class="cir-footer">
+  This agent's identity and content are verified by
+  <a href="https://homebridgegroup.co">HomeBridge</a> CIR™
+</div>
+
+</body>
+</html>"""
+
+        return html, 200
+
+    except Exception as e:
+        print(f"[AgentPage] Error building page for slug '{slug}': {e}")
+        return _build_404_page(slug), 404
+
+
+def _build_404_page(slug: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Not Found | HomeBridge</title>
+  <style>
+    body {{ font-family: -apple-system, sans-serif; background: #F5F5F7; color: #0A0A0A;
+           display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
+    .box {{ text-align: center; padding: 40px; }}
+    h1 {{ font-size: 1.5rem; margin-bottom: 12px; }}
+    p {{ color: #666; margin-bottom: 24px; }}
+    a {{ color: #0066CC; text-decoration: none; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Agent page not found</h1>
+    <p>No verified agent profile exists at this address.</p>
+    <a href="https://homebridgegroup.co">Learn about HomeBridge →</a>
+  </div>
+</body>
+</html>"""
+
+
+@app.middleware("http")
+async def agent_subdomain_middleware(request: Request, call_next):
+    """
+    Intercepts requests to {slug}.homebridgegroup.co and serves the
+    agent authority page. All other traffic passes through unchanged.
+    """
+    host = request.headers.get("host", "").lower().split(":")[0]  # strip port if present
+
+    if host.endswith(f".{_BASE_DOMAIN}"):
+        subdomain = host[: -(len(_BASE_DOMAIN) + 1)]  # everything before .homebridgegroup.co
+        if subdomain and subdomain not in _EXCLUDED_SUBDOMAINS:
+            html, status = _build_agent_page(subdomain)
+            return HTMLResponse(content=html, status_code=status)
+
+    return await call_next(request)
 
 
 @app.on_event("startup")
