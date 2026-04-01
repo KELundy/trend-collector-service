@@ -964,7 +964,7 @@ async def public_agent_profile(slug: str):
     c       = conn.cursor()
 
     # Setup data
-    c.execute("SELECT setup_data FROM agent_setup WHERE user_id = ?", (user_id,))
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
     row   = c.fetchone()
     setup = {}
     if row:
@@ -1078,7 +1078,7 @@ async def public_agent_rss(slug: str):
     c       = conn.cursor()
 
     # Setup
-    c.execute("SELECT setup_data FROM agent_setup WHERE user_id = ?", (user_id,))
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
     row   = c.fetchone()
     setup = {}
     if row:
@@ -1162,7 +1162,7 @@ async def set_agent_slug(request: Request, current_user: dict = Depends(get_curr
         from database import get_conn as _gc2
         conn2 = _gc2()
         c2    = conn2.cursor()
-        c2.execute("SELECT setup_data FROM agent_setup WHERE user_id = ?", (current_user["id"],))
+        c2.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (current_user["id"],))
         row2 = c2.fetchone()
         conn2.close()
         setup2 = {}
@@ -1220,7 +1220,7 @@ async def get_my_slug(current_user: dict = Depends(get_current_user)):
     if not slug:
         c2conn = _gc()
         c2     = c2conn.cursor()
-        c2.execute("SELECT setup_data FROM agent_setup WHERE user_id = ?", (current_user["id"],))
+        c2.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (current_user["id"],))
         row2 = c2.fetchone()
         c2conn.close()
         setup2 = {}
