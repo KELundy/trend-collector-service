@@ -1785,6 +1785,77 @@ async def delete_user(request: Request, current_user: dict = Depends(get_current
     return {"ok": True, "deleted": target_id}
 
 
+@app.post("/image/generate")
+async def generate_image(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Generate a social-ready image for a library item using DALL-E 3.
+    Requires OPENAI_API_KEY in Render environment variables.
+    """
+    import os as _os
+    import httpx as _httpx
+
+    openai_key = _os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        raise HTTPException(503, "Image generation not configured. Add OPENAI_API_KEY to Render environment variables.")
+
+    body             = await request.json()
+    headline         = str(body.get("headline",       "")).strip()
+    thumbnail_idea   = str(body.get("thumbnail_idea", "")).strip()
+    niche            = str(body.get("niche",          "real estate")).strip()
+    market           = str(body.get("market",         "")).strip()
+    library_item_id  = body.get("library_item_id")
+
+    # Build a clean, professional real estate image prompt
+    parts = []
+    if thumbnail_idea:  parts.append(thumbnail_idea)
+    if market:          parts.append(f"Location: {market}")
+    if niche:           parts.append(f"Real estate context: {niche}")
+    base = ". ".join(parts) if parts else f"Professional real estate photography, {niche}"
+    prompt = (
+        f"{base}. Professional real estate photography, warm natural lighting, "
+        f"high quality, photorealistic. No text, no watermarks, no people."
+    )
+
+    try:
+        async with _httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+                json={
+                    "model":   "dall-e-3",
+                    "prompt":  prompt[:4000],
+                    "n":       1,
+                    "size":    "1792x1024",
+                    "quality": "standard",
+                }
+            )
+    except Exception as e:
+        raise HTTPException(502, f"Image generation request failed: {str(e)}")
+
+    if resp.status_code != 200:
+        try:    err_msg = resp.json().get("error", {}).get("message", "Unknown error")
+        except: err_msg = resp.text[:200]
+        raise HTTPException(502, f"Image generation failed: {err_msg}")
+
+    image_url = resp.json()["data"][0]["url"]
+
+    # Save image_url back to the library item — best effort, don't fail if column missing
+    if library_item_id:
+        try:
+            from database import get_conn as _gc
+            conn = _gc()
+            conn.execute(
+                "UPDATE content_library SET image_url = ? WHERE id = ? AND user_id = ?",
+                (image_url, library_item_id, current_user["id"])
+            )
+            conn.commit()
+            conn.close()
+        except Exception as _e:
+            print(f"[Image] Could not save image_url to library item {library_item_id}: {_e}")
+
+    return {"image_url": image_url}
+
+
 @app.post("/waitlist")
 async def submit_waitlist(request: Request):
     try:
