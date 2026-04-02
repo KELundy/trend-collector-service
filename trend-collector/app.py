@@ -1785,6 +1785,96 @@ async def delete_user(request: Request, current_user: dict = Depends(get_current
     return {"ok": True, "deleted": target_id}
 
 
+@app.post("/compliance/check")
+async def recheck_compliance(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Re-run compliance check on an existing library item after editing.
+    Uses the same rule-based checker as generation — no AI call, instant.
+    Updates the item's compliance field and returns the new result.
+    """
+    from content_engine import _run_compliance_check
+    from database import get_conn as _gc
+
+    body         = await request.json()
+    item_id      = int(body.get("item_id", 0))
+    content_mode = str(body.get("content_mode", "agent"))
+
+    if not item_id:
+        raise HTTPException(400, "item_id required.")
+
+    # Load the library item
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("SELECT content, niche FROM content_library WHERE id = ? AND user_id = ?",
+              (item_id, current_user["id"]))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(404, "Library item not found.")
+
+    try:
+        import json as _json
+        content_data = _json.loads(row["content"] or "{}")
+    except Exception:
+        content_data = {}
+
+    # Build the full post text for checking
+    post_text = " ".join(filter(None, [
+        content_data.get("headline", ""),
+        content_data.get("post", ""),
+        content_data.get("cta", ""),
+    ]))
+
+    # Get agent info for disclosure checks
+    agent_name = current_user.get("agent_name", "")
+    brokerage  = current_user.get("brokerage", "")
+    niche      = row["niche"] or ""
+
+    # Get MLS names from agent setup
+    mls_names = []
+    try:
+        conn2 = _gc()
+        c2    = conn2.cursor()
+        c2.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (current_user["id"],))
+        setup_row = c2.fetchone()
+        conn2.close()
+        if setup_row:
+            import json as _json2
+            setup = _json2.loads(setup_row["setup_json"] or "{}")
+            mls_names = setup.get("mlsNames", [])
+    except Exception:
+        pass
+
+    result = _run_compliance_check(
+        content      = post_text,
+        agent_name   = agent_name,
+        brokerage    = brokerage,
+        mls_names    = mls_names,
+        niche        = niche,
+        content_mode = content_mode,
+    )
+
+    # Save updated compliance + timestamp back to library item
+    result_dict = result.dict()
+    from datetime import datetime as _dt2
+    checked_at = _dt2.utcnow().isoformat()
+    try:
+        conn3 = _gc()
+        import json as _json3
+        conn3.execute(
+            "UPDATE content_library SET compliance = ?, compliance_checked_at = ? WHERE id = ? AND user_id = ?",
+            (_json3.dumps(result_dict), checked_at, item_id, current_user["id"])
+        )
+        conn3.commit()
+        conn3.close()
+    except Exception as _e:
+        print(f"[Compliance] Could not save re-check result for item {item_id}: {_e}")
+
+    result_dict["checked_at"] = checked_at
+    return result_dict
+
+
 @app.post("/image/generate")
 async def generate_image(request: Request, current_user: dict = Depends(get_current_user)):
     """
