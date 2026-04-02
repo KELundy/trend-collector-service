@@ -450,6 +450,9 @@ async def create_demo_token(request: Request, user=Depends(get_current_user)):
 @app.get("/demo/tokens")
 async def list_demo_tokens(user=Depends(get_current_user)):
     if user.get("role") not in ("admin","super_admin"): raise HTTPException(403, "Admin only")
+    conn = database.get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, token, label, created_at, open_count, last_opened, ip_log FROM demo_tokens ORDER BY created_at DESC")
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     for r in rows:
@@ -460,6 +463,9 @@ async def list_demo_tokens(user=Depends(get_current_user)):
 @app.delete("/demo/tokens/{token_id}")
 async def delete_demo_token(token_id: int, user=Depends(get_current_user)):
     if user.get("role") not in ("admin","super_admin"): raise HTTPException(403, "Admin only")
+    conn = database.get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM demo_tokens WHERE id=?", (token_id,))
     conn.commit()
     conn.close()
     return {"ok": True}
