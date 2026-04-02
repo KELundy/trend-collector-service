@@ -77,6 +77,7 @@ except ImportError:
 
 from auth import router as auth_router, get_current_user
 from content_engine import router as content_engine_router, generate_content_core
+from social import router as social_router
 
 from collectors.google_trends import fetch_google_trends
 from collectors.youtube_trends import fetch_youtube_trends
@@ -105,6 +106,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(content_engine_router)
+app.include_router(social_router)
 
 
 @app.on_event("startup")
