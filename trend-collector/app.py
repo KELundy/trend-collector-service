@@ -54,6 +54,7 @@ from database import (
     init_db, save_trends, get_latest_trends,
     migrate_add_niche_column,
     migrate_context_column, tag_existing_as_marketing,
+    migrate_content_library_columns,
     library_save, library_get_all, library_get_item,
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
@@ -130,6 +131,7 @@ async def startup_event():
     print("[Startup] Initializing database...")
     init_db()
     migrate_add_niche_column()
+    migrate_content_library_columns()
     try:
         migrate_context_column()
         tag_existing_as_marketing(2)  # Option A: tags Kevin's existing posts as hb_marketing
