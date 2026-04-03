@@ -98,7 +98,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://app.homebridgegroup.co",
+        "https://homebridgegroup.co",
+        "https://www.homebridgegroup.co",
+    ],
+    allow_origin_regex=r"https://.*\.homebridgegroup\.co",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
