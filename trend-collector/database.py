@@ -192,6 +192,33 @@ def migrate_context_column():
     conn.close()
 
 
+def migrate_content_library_columns():
+    """
+    Adds missing columns to content_library:
+    - cir_id: CIR™ verification record ID
+    - image_url: generated image URL
+    - compliance_checked_at: timestamp of last compliance re-check
+    - edited_at: timestamp of last workspace edit
+    Safe to run multiple times — skips columns that already exist.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    columns = [
+        ("cir_id",                "TEXT"),
+        ("image_url",             "TEXT"),
+        ("compliance_checked_at", "TEXT"),
+        ("edited_at",             "TEXT"),
+    ]
+    for col, coltype in columns:
+        try:
+            c.execute(f"ALTER TABLE content_library ADD COLUMN {col} {coltype}")
+            conn.commit()
+            print(f"[DB] Added column {col} to content_library")
+        except Exception:
+            pass  # Already exists
+    conn.close()
+
+
 def tag_existing_as_marketing(user_id: int):
     """
     One-time migration — tags all existing content for a user as hb_marketing.
