@@ -712,8 +712,8 @@ def _row_to_item(row) -> dict:
         "publishedAt":     row["published_at"],
         "source":          row["source"] or "manual",
         "context":         ctx,
-        "cirId":           cir_id,
-        "imageUrl":        image_url,
+        "cir_id":          cir_id,
+        "image_url":       image_url,
     }
 
 
