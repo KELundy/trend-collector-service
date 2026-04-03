@@ -472,7 +472,8 @@ def get_user_results(user_id: int) -> dict:
         try:
             comp = json.loads(row["compliance"]) if isinstance(row["compliance"], str) else row["compliance"]
             if isinstance(comp, dict):
-                v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+                # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+                v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
                 if comp.get("passed") is True: v = "pass"
                 if v in ("pass","compliant","ok","green"): passing += 1
         except Exception:
@@ -622,7 +623,10 @@ def library_get_item(item_id: int, user_id: int = None) -> Optional[dict]:
 
 
 def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
-    """Update status, copiedPlatforms, content, approvedAt, publishedAt."""
+    """Update status, copiedPlatforms, content, approvedAt, publishedAt.
+    When status is set to 'approved', generates a CIR™ ID if one does not
+    already exist on this item.
+    """
     conn = get_conn()
     c = conn.cursor()
 
@@ -641,6 +645,24 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     if not fields:
         conn.close()
         return library_get_item(item_id)
+
+    # ── CIR™ generation — write on first approval ──
+    # Only create a CIR ID if this update sets status to 'approved'
+    # and the item doesn't already have one.
+    if updates.get("status") == "approved":
+        c.execute(
+            "SELECT cir_id FROM content_library WHERE id = ? AND user_id = ?",
+            (item_id, user_id)
+        )
+        existing = c.fetchone()
+        if existing and not existing["cir_id"]:
+            import secrets as _sec
+            cir_date = datetime.utcnow().strftime("%Y%m%d")
+            cir_rand = _sec.token_hex(3).upper()  # 6 uppercase hex chars
+            cir_id   = f"CIR-{cir_date}-{cir_rand}"
+            fields.append("cir_id = ?")
+            values.append(cir_id)
+            print(f"[CIR] Generated {cir_id} for library item {item_id} (user {user_id})")
 
     values += [item_id, user_id]
     c.execute(
@@ -669,6 +691,14 @@ def _row_to_item(row) -> dict:
     ctx = "agent"
     try: ctx = row["context"] or "agent"
     except Exception: pass
+    # FIX: include cir_id and image_url — columns exist in DB but were
+    # never returned, so the frontend could never display them.
+    cir_id    = None
+    image_url = None
+    try: cir_id    = row["cir_id"]
+    except Exception: pass
+    try: image_url = row["image_url"]
+    except Exception: pass
     return {
         "id":              row["id"],
         "userId":          row["user_id"],
@@ -682,6 +712,8 @@ def _row_to_item(row) -> dict:
         "publishedAt":     row["published_at"],
         "source":          row["source"] or "manual",
         "context":         ctx,
+        "cirId":           cir_id,
+        "imageUrl":        image_url,
     }
 
 
@@ -702,42 +734,38 @@ def schedule_upsert(user_id: int, niche: str, frequency: str,
             active      = 1
     """, (user_id, niche, frequency, time_of_day, timezone))
     conn.commit()
-    conn.close()
-    return schedule_get(user_id, niche)
-
-
-def schedule_get(user_id: int, niche: str) -> Optional[dict]:
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute(
-        "SELECT * FROM schedules WHERE user_id = ? AND niche = ?",
-        (user_id, niche)
-    )
+    c.execute("SELECT * FROM schedules WHERE user_id = ? AND niche = ?", (user_id, niche))
     row = c.fetchone()
     conn.close()
-    return _schedule_row(row) if row else None
+    return _schedule_row(row)
 
 
 def schedules_get_all(user_id: int) -> list:
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM schedules WHERE user_id = ?", (user_id,))
+    c.execute("SELECT * FROM schedules WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
     rows = c.fetchall()
     conn.close()
     return [_schedule_row(r) for r in rows]
 
 
+def schedule_get(user_id: int, niche: str) -> Optional[dict]:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM schedules WHERE user_id = ? AND niche = ?", (user_id, niche))
+    row = c.fetchone()
+    conn.close()
+    return _schedule_row(row) if row else None
+
+
 def schedules_get_due() -> list:
-    """Return all active schedules whose next_run is due (or never run)."""
     conn = get_conn()
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
     c.execute("""
-        SELECT s.*, u.id as uid, u.email, u.agent_name, u.brokerage
-        FROM schedules s
-        JOIN users u ON s.user_id = u.id
-        WHERE s.active = 1
-          AND (s.next_run IS NULL OR s.next_run <= ?)
+        SELECT * FROM schedules
+        WHERE active = 1
+          AND (next_run IS NULL OR next_run <= ?)
     """, (now,))
     rows = c.fetchall()
     conn.close()
@@ -857,7 +885,8 @@ def calculate_identity_score(user_id: int, setup: dict) -> dict:
             try:
                 comp = json.loads(r["compliance"]) if isinstance(r["compliance"], str) else r["compliance"]
                 if isinstance(comp, dict):
-                    verdict = comp.get("overall_verdict") or comp.get("status") or ""
+                    # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+                    verdict = comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or ""
                     if str(verdict).lower() in ("pass", "compliant", "ok", "green"):
                         compliant_count += 1
                     elif comp.get("passed") is True:
@@ -1048,7 +1077,8 @@ def generate_compliance_pdf(
             comp = json.loads(r["compliance"]) if isinstance(r["compliance"], str) else r["compliance"]
             v = ""
             if isinstance(comp, dict):
-                v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+                # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+                v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
                 if comp.get("passed") is True: v = "pass"
             if v in ("pass","compliant","ok","green"): passing += 1
             elif v in ("warn","warning","review"):      review_count += 1
@@ -1087,7 +1117,8 @@ def generate_compliance_pdf(
         try:
             comp = json.loads(comp_raw) if isinstance(comp_raw, str) else comp_raw
             if not isinstance(comp, dict): return ("—", "neutral")
-            v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+            # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+            v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
             if comp.get("passed") is True: v = "pass"
             if v in ("pass","compliant","ok","green"): return ("Verified", "pass")
             if v in ("warn","warning","review"):        return ("Review",   "warn")
@@ -1222,7 +1253,8 @@ def get_broker_office_stats(broker_id: int) -> list:
             try:
                 comp = json.loads(cr["compliance"]) if isinstance(cr["compliance"],str) else cr["compliance"]
                 if isinstance(comp,dict):
-                    v = str(comp.get("overall_verdict") or comp.get("status") or "").lower()
+                    # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+                    v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
                     if comp.get("passed") is True: v = "pass"
                     if v in ("pass","compliant","ok","green"): passing += 1
             except: pass
