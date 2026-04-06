@@ -524,6 +524,106 @@ async def _post_youtube(access_token: str, channel_id: str, text: str, image_url
 
 
 # ─────────────────────────────────────────────
+# APPROVAL NOTIFICATIONS — Item #1
+# SendGrid email + Twilio SMS for broker/agent content approval flow
+# ─────────────────────────────────────────────
+
+async def send_approval_email(to_email: str, agent_name: str, headline: str, approve_url: str):
+    """
+    Send an approval request email via SendGrid.
+    Requires SENDGRID_API_KEY and SENDGRID_FROM_EMAIL env vars.
+    Raises on failure so the caller can handle gracefully.
+    """
+    sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
+    sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "noreply@homebridgegroup.co")
+    if not sendgrid_key:
+        raise RuntimeError("SENDGRID_API_KEY not configured.")
+
+    subject = f"Content ready for your approval — HomeBridge"
+    body_text = (
+        f"Hi {agent_name},
+
+"
+        f"Your HomeBridge content is ready for review:
+
+"
+        f""{headline}"
+
+"
+        f"Tap the link below to approve or review it in the app:
+"
+        f"{approve_url}
+
+"
+        f"This link expires in 7 days and can only be used once.
+
+"
+        f"— HomeBridge
+https://app.homebridgegroup.co"
+    )
+    body_html = f"""<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#f5f4f0;">
+  <div style="background:#fff;border-radius:12px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,.06);">
+    <p style="font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#787870;margin-bottom:20px;">HomeBridge</p>
+    <h2 style="font-size:20px;color:#0f0f0d;margin-bottom:12px;">Content ready for your approval</h2>
+    <p style="font-size:14px;color:#3d3d38;line-height:1.7;">Hi {agent_name},<br><br>Your HomeBridge content is ready for review:</p>
+    <blockquote style="margin:16px 0;padding:14px 18px;background:#f5f4f0;border-left:3px solid #1749c9;border-radius:4px;font-size:14px;color:#0f0f0d;font-weight:600;">{headline}</blockquote>
+    <a href="{approve_url}" style="display:inline-block;background:#1749c9;color:#fff;font-size:14px;font-weight:700;padding:12px 28px;border-radius:999px;text-decoration:none;margin:8px 0 20px;">Review &amp; Approve</a>
+    <p style="font-size:12px;color:#b0afa6;line-height:1.6;">This link expires in 7 days and can only be used once.<br>
+    If you did not request this, you can ignore this email.</p>
+  </div>
+</div>"""
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {sendgrid_key}", "Content-Type": "application/json"},
+            json={
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": sendgrid_from, "name": "HomeBridge"},
+                "subject": subject,
+                "content": [
+                    {"type": "text/plain", "value": body_text},
+                    {"type": "text/html",  "value": body_html},
+                ],
+            },
+        )
+    if resp.status_code not in (200, 202):
+        raise RuntimeError(f"SendGrid error {resp.status_code}: {resp.text}")
+
+
+async def send_approval_sms(to_phone: str, agent_name: str, headline: str, approve_url: str):
+    """
+    Send an approval request SMS via Twilio.
+    Requires TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER env vars.
+    Raises on failure so the caller can handle gracefully.
+    """
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token  = os.getenv("TWILIO_AUTH_TOKEN", "")
+    from_number = os.getenv("TWILIO_FROM_NUMBER", "")
+    if not (account_sid and auth_token and from_number):
+        raise RuntimeError("Twilio env vars not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER).")
+
+    # Normalise phone — ensure + prefix
+    phone = to_phone.strip()
+    if not phone.startswith("+"):
+        phone = "+1" + "".join(c for c in phone if c.isdigit())
+
+    message = (
+        f"HomeBridge: "{headline[:60]}{'...' if len(headline)>60 else ''}" "
+        f"is ready for your approval. Tap to review: {approve_url}"
+    )
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+            auth=(account_sid, auth_token),
+            data={"From": from_number, "To": phone, "Body": message},
+        )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Twilio error {resp.status_code}: {resp.text}")
+
+
+# ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 def _is_expired(expires_at: str) -> bool:
