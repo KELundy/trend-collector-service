@@ -2769,8 +2769,9 @@ async def approval_resend(token: str = ""):
     return {"ok": sent_email or sent_sms, "email_sent": sent_email, "sms_sent": sent_sms}
 
 # ─────────────────────────────────────────────
-# DIAGNOSTIC — temporary, super_admin only
-# GET /debug/library-raw
+# DIAGNOSTIC + MIGRATION — super_admin only
+# GET  /debug/library-raw      — shows raw context values
+# POST /debug/fix-context       — migrates hb_marketing → agent for caller
 # ─────────────────────────────────────────────
 @app.get("/debug/library-raw")
 async def debug_library_raw(current_user: dict = Depends(get_current_user)):
@@ -2793,4 +2794,32 @@ async def debug_library_raw(current_user: dict = Depends(get_current_user)):
         "user_id": current_user["id"],
         "total_rows": len(rows),
         "rows": rows,
+    }
+
+
+@app.post("/debug/fix-context")
+async def debug_fix_context(current_user: dict = Depends(get_current_user)):
+    """
+    One-time migration: flips all content for this user from
+    context='hb_marketing' to context='agent'.
+    Safe to run multiple times — only touches hb_marketing rows.
+    Super admin only.
+    """
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(403, "Super admin only.")
+    from database import get_conn as _gc_fix
+    conn = _gc_fix()
+    c    = conn.cursor()
+    c.execute("""
+        UPDATE content_library
+        SET context = 'agent'
+        WHERE user_id = ? AND context = 'hb_marketing'
+    """, (current_user["id"],))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True,
+        "migrated": affected,
+        "message": f"Moved {affected} item(s) from hb_marketing → agent context.",
     }
