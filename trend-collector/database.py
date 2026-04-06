@@ -155,6 +155,22 @@ def init_db():
         )
     """)
 
+    # Approval tokens — one-time tokenized links for broker/agent content approval (Item #1)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS approval_tokens (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
+            library_item_id INTEGER NOT NULL,
+            token           TEXT    NOT NULL UNIQUE,
+            action          TEXT    NOT NULL DEFAULT 'approve',
+            expires_at      TEXT    NOT NULL,
+            used            INTEGER DEFAULT 0,
+            created_at      TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id)         REFERENCES users(id),
+            FOREIGN KEY (library_item_id) REFERENCES content_library(id)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -259,6 +275,36 @@ def migrate_roles_to_new_system():
             print(f"[DB] Role migration: {affected} user(s) moved to 'admin' role")
     except Exception as e:
         print(f"[DB] Role migration error: {e}")
+    finally:
+        conn.close()
+
+
+def migrate_approval_tokens():
+    """
+    Non-destructive migration — creates approval_tokens table if it doesn't exist.
+    Safe to call on every startup.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS approval_tokens (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                library_item_id INTEGER NOT NULL,
+                token           TEXT    NOT NULL UNIQUE,
+                action          TEXT    NOT NULL DEFAULT 'approve',
+                expires_at      TEXT    NOT NULL,
+                used            INTEGER DEFAULT 0,
+                created_at      TEXT    DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id)         REFERENCES users(id),
+                FOREIGN KEY (library_item_id) REFERENCES content_library(id)
+            )
+        """)
+        conn.commit()
+        print("[DB] approval_tokens table ready.")
+    except Exception as e:
+        print(f"[DB] migrate_approval_tokens: {e}")
     finally:
         conn.close()
 
@@ -824,6 +870,74 @@ def update_content_status(item_id: int, new_status: str):
 
 
 # ─────────────────────────────────────────────
+# APPROVAL TOKENS — one-time tokenized content approval links (Item #1)
+# ─────────────────────────────────────────────
+def create_approval_token(user_id: int, library_item_id: int, action: str = "approve") -> str:
+    """
+    Create a one-time approval token for a library item.
+    Token is valid for 7 days — agent may not check immediately.
+    Returns the token string to embed in the approval link.
+    """
+    import secrets as _sec
+    from datetime import datetime as _dt, timedelta as _td
+    migrate_approval_tokens()
+    token      = _sec.token_urlsafe(32)
+    expires_at = (_dt.utcnow() + _td(days=7)).isoformat()
+    conn = get_conn()
+    # Invalidate any existing unused tokens for this item (one active token at a time)
+    conn.execute(
+        "UPDATE approval_tokens SET used=1 WHERE user_id=? AND library_item_id=? AND used=0",
+        (user_id, library_item_id)
+    )
+    conn.execute(
+        "INSERT INTO approval_tokens (user_id, library_item_id, token, action, expires_at) VALUES (?,?,?,?,?)",
+        (user_id, library_item_id, token, action, expires_at)
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def validate_approval_token(token: str) -> Optional[dict]:
+    """
+    Validate a token and return its record if valid and unexpired.
+    Returns None if token is invalid, expired, or already used.
+    """
+    from datetime import datetime as _dt
+    migrate_approval_tokens()
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT at.id, at.user_id, at.library_item_id, at.action, at.expires_at,
+               u.email, u.agent_name,
+               cl.content, cl.compliance, cl.status, cl.niche
+        FROM approval_tokens at
+        JOIN users u ON u.id = at.user_id
+        JOIN content_library cl ON cl.id = at.library_item_id
+        WHERE at.token = ? AND at.used = 0
+    """, (token,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        if _dt.utcnow() > _dt.fromisoformat(row["expires_at"]):
+            return None
+    except Exception:
+        return None
+    return dict(row)
+
+
+def consume_approval_token(token: str):
+    """Mark a token as used so it cannot be replayed."""
+    migrate_approval_tokens()
+    conn = get_conn()
+    conn.execute("UPDATE approval_tokens SET used=1 WHERE token=?", (token,))
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────
 # IDENTITY STRENGTH SCORE
 # ─────────────────────────────────────────────
 def calculate_identity_score(user_id: int, setup: dict) -> dict:
@@ -1180,18 +1294,47 @@ def generate_compliance_pdf(
     else:
         cw = {"date":1.0*inch,"title":2.4*inch,"niche":0.85*inch,"plat":0.9*inch,"verdict":0.75*inch,"approved":1.1*inch}
         tdata = [[Paragraph(h,styles["cell_bold"]) for h in ["DATE SAVED","CONTENT","NICHE","PLATFORMS","COMPLIANCE","APPROVED AT"]]]
-        row_bgs = []
+
+        # row_meta tracks (row_index_in_tdata, bg_color, is_notes_subrow) for TableStyle
+        row_meta = []
+        data_row_idx = 1  # header is row 0
+
+        def _build_notes_text(comp_raw):
+            """
+            Build the PaperTrail™ verification source string for Item #2.
+            Prefers disclosureChecks (new format) then falls back to notes array.
+            Format: ✓ pass | Authority  /  ⚠ warn | Authority | Message
+            """
+            try:
+                comp = json.loads(comp_raw) if isinstance(comp_raw, str) else comp_raw
+                if not isinstance(comp, dict):
+                    return "No compliance data."
+                # Prefer disclosureChecks (produced by the rebuilt compliance engine)
+                checks = comp.get("disclosureChecks", [])
+                if checks:
+                    return "  ·  ".join(checks[:12])  # cap at 12 to avoid PDF overflow
+                # Fallback: notes array (older records)
+                notes = comp.get("notes", [])
+                if notes:
+                    return "  ·  ".join(str(n) for n in notes[:8])
+                return "No detailed rule results available for this item."
+            except Exception:
+                return "Could not parse compliance data."
+
         for r in rows:
             try: cd = json.loads(r["content"]) if isinstance(r["content"],str) else r["content"]
             except: cd = {}
             title   = cd.get("headline") or cd.get("title") or cd.get("body","")
             display = truncate(title, 90) or "—"
             try:
-                plats   = json.loads(r["copied_platforms"] or "[]")
+                plats    = json.loads(r["copied_platforms"] or "[]")
                 plat_str = ", ".join(plats) if plats else "Pending"
             except: plat_str = "Pending"
             _, kind = compliance_label(r["compliance"])
-            row_bgs.append({"pass":colors.HexColor("#f9fef9"),"warn":colors.HexColor("#fffdf5"),"fail":colors.HexColor("#fff9f9")}.get(kind,WHITE))
+            main_bg  = {"pass":colors.HexColor("#f9fef9"),"warn":colors.HexColor("#fffdf5"),"fail":colors.HexColor("#fff9f9")}.get(kind,WHITE)
+            notes_bg = {"pass":colors.HexColor("#f4fdf4"),"warn":colors.HexColor("#fdf9ee"),"fail":colors.HexColor("#fdf4f4")}.get(kind,colors.HexColor("#f8f8f6"))
+
+            # Main content row
             tdata.append([
                 Paragraph(fmt_date(r["saved_at"]),styles["cell"]),
                 Paragraph(display,styles["cell"]),
@@ -1200,15 +1343,35 @@ def generate_compliance_pdf(
                 verdict_para(r["compliance"]),
                 Paragraph(fmt_date(r["approved_at"] or r["published_at"]),styles["cell"]),
             ])
+            row_meta.append((data_row_idx, main_bg, False))
+            data_row_idx += 1
+
+            # Notes sub-row (Item #2 — PaperTrail™ verification sources)
+            notes_text = _build_notes_text(r["compliance"])
+            tdata.append([
+                Paragraph(notes_text, ParagraphStyle("notes_sub", fontName="Helvetica",
+                    fontSize=6.5, textColor=INK_3, leading=9, leftIndent=4)),
+                "", "", "", "", ""
+            ])
+            row_meta.append((data_row_idx, notes_bg, True))
+            data_row_idx += 1
+
         ct = Table(tdata, colWidths=list(cw.values()), repeatRows=1)
         ts = [
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f0eff8")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,0),7.5),
             ("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
             ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
-            ("LINEBELOW",(0,0),(-1,0),0.75,BLUE),("LINEBELOW",(0,1),(-1,-1),0.3,BORDER),("BOX",(0,0),(-1,-1),0.5,BORDER),
+            ("LINEBELOW",(0,0),(-1,0),0.75,BLUE),("BOX",(0,0),(-1,-1),0.5,BORDER),
         ]
-        for idx, bg in enumerate(row_bgs):
-            ts.append(("BACKGROUND",(0,idx+1),(-1,idx+1),bg))
+        for idx, bg, is_notes in row_meta:
+            ts.append(("BACKGROUND",(0,idx),(-1,idx),bg))
+            if is_notes:
+                ts.append(("SPAN",(0,idx),(5,idx)))
+                ts.append(("TOPPADDING",(0,idx),(-1,idx),2))
+                ts.append(("BOTTOMPADDING",(0,idx),(-1,idx),5))
+                ts.append(("LEFTPADDING",(0,idx),(-1,idx),8))
+            else:
+                ts.append(("LINEBELOW",(0,idx),(-1,idx),0.3,BORDER))
         ct.setStyle(TableStyle(ts))
         story.append(ct)
 
