@@ -250,18 +250,39 @@ async def get_identity_score(req: ScoreRequest, current_user=Depends(get_current
     return score
 
 
-def _compute_next_run(frequency: str, time_of_day: str) -> str:
+def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America/Denver") -> str:
+    """
+    Compute the next UTC run time for a schedule.
+    time_of_day is treated as LOCAL time in the given timezone — not UTC.
+    Returns an ISO-format UTC datetime string for storage and comparison.
+    """
     try:
         hour, minute = map(int, time_of_day.split(":"))
     except Exception:
         hour, minute = 8, 0
-    now = datetime.utcnow()
-    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if frequency == "daily": delta = timedelta(days=1)
+
+    if frequency == "daily":    delta = timedelta(days=1)
     elif frequency == "3x_week": delta = timedelta(days=2)
-    else: delta = timedelta(days=7)
-    if candidate <= now: candidate += delta
-    return candidate.isoformat()
+    else:                        delta = timedelta(days=7)
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz        = ZoneInfo(timezone or "America/Denver")
+        from datetime import datetime as _dt2
+        now_local = _dt2.now(tz)
+        candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now_local:
+            candidate += delta
+        # Store as UTC (no tzinfo) for consistent DB comparison
+        import datetime as _dt_mod
+        return candidate.astimezone(_dt_mod.timezone.utc).replace(tzinfo=None).isoformat()
+    except Exception:
+        # Fallback: treat time as UTC if zoneinfo unavailable
+        now = datetime.utcnow()
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += delta
+        return candidate.isoformat()
 
 
 def content_scheduler_worker():
@@ -382,7 +403,11 @@ def _run_scheduled_generation(sched: dict):
     except Exception as e:
         print(f"[Scheduler] ✗ Generation failed for user {user_id} / '{niche}': {e}")
     finally:
-        next_run = _compute_next_run(sched.get("frequency", "weekly"), sched.get("time_of_day", "08:00"))
+        next_run = _compute_next_run(
+            sched.get("frequency",  "weekly"),
+            sched.get("time_of_day", "08:00"),
+            sched.get("timezone",   "America/Denver"),
+        )
         schedule_mark_ran(sched_id, next_run)
 
 
