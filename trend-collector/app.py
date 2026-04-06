@@ -283,7 +283,7 @@ def _run_scheduled_generation(sched: dict):
     sched_id = sched["id"]
     print(f"[Scheduler] Generating for user {user_id} / niche '{niche}'")
     try:
-        from database import get_conn
+        from database import get_conn, create_approval_token
         conn = get_conn()
         c = conn.cursor()
         c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
@@ -313,9 +313,72 @@ def _run_scheduled_generation(sched: dict):
             audience    = setup.get("audienceDescription", ""),
             words_avoid = setup.get("wordsAvoid", ""),
             words_prefer= setup.get("wordsPrefer", ""),
+            mls_names   = setup.get("mlsNames", []),
+            state       = setup.get("state", ""),
         )
-        library_save(user_id=user_id, niche=niche, content=result["content"], compliance=result["compliance"], source="scheduled")
-        print(f"[Scheduler] ✓ Saved scheduled content for user {user_id} / '{niche}'")
+
+        # ── FIX: strip non-serializable fields before saving ──────────────
+        # generate_content_core returns content_response.dict() which includes
+        # generated_at as a Python datetime object. json.dumps() cannot serialize
+        # datetime, causing a silent TypeError that prevented content from ever
+        # being saved to the library. Convert to ISO string before saving.
+        content_to_save = dict(result["content"])
+        if "generated_at" in content_to_save:
+            from datetime import datetime as _dt
+            val = content_to_save["generated_at"]
+            if isinstance(val, _dt):
+                content_to_save["generated_at"] = val.isoformat()
+
+        # compliance is a ComplianceBadge.dict() — also strip any datetime values
+        compliance_to_save = dict(result["compliance"])
+
+        saved_item = library_save(
+            user_id    = user_id,
+            niche      = niche,
+            content    = content_to_save,
+            compliance = compliance_to_save,
+            source     = "scheduled",
+        )
+        print(f"[Scheduler] ✓ Saved scheduled content item {saved_item.get('id')} for user {user_id} / '{niche}'")
+
+        # ── Notify agent via email + SMS ───────────────────────────────────
+        # Create a one-time approval token and send the link so the agent
+        # can review and approve directly from their phone or inbox.
+        try:
+            from social import send_approval_email, send_approval_sms
+            import asyncio
+
+            item_id    = saved_item.get("id")
+            token      = create_approval_token(user_id, item_id)
+            base_url   = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
+            approve_url = f"{base_url}/approve.html?token={token}"
+            agent_name = user_row["agent_name"] or "Agent"
+            headline   = content_to_save.get("headline", "Your scheduled content is ready")
+
+            # Email — always attempt (email is on the user record)
+            to_email = user_row["email"] if user_row else ""
+            if to_email:
+                try:
+                    asyncio.run(send_approval_email(to_email, agent_name, headline, approve_url))
+                    print(f"[Scheduler] ✓ Approval email sent to {to_email}")
+                except Exception as email_err:
+                    print(f"[Scheduler] ✗ Email failed: {email_err}")
+
+            # SMS — use phone from user record, fall back to setup approvalPhone
+            phone = (user_row["phone"] if user_row else "") or setup.get("approvalPhone", "") or setup.get("phone", "")
+            if phone:
+                try:
+                    asyncio.run(send_approval_sms(phone, agent_name, headline, approve_url))
+                    print(f"[Scheduler] ✓ Approval SMS sent to {phone}")
+                except Exception as sms_err:
+                    print(f"[Scheduler] ✗ SMS failed (check Twilio env vars): {sms_err}")
+            else:
+                print(f"[Scheduler] No phone on file for user {user_id} — SMS skipped.")
+
+        except Exception as notify_err:
+            # Notification failure must never block the scheduled run
+            print(f"[Scheduler] ✗ Notification error (content was saved): {notify_err}")
+
     except Exception as e:
         print(f"[Scheduler] ✗ Generation failed for user {user_id} / '{niche}': {e}")
     finally:
