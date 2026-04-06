@@ -1855,6 +1855,22 @@ async def recheck_compliance(request: Request, current_user: dict = Depends(get_
     except Exception:
         pass
 
+    # Get agent state for state_commission personalisation (Item #3)
+    agent_state = ""
+    try:
+        setup_obj = {}
+        conn4 = _gc()
+        c4    = conn4.cursor()
+        c4.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (current_user["id"],))
+        sr4 = c4.fetchone()
+        conn4.close()
+        if sr4:
+            import json as _json4
+            setup_obj = _json4.loads(sr4["setup_json"] or "{}")
+        agent_state = setup_obj.get("state", "")
+    except Exception:
+        pass
+
     result = _run_compliance_check(
         content      = post_text,
         agent_name   = agent_name,
@@ -1862,6 +1878,7 @@ async def recheck_compliance(request: Request, current_user: dict = Depends(get_
         mls_names    = mls_names,
         niche        = niche,
         content_mode = content_mode,
+        state        = agent_state,
     )
 
     # Save updated compliance + timestamp back to library item
@@ -2015,3 +2032,181 @@ async def submit_waitlist(request: Request):
         print(f"[Waitlist] SendGrid error: {e}")
 
     return {"ok": True, "message": "Request received. We'll be in touch shortly."}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROVAL FLOW — Item #1
+# POST /library/{id}/send-approval  — creates token, sends SMS + email to agent
+# GET  /library/{id}/quick-approve  — validates token, approves, returns HTML page
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/library/{item_id}/send-approval")
+async def send_approval_request(
+    item_id: int,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Creates a one-time approval token and sends it to the agent via SMS and/or email.
+    The approval link is valid for 7 days.  Only the item owner can trigger this.
+    """
+    from database import library_get_item, create_approval_token
+    from social import send_approval_email, send_approval_sms
+
+    item = library_get_item(item_id, current_user["id"])
+    if not item:
+        raise HTTPException(404, "Content item not found.")
+    if item["status"] not in ("pending",):
+        raise HTTPException(400, f"Item is already {item['status']} — no approval needed.")
+
+    token    = create_approval_token(current_user["id"], item_id)
+    base_url = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
+    approve_url = f"{base_url}/approve.html?token={token}"
+
+    # Pull agent name + headline for the message
+    agent_name = current_user.get("agent_name", "Your agent")
+    try:
+        import json as _json_a
+        cd        = _json_a.loads(item["content"]) if isinstance(item["content"], str) else item["content"]
+        headline  = cd.get("headline", "New content ready for review")
+    except Exception:
+        headline  = "New content ready for review"
+
+    results = {"token_created": True, "email_sent": False, "sms_sent": False}
+
+    # Send email
+    to_email = current_user.get("email", "")
+    if to_email:
+        try:
+            await send_approval_email(to_email, agent_name, headline, approve_url)
+            results["email_sent"] = True
+        except Exception as e:
+            print(f"[Approval] Email failed: {e}")
+
+    # Send SMS if phone is on file
+    phone = current_user.get("phone", "")
+    if not phone:
+        # Check setup JSON for approval_phone
+        try:
+            from database import get_agent_setup as _gas
+            setup_d = _gas(current_user["id"])
+            phone = setup_d.get("approvalPhone", "") or setup_d.get("phone", "")
+        except Exception:
+            pass
+    if phone:
+        try:
+            await send_approval_sms(phone, agent_name, headline, approve_url)
+            results["sms_sent"] = True
+        except Exception as e:
+            print(f"[Approval] SMS failed: {e}")
+
+    results["approve_url"] = approve_url
+    return results
+
+
+@app.get("/library/{item_id}/quick-approve")
+async def quick_approve(item_id: int, token: str = ""):
+    """
+    Token-gated approval endpoint.  No login required — the token IS the auth.
+    On success: marks the item approved, consumes the token, returns a simple HTML page.
+    Hosted at app.homebridgegroup.co/api/library/{id}/quick-approve?token=...
+    """
+    from database import (
+        validate_approval_token, consume_approval_token,
+        library_get_item, library_update,
+    )
+    from fastapi.responses import HTMLResponse
+    from datetime import datetime as _dt_qa
+
+    if not token:
+        return HTMLResponse(_approval_page("error", "Missing token.", "", ""), status_code=400)
+
+    record = validate_approval_token(token)
+    if not record:
+        return HTMLResponse(_approval_page("error", "This approval link has expired or already been used.", "", ""), status_code=410)
+
+    if str(record["library_item_id"]) != str(item_id):
+        return HTMLResponse(_approval_page("error", "Token does not match this content item.", "", ""), status_code=400)
+
+    # Load item to check current status
+    item = library_get_item(item_id)
+    if not item:
+        return HTMLResponse(_approval_page("error", "Content item not found.", "", ""), status_code=404)
+
+    if item["status"] not in ("pending",):
+        return HTMLResponse(_approval_page(
+            "already_done",
+            f"This content is already {item['status']}.",
+            record.get("agent_name", ""),
+            "",
+        ), status_code=200)
+
+    # Approve the item
+    consume_approval_token(token)
+    library_update(item_id, record["user_id"], {
+        "status":      "approved",
+        "approved_at": _dt_qa.utcnow().isoformat(),
+    })
+
+    try:
+        import json as _json_qa
+        cd       = _json_qa.loads(item["content"]) if isinstance(item["content"], str) else item["content"]
+        headline = cd.get("headline", "Content approved")
+    except Exception:
+        headline = "Content approved"
+
+    return HTMLResponse(_approval_page(
+        "success",
+        headline,
+        record.get("agent_name", ""),
+        record.get("niche", ""),
+    ))
+
+
+def _approval_page(state: str, headline: str, agent_name: str, niche: str) -> str:
+    """Minimal standalone HTML approval result page — no app shell needed."""
+    icons   = {"success": "✓", "already_done": "●", "error": "✗"}
+    colors  = {"success": "#15803d", "already_done": "#1749c9", "error": "#b91c1c"}
+    msgs    = {
+        "success":      "Your content has been approved and a CIR™ record has been created.",
+        "already_done": headline,
+        "error":        headline,
+    }
+    icon    = icons.get(state, "?")
+    color   = colors.get(state, "#3d3d38")
+    message = msgs.get(state, headline)
+    title   = "Content Approved" if state == "success" else ("Already Approved" if state == "already_done" else "Approval Error")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HomeBridge — {title}</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f4f0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}}
+    .card{{background:#fff;border-radius:16px;padding:40px 36px;max-width:480px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08);text-align:center}}
+    .icon{{font-size:48px;color:{color};margin-bottom:16px}}
+    .brand{{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#787870;margin-bottom:24px}}
+    h1{{font-size:22px;font-weight:700;color:#0f0f0d;margin-bottom:12px}}
+    p{{font-size:14px;color:#3d3d38;line-height:1.7;margin-bottom:8px}}
+    .niche{{display:inline-block;background:#eef2fb;color:#1749c9;font-size:12px;font-weight:600;padding:4px 12px;border-radius:20px;margin-top:8px}}
+    .footer{{margin-top:28px;font-size:12px;color:#b0afa6}}
+    a{{color:#1749c9;text-decoration:none;font-weight:600}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">HomeBridge</div>
+    <div class="icon">{icon}</div>
+    <h1>{title}</h1>
+    <p>{message}</p>
+    {"<p>" + headline + "</p>" if state == "success" and headline else ""}
+    {"<span class='niche'>" + niche + "</span>" if niche else ""}
+    <div class="footer">
+      {"A CIR™ Certified Identity Record has been generated. View your full content library at <a href='https://app.homebridgegroup.co'>app.homebridgegroup.co</a>." if state == "success" else ""}
+      {"Return to your app at <a href='https://app.homebridgegroup.co'>app.homebridgegroup.co</a>." if state != "success" else ""}
+    </div>
+  </div>
+</body>
+</html>"""
