@@ -1389,7 +1389,13 @@ def generate_compliance_pdf(
 # BROKER OFFICE STATS
 # ─────────────────────────────────────────────
 def get_broker_office_stats(broker_id: int) -> list:
+    """
+    Returns per-agent stats for every active agent linked to this broker.
+    Used by the broker dashboard overview table.
+    Fields returned match what renderBrokerOffice() expects in app.js.
+    """
     import json
+    from datetime import datetime, timedelta
     conn = get_conn()
     c    = conn.cursor()
     c.execute("""
@@ -1399,8 +1405,12 @@ def get_broker_office_stats(broker_id: int) -> list:
     """, (broker_id,))
     agents = c.fetchall()
     results = []
+    now = datetime.utcnow()
+
     for agent in agents:
         uid = agent["id"]
+
+        # Content counts + last activity
         c.execute("""
             SELECT COUNT(*) as total,
                    SUM(CASE WHEN status='approved'  THEN 1 ELSE 0 END) as approved,
@@ -1410,32 +1420,158 @@ def get_broker_office_stats(broker_id: int) -> list:
             FROM content_library WHERE user_id=?
         """, (uid,))
         stats = c.fetchone()
+
+        # Compliance rate
         c.execute("SELECT compliance FROM content_library WHERE user_id=? AND status IN ('approved','published')", (uid,))
         passing = 0
-        for cr in c.fetchall():
+        comp_rows = c.fetchall()
+        for cr in comp_rows:
             try:
                 comp = json.loads(cr["compliance"]) if isinstance(cr["compliance"],str) else cr["compliance"]
-                if isinstance(comp,dict):
-                    # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+                if isinstance(comp, dict):
                     v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
                     if comp.get("passed") is True: v = "pass"
                     if v in ("pass","compliant","ok","green"): passing += 1
-            except: pass
+            except Exception:
+                pass
         total_reviewed = (stats["approved"] or 0) + (stats["published"] or 0)
-        compliance_rate = round((passing/total_reviewed)*100) if total_reviewed>0 else None
+        compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
+
+        # Lightweight identity score — weighted sum, no full engine call
+        # Foundation: bio + market + niches (from setup), Presence: published count, Integrity: compliance rate
+        identity_score = 0
+        try:
+            c.execute("SELECT setup_json FROM agent_setup WHERE user_id=?", (uid,))
+            setup_row = c.fetchone()
+            if setup_row:
+                setup = json.loads(setup_row["setup_json"] or "{}")
+                if setup.get("shortBio","").strip():     identity_score += 15
+                if setup.get("market","").strip():       identity_score += 10
+                niches = setup.get("primaryNiches", [])
+                if len(niches) >= 2:                     identity_score += 10
+                elif len(niches) == 1:                   identity_score += 5
+                if setup.get("brandVoice","").strip():   identity_score += 5
+            pub = stats["published"] or 0
+            if pub >= 5:   identity_score += 30
+            elif pub >= 2: identity_score += 20
+            elif pub >= 1: identity_score += 10
+            if compliance_rate is not None:
+                if compliance_rate == 100:   identity_score += 30
+                elif compliance_rate >= 90:  identity_score += 22
+                elif compliance_rate >= 75:  identity_score += 12
+            identity_score = min(identity_score, 100)
+        except Exception:
+            pass
+
+        # Active schedule
         c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id=? AND active=1", (uid,))
         sched = c.fetchone()
+        has_schedule = (sched["cnt"] > 0) if sched else False
+
+        # Activity status — derived from last_activity timestamp
+        last_act = stats["last_activity"]
+        if not last_act or stats["total"] == 0:
+            activity_status = "new"
+        else:
+            try:
+                last_dt = datetime.fromisoformat(str(last_act)[:19])
+                days_ago = (now - last_dt).days
+                if days_ago <= 7:    activity_status = "active"
+                elif days_ago <= 30: activity_status = "active"
+                else:                activity_status = "inactive"
+            except Exception:
+                activity_status = "active"
+
         results.append({
-            "id": uid, "agent_name": agent["agent_name"], "email": agent["email"],
-            "brokerage": agent["brokerage"], "joined": agent["created_at"],
-            "total_content": stats["total"] or 0, "pending": stats["pending"] or 0,
-            "approved": stats["approved"] or 0, "published": stats["published"] or 0,
+            # "name" alias — fixes frontend a.name reference in renderBrokerOffice
+            "id":             uid,
+            "name":           agent["agent_name"],
+            "agent_name":     agent["agent_name"],
+            "email":          agent["email"],
+            "brokerage":      agent["brokerage"] or "",
+            "joined":         agent["created_at"],
+            "total_content":  stats["total"] or 0,
+            "pending":        stats["pending"] or 0,
+            "approved":       stats["approved"] or 0,
+            "published":      stats["published"] or 0,
             "compliance_rate": compliance_rate,
-            "has_schedule": (sched["cnt"]>0) if sched else False,
-            "last_activity": stats["last_activity"],
+            "score":          identity_score,
+            "has_schedule":   has_schedule,
+            "last_activity":  last_act,
+            "status":         activity_status,
         })
+
     conn.close()
     return results
+
+
+def get_broker_agent_content(broker_id: int, agent_id: int, limit: int = 20) -> list:
+    """
+    Returns recent content items for a specific agent, verified to belong to this broker.
+    Used by the broker dashboard per-agent drill-down.
+    """
+    import json
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # Verify the agent belongs to this broker
+    c.execute(
+        "SELECT id, agent_name FROM users WHERE id=? AND broker_id=? AND is_active=1",
+        (agent_id, broker_id)
+    )
+    if not c.fetchone():
+        conn.close()
+        return []
+
+    c.execute("""
+        SELECT id, niche, status, content, compliance,
+               copied_platforms, saved_at, approved_at, published_at, cir_id
+        FROM content_library
+        WHERE user_id=?
+        ORDER BY COALESCE(approved_at, saved_at) DESC
+        LIMIT ?
+    """, (agent_id, max(1, min(limit, 100))))
+
+    rows = c.fetchall()
+    conn.close()
+
+    items = []
+    for r in rows:
+        try:
+            cd = json.loads(r["content"]) if r["content"] else {}
+        except Exception:
+            cd = {}
+
+        try:
+            comp    = json.loads(r["compliance"]) if r["compliance"] else {}
+            verdict = str(comp.get("overallStatus") or comp.get("overall_verdict") or "").lower()
+            if verdict in ("pass","compliant","ok","green"): compliance_label = "pass"
+            elif verdict in ("warn","review"):               compliance_label = "review"
+            elif verdict == "attention":                     compliance_label = "attention"
+            else:                                            compliance_label = "pending"
+        except Exception:
+            compliance_label = "pending"
+
+        try:
+            plats = json.loads(r["copied_platforms"] or "[]")
+        except Exception:
+            plats = []
+
+        items.append({
+            "id":          r["id"],
+            "niche":       r["niche"] or "",
+            "status":      r["status"] or "pending",
+            "headline":    cd.get("headline", ""),
+            "post":        (cd.get("post", "")[:200] + "…") if len(cd.get("post","")) > 200 else cd.get("post",""),
+            "compliance":  compliance_label,
+            "platforms":   plats,
+            "cir_id":      r["cir_id"] or "",
+            "saved_at":    r["saved_at"] or "",
+            "approved_at": r["approved_at"] or "",
+            "published_at":r["published_at"] or "",
+        })
+
+    return items
 
 
 # ─────────────────────────────────────────────
