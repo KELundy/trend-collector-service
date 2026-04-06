@@ -771,14 +771,19 @@ def schedule_upsert(user_id: int, niche: str, frequency: str,
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active)
-        VALUES (?, ?, ?, ?, ?, 1)
+        INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run)
+        VALUES (?, ?, ?, ?, ?, 1, NULL)
         ON CONFLICT(user_id, niche) DO UPDATE SET
             frequency   = excluded.frequency,
             time_of_day = excluded.time_of_day,
             timezone    = excluded.timezone,
-            active      = 1
+            active      = 1,
+            next_run    = NULL
     """, (user_id, niche, frequency, time_of_day, timezone))
+    # Setting next_run = NULL means the scheduler will pick this up on its next
+    # 15-minute poll and _compute_next_run will calculate the correct next UTC time
+    # based on the agent's local timezone. This also makes testing easy — save your
+    # schedule and it fires within 15 minutes.
     conn.commit()
     c.execute("SELECT * FROM schedules WHERE user_id = ? AND niche = ?", (user_id, niche))
     row = c.fetchone()
