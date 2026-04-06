@@ -371,8 +371,10 @@ def _run_scheduled_generation(sched: dict):
 
             item_id    = saved_item.get("id")
             token      = create_approval_token(user_id, item_id)
-            base_url   = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
-            approve_url = f"{base_url}/approve.html?token={token}"
+            # Point directly at the API endpoint — no static approve.html needed.
+            # The /approve endpoint looks up item_id from the token, so the URL is clean.
+            api_url     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
+            approve_url = f"{api_url}/approve?token={token}"
             agent_name = user_row["agent_name"] or "Agent"
             headline   = content_to_save.get("headline", "Your scheduled content is ready")
 
@@ -2148,8 +2150,8 @@ async def send_approval_request(
         raise HTTPException(400, f"Item is already {item['status']} — no approval needed.")
 
     token    = create_approval_token(current_user["id"], item_id)
-    base_url = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
-    approve_url = f"{base_url}/approve.html?token={token}"
+    api_url     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
+    approve_url = f"{api_url}/approve?token={token}"
 
     # Pull agent name + headline for the message
     agent_name = current_user.get("agent_name", "Your agent")
@@ -2251,54 +2253,205 @@ async def quick_approve(item_id: int, token: str = ""):
     ))
 
 
-def _approval_page(state: str, headline: str, agent_name: str, niche: str) -> str:
-    """Minimal standalone HTML approval result page — no app shell needed."""
-    icons   = {"success": "✓", "already_done": "●", "error": "✗"}
-    colors  = {"success": "#15803d", "already_done": "#1749c9", "error": "#b91c1c"}
-    msgs    = {
-        "success":      "Your content has been approved and a CIR™ record has been created.",
-        "already_done": headline,
-        "error":        headline,
-    }
-    icon    = icons.get(state, "?")
-    color   = colors.get(state, "#3d3d38")
-    message = msgs.get(state, headline)
-    title   = "Content Approved" if state == "success" else ("Already Approved" if state == "already_done" else "Approval Error")
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>HomeBridge — {title}</title>
-  <style>
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f4f0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}}
-    .card{{background:#fff;border-radius:16px;padding:40px 36px;max-width:480px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08);text-align:center}}
-    .icon{{font-size:48px;color:{color};margin-bottom:16px}}
-    .brand{{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#787870;margin-bottom:24px}}
-    h1{{font-size:22px;font-weight:700;color:#0f0f0d;margin-bottom:12px}}
-    p{{font-size:14px;color:#3d3d38;line-height:1.7;margin-bottom:8px}}
-    .niche{{display:inline-block;background:#eef2fb;color:#1749c9;font-size:12px;font-weight:600;padding:4px 12px;border-radius:20px;margin-top:8px}}
-    .footer{{margin-top:28px;font-size:12px;color:#b0afa6}}
-    a{{color:#1749c9;text-decoration:none;font-weight:600}}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="brand">HomeBridge</div>
-    <div class="icon">{icon}</div>
-    <h1>{title}</h1>
-    <p>{message}</p>
-    {"<p>" + headline + "</p>" if state == "success" and headline else ""}
-    {"<span class='niche'>" + niche + "</span>" if niche else ""}
-    <div class="footer">
-      {"A CIR™ Certified Identity Record has been generated. View your full content library at <a href='https://app.homebridgegroup.co'>app.homebridgegroup.co</a>." if state == "success" else ""}
-      {"Return to your app at <a href='https://app.homebridgegroup.co'>app.homebridgegroup.co</a>." if state != "success" else ""}
-    </div>
+def _approval_page(state: str, headline: str, agent_name: str, niche: str,
+                   post_body: str = "", compliance_status: str = "",
+                   token: str = "") -> str:
+    """
+    Renders the approval page.
+    state values:
+      'preview'     — show content + Approve button (GET, before any action)
+      'success'     — content was just approved (POST response)
+      'already_done'— content was already approved/published
+      'expired'     — token expired, show resend option
+      'error'       — generic error
+    """
+    app_url = "https://app.homebridgegroup.co"
+
+    # ── Shared styles ────────────────────────────────────────────────────────
+    styles = """
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         background:#f5f4f0;min-height:100vh;display:flex;align-items:center;
+         justify-content:center;padding:20px}
+    .card{background:#fff;border-radius:16px;padding:36px 32px;max-width:560px;
+          width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+    .brand{font-size:12px;font-weight:700;letter-spacing:.12em;
+           text-transform:uppercase;color:#787870;margin-bottom:20px}
+    .niche-badge{display:inline-block;background:#eef2fb;color:#1749c9;
+                 font-size:11px;font-weight:600;padding:3px 10px;
+                 border-radius:20px;margin-bottom:16px}
+    h1{font-size:20px;font-weight:700;color:#0f0f0d;margin-bottom:10px;line-height:1.35}
+    .post-body{font-size:14px;color:#3d3d38;line-height:1.75;
+               background:#f9f8f6;border-radius:10px;padding:18px 20px;
+               margin:16px 0;white-space:pre-wrap;word-break:break-word}
+    .comp-badge{display:inline-flex;align-items:center;gap:6px;
+                font-size:12px;font-weight:600;padding:5px 12px;
+                border-radius:20px;margin-bottom:20px}
+    .comp-pass{background:#f0fdf4;color:#15803d}
+    .comp-review{background:#fffbeb;color:#b45309}
+    .comp-attention{background:#fef2f2;color:#b91c1c}
+    .btn{display:block;width:100%;padding:14px;border-radius:10px;
+         font-size:15px;font-weight:700;cursor:pointer;border:none;
+         font-family:inherit;transition:opacity .15s;margin-top:8px}
+    .btn:hover{opacity:.88}
+    .btn-approve{background:#15803d;color:#fff}
+    .btn-secondary{background:transparent;border:1.5px solid #e8e7e0;
+                   color:#3d3d38;margin-top:10px;font-size:13px;font-weight:600}
+    .result-icon{font-size:44px;margin-bottom:14px;display:block;text-align:center}
+    .result-title{font-size:22px;font-weight:700;color:#0f0f0d;
+                  text-align:center;margin-bottom:10px}
+    .result-msg{font-size:14px;color:#3d3d38;line-height:1.7;
+                text-align:center;margin-bottom:20px}
+    .cir{font-size:11px;font-weight:700;letter-spacing:.08em;
+         text-transform:uppercase;color:#1749c9;background:#eef2fb;
+         padding:5px 12px;border-radius:20px;display:inline-block;margin-bottom:16px}
+    .footer{margin-top:24px;font-size:12px;color:#b0afa6;text-align:center}
+    a{color:#1749c9;text-decoration:none;font-weight:600}
+    """
+
+    # ── Compliance badge HTML ─────────────────────────────────────────────────
+    if compliance_status in ("compliant", "pass", "ok"):
+        comp_html = "<span class='comp-badge comp-pass'>✓ Compliance Verified</span>"
+    elif compliance_status in ("review", "warn"):
+        comp_html = "<span class='comp-badge comp-review'>⚠ Review Recommended</span>"
+    elif compliance_status == "attention":
+        comp_html = "<span class='comp-badge comp-attention'>✗ Attention Required</span>"
+    else:
+        comp_html = ""
+
+    # ── PREVIEW state — show content + Approve button ─────────────────────────
+    if state == "preview":
+        post_html = f"<div class='post-body'>{post_body}</div>" if post_body else ""
+        niche_html = f"<div class='niche-badge'>{niche}</div>" if niche else ""
+        return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Review Your Content — HomeBridge</title>
+<style>{styles}</style></head>
+<body><div class="card">
+  <div class="brand">HomeBridge · Content Approval</div>
+  {niche_html}
+  <h1>{headline}</h1>
+  {comp_html}
+  {post_html}
+  <form method="POST" action="/approve?token={token}">
+    <button type="submit" class="btn btn-approve">✓ Approve This Post</button>
+  </form>
+  <a href="{app_url}" style="display:block;text-align:center;margin-top:14px;
+     font-size:13px;color:#787870;">Edit in App instead →</a>
+  <div class="footer">
+    Approving creates a CIR™ Certified Identity Record and marks this content
+    ready to publish. You can always edit or delete it in the app.
   </div>
-</body>
-</html>"""
+</div></body></html>"""
+
+    # ── SUCCESS state ─────────────────────────────────────────────────────────
+    if state == "success":
+        cir_html = f"<div class='cir'>CIR™ {niche}</div><br>" if niche else ""
+        return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Content Approved — HomeBridge</title>
+<style>{styles}</style></head>
+<body><div class="card">
+  <div class="brand">HomeBridge</div>
+  <span class="result-icon">✓</span>
+  <div class="result-title">Content Approved</div>
+  {cir_html}
+  <div class="result-msg">
+    <strong>{headline}</strong><br><br>
+    Your approval has been recorded and a CIR™ Certified Identity Record
+    has been created. This post is now ready to publish.
+  </div>
+  <a href="{app_url}" class="btn btn-approve" style="text-align:center;display:block;
+     text-decoration:none;padding:14px;border-radius:10px;">
+    Open App to Publish →
+  </a>
+  <div class="footer">HomeBridge · homebridgegroup.co</div>
+</div></body></html>"""
+
+    # ── EXPIRED state — with resend option ────────────────────────────────────
+    if state == "expired":
+        return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link Expired — HomeBridge</title>
+<style>{styles}</style>
+<script>
+async function resendLink() {{
+  const btn = document.getElementById('resend-btn');
+  btn.textContent = 'Sending…';
+  btn.disabled = true;
+  try {{
+    const r = await fetch('/approve/resend?token={token}', {{method:'POST'}});
+    const d = await r.json();
+    if (d.ok) {{
+      btn.textContent = '✓ New link sent to your email';
+      btn.style.background = '#15803d';
+    }} else {{
+      btn.textContent = 'Could not resend — open app to approve';
+      btn.disabled = false;
+    }}
+  }} catch(e) {{
+    btn.textContent = 'Could not resend — open app to approve';
+    btn.disabled = false;
+  }}
+}}
+</script>
+</head>
+<body><div class="card">
+  <div class="brand">HomeBridge</div>
+  <span class="result-icon" style="color:#b45309">⏱</span>
+  <div class="result-title">Approval Link Expired</div>
+  <div class="result-msg">
+    This link is more than 7 days old. Tap below to receive a fresh link
+    at your email address — no login needed.
+  </div>
+  <button id="resend-btn" onclick="resendLink()" class="btn btn-approve"
+          style="background:#1749c9;">Send Me a Fresh Link</button>
+  <a href="{app_url}" class="btn btn-secondary"
+     style="text-align:center;display:block;text-decoration:none;padding:12px;">
+    Log In to App Instead
+  </a>
+  <div class="footer">HomeBridge · homebridgegroup.co</div>
+</div></body></html>"""
+
+    # ── ALREADY DONE state ────────────────────────────────────────────────────
+    if state == "already_done":
+        return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Already Approved — HomeBridge</title>
+<style>{styles}</style></head>
+<body><div class="card">
+  <div class="brand">HomeBridge</div>
+  <span class="result-icon" style="color:#1749c9">●</span>
+  <div class="result-title">Already Approved</div>
+  <div class="result-msg">{headline}</div>
+  <a href="{app_url}" class="btn btn-approve"
+     style="text-align:center;display:block;text-decoration:none;padding:14px;
+     border-radius:10px;">Open App →</a>
+  <div class="footer">HomeBridge · homebridgegroup.co</div>
+</div></body></html>"""
+
+    # ── ERROR state ───────────────────────────────────────────────────────────
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Error — HomeBridge</title>
+<style>{styles}</style></head>
+<body><div class="card">
+  <div class="brand">HomeBridge</div>
+  <span class="result-icon" style="color:#b91c1c">✗</span>
+  <div class="result-title">Something went wrong</div>
+  <div class="result-msg">{headline}</div>
+  <a href="{app_url}" class="btn btn-approve"
+     style="text-align:center;display:block;text-decoration:none;padding:14px;
+     border-radius:10px;">Open App →</a>
+  <div class="footer">HomeBridge · homebridgegroup.co</div>
+</div></body></html>"""
+
 
 # ─────────────────────────────────────────────────────────
 # AUDIT LOG — GET /support/audit-log
@@ -2425,4 +2578,193 @@ async def broker_get_agent_content(
         limit     = max(1, min(limit, 100)),
     )
     return {"items": items, "agent_id": agent_id, "count": len(items)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROVAL ENDPOINTS
+# GET  /approve?token=   → preview page (shows content, Approve button)
+# POST /approve?token=   → performs approval, returns success page
+# POST /approve/resend?token= → creates fresh token from expired one, resends
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/approve")
+async def approval_preview(token: str = ""):
+    """
+    Shows the content preview page. Does NOT approve on GET.
+    Agent reads the post, then clicks Approve to POST.
+    """
+    from database import validate_approval_token, lookup_approval_token_record
+    from fastapi.responses import HTMLResponse
+    import json as _json_prev
+
+    if not token:
+        return HTMLResponse(_approval_page("error", "No token provided.", "", ""), status_code=400)
+
+    # Check if token exists at all (may be expired)
+    raw = lookup_approval_token_record(token)
+    if not raw:
+        return HTMLResponse(
+            _approval_page("error", "Invalid approval link.", "", ""),
+            status_code=400,
+        )
+
+    # Check if expired
+    from database import validate_approval_token
+    record = validate_approval_token(token)
+    if not record:
+        # Token exists but is expired or used
+        if raw.get("used"):
+            return HTMLResponse(
+                _approval_page("already_done", "This content has already been approved.", "", ""),
+                status_code=200,
+            )
+        return HTMLResponse(
+            _approval_page("expired", "", raw.get("agent_name",""), "", token=token),
+            status_code=200,
+        )
+
+    # Load content for preview
+    try:
+        cd = _json_prev.loads(record["content"]) if isinstance(record["content"], str) else (record["content"] or {})
+    except Exception:
+        cd = {}
+
+    headline   = cd.get("headline", "Your scheduled content")
+    post_body  = cd.get("post", "")
+    compliance = cd.get("compliance", {})
+    if isinstance(compliance, str):
+        try: compliance = _json_prev.loads(compliance)
+        except Exception: compliance = {}
+    comp_status = str(compliance.get("overallStatus") or compliance.get("overall_verdict") or "").lower()
+
+    if record["status"] not in ("pending",):
+        return HTMLResponse(
+            _approval_page("already_done", f"This content is already {record['status']}.",
+                           record.get("agent_name",""), record.get("niche","")),
+            status_code=200,
+        )
+
+    return HTMLResponse(_approval_page(
+        "preview", headline, record.get("agent_name",""), record.get("niche",""),
+        post_body=post_body, compliance_status=comp_status, token=token,
+    ))
+
+
+@app.post("/approve")
+async def approval_confirm(token: str = ""):
+    """
+    Performs the actual approval. Called by the Approve button form POST.
+    """
+    from database import validate_approval_token, consume_approval_token, library_update
+    from fastapi.responses import HTMLResponse
+    from datetime import datetime as _dt_conf
+    import json as _json_conf
+
+    if not token:
+        return HTMLResponse(_approval_page("error", "No token provided.", "", ""), status_code=400)
+
+    record = validate_approval_token(token)
+    if not record:
+        from database import lookup_approval_token_record
+        raw = lookup_approval_token_record(token)
+        if raw and raw.get("used"):
+            return HTMLResponse(
+                _approval_page("already_done", "This content was already approved.", "", ""),
+                status_code=200,
+            )
+        return HTMLResponse(
+            _approval_page("expired", "", "", "", token=token),
+            status_code=200,
+        )
+
+    item_id = record["library_item_id"]
+    user_id = record["user_id"]
+
+    item = library_get_item(item_id)
+    if not item:
+        return HTMLResponse(_approval_page("error", "Content item not found.", "", ""), status_code=404)
+
+    if item["status"] not in ("pending",):
+        return HTMLResponse(
+            _approval_page("already_done", f"Already {item['status']}.",
+                           record.get("agent_name",""), record.get("niche","")),
+            status_code=200,
+        )
+
+    consume_approval_token(token)
+    updated = library_update(item_id, user_id, {
+        "status":      "approved",
+        "approved_at": _dt_conf.utcnow().isoformat(),
+    })
+
+    try:
+        cd       = _json_conf.loads(item["content"]) if isinstance(item["content"], str) else (item["content"] or {})
+        headline = cd.get("headline", "Content approved")
+    except Exception:
+        headline = "Content approved"
+
+    # Pass CIR ID in the niche slot for the success page display
+    cir_id = updated.get("cir_id", "") if updated else ""
+
+    return HTMLResponse(_approval_page(
+        "success", headline, record.get("agent_name",""), cir_id,
+    ))
+
+
+@app.post("/approve/resend")
+async def approval_resend(token: str = ""):
+    """
+    Creates a fresh approval token from an expired one and resends email/SMS.
+    No login required — the original token proves the user is who they say.
+    """
+    from database import lookup_approval_token_record, create_approval_token
+    from social import send_approval_email, send_approval_sms
+    import asyncio as _asyncio_rs
+
+    if not token:
+        return {"ok": False, "error": "No token."}
+
+    raw = lookup_approval_token_record(token)
+    if not raw:
+        return {"ok": False, "error": "Token not found."}
+
+    # Only resend for expired tokens, not for already-used ones
+    if raw.get("used") and raw.get("status") not in ("pending",):
+        return {"ok": False, "error": "Content already approved."}
+
+    user_id  = raw["user_id"]
+    item_id  = raw["library_item_id"]
+    to_email = raw.get("email", "")
+    phone    = raw.get("phone", "")
+    agent_name = raw.get("agent_name", "Agent")
+
+    try:
+        import json as _json_rs
+        cd = _json_rs.loads(raw["content"]) if isinstance(raw["content"], str) else (raw["content"] or {})
+        headline = cd.get("headline", "Your content is ready for approval")
+    except Exception:
+        headline = "Your content is ready for approval"
+
+    new_token   = create_approval_token(user_id, item_id)
+    api_url     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
+    approve_url = f"{api_url}/approve?token={new_token}"
+
+    sent_email = False
+    sent_sms   = False
+
+    if to_email:
+        try:
+            _asyncio_rs.run(send_approval_email(to_email, agent_name, headline, approve_url))
+            sent_email = True
+        except Exception as e:
+            print(f"[Resend] Email failed: {e}")
+
+    if phone:
+        try:
+            _asyncio_rs.run(send_approval_sms(phone, agent_name, headline, approve_url))
+            sent_sms = True
+        except Exception as e:
+            print(f"[Resend] SMS failed: {e}")
+
+    return {"ok": sent_email or sent_sms, "email_sent": sent_email, "sms_sent": sent_sms}
 
