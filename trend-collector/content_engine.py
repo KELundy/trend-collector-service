@@ -37,6 +37,7 @@ class AgentProfileModel(BaseModel):
     serviceAreas: Optional[List[str]] = Field(default_factory=list)
     designations: Optional[List[str]] = Field(default_factory=list)
     languagePref: Optional[str] = Field("english")
+    state: Optional[str] = Field(None)
 
 
 class ComplianceBadge(BaseModel):
@@ -45,6 +46,10 @@ class ComplianceBadge(BaseModel):
     narStandards: str
     overallStatus: str
     notes: List[str] = Field(default_factory=list)
+    # ── NEW FIELDS (Item #3) ──────────────────
+    stateCompliance: str = Field(default="pass")
+    mlsCompliance: str = Field(default="pass")
+    disclosureChecks: List[str] = Field(default_factory=list)
 
 
 class ContentResponse(BaseModel):
@@ -377,6 +382,137 @@ COMPLIANCE_RULES = {
     ],
     "message": "State Commission: language may conflict with state advertising standards.",
   },
+
+  # ── NEW RULES — Item #3 ──────────────────────────────────────────────────
+
+  "cfpb_udaap": {
+    "id": "cfpb_udaap",
+    "authority": "CFPB 12 U.S.C. § 5531 (UDAAP)",
+    "severity": "fail",
+    "terms": [
+      "easy to qualify", "anyone can get approved", "no credit check",
+      "instant pre-approval", "guaranteed financing", "guaranteed approval",
+      "anyone qualifies", "everyone qualifies", "no income verification",
+      "approval guaranteed",
+    ],
+    "message": "CFPB UDAAP: language implying guaranteed or easy financing approval is an unfair, deceptive, or abusive act. Legal review required.",
+  },
+  "hud_advertising": {
+    "id": "hud_advertising",
+    "authority": "HUD 24 C.F.R. Part 100 Subpart C",
+    "severity": "warn",
+    "terms": [
+      "no pets", "no animals", "no dogs", "no cats",
+      "perfect for single person", "ideal for single person",
+      "adults preferred", "mature community",
+    ],
+    "message": "HUD Advertising: 'no pets' language may violate assistance animal requirements under FHA. Equal Housing Opportunity statement recommended.",
+  },
+  "epa_lead_paint": {
+    "id": "epa_lead_paint",
+    "authority": "EPA 40 C.F.R. Part 745 / TSCA Title X",
+    "severity": "fail",
+    "terms": [
+      "original hardwood", "historic details", "original features",
+      "built in the 1960s", "built in the 1950s", "built in the 1940s",
+      "built in the 1930s", "1960s home", "1950s home", "1940s home",
+      "1930s home", "pre-war home", "original woodwork", "original windows",
+      "charming older", "vintage details", "classic older",
+    ],
+    "message": "EPA Lead Paint (TSCA Title X): pre-1978 property language detected without lead paint disclosure. Federal law requires disclosure for properties built before 1978.",
+  },
+  "fha_advertising": {
+    "id": "fha_advertising",
+    "authority": "HUD Handbook 4000.1 / CFPB Regulation Z",
+    "severity": "warn",
+    "terms": [
+      "fha approved", "fha loans available", "3.5% down", "3.5 percent down",
+      "fha financing available", "fha eligible", "fha ready",
+    ],
+    "message": "FHA Advertising: referencing FHA loan terms without lender attribution may trigger Regulation Z disclosure requirements. Include licensed lender name and NMLS number.",
+  },
+  "ada_disability": {
+    "id": "ada_disability",
+    "authority": "Fair Housing Act 42 U.S.C. § 3604(f) / ADA",
+    "severity": "warn",
+    "terms": [
+      "wheelchair accessible", "handicap accessible", "ada compliant",
+      "accessible home", "disability friendly", "mobility accessible",
+      "fully accessible",
+    ],
+    "message": "ADA / FHA § 3604(f): accessibility claims should be supported by documentation. Unverified accessibility claims may create liability.",
+  },
+  "doj_steering": {
+    "id": "doj_steering",
+    "authority": "DOJ 28 C.F.R. Part 42 / Fair Housing Act",
+    "severity": "warn",
+    "terms": [
+      "you'll love the neighbors", "great neighbors", "wonderful neighbors",
+      "this area is changing", "neighborhood is improving", "area is up and coming",
+      "perfect for your community", "community you'll fit in",
+      "you'll fit right in", "people like you",
+    ],
+    "message": "DOJ Steering: language referencing neighborhood demographics or suggesting buyer-community fit may constitute illegal steering under the Fair Housing Act.",
+  },
+  "flood_zone": {
+    "id": "flood_zone",
+    "authority": "FEMA NFIP 44 C.F.R. / FIRM Map Standards",
+    "severity": "warn",
+    "terms": [
+      "no flood risk", "low flood zone", "never flooded",
+      "out of flood zone", "flood free", "not in a flood zone",
+      "minimal flood risk", "no flood concern",
+    ],
+    "message": "FEMA / NFIP: flood zone statements require current FEMA FIRM map verification. Unverified flood zone claims create material misrepresentation liability.",
+  },
+  "nar_article2": {
+    "id": "nar_article2",
+    "authority": "NAR Code of Ethics Article 2",
+    "severity": "warn",
+    "terms": [
+      "no issues", "nothing to disclose", "perfect condition",
+      "no problems", "nothing wrong", "issue free", "problem free",
+      "no defects", "defect free", "nothing needs repair",
+    ],
+    "message": "NAR Article 2: language implying no material facts to disclose may constitute concealment. Avoid blanket 'no issues' statements.",
+  },
+  "nar_article11": {
+    "id": "nar_article11",
+    "authority": "NAR Code of Ethics Article 11",
+    "severity": "warn",
+    "terms": [
+      "expert in", "specialist in", "i specialize exclusively",
+      "only expert", "leading expert", "foremost expert",
+      "certified expert", "the expert on",
+    ],
+    "message": "NAR Article 11: competency claims should be supported by verified designations or documented experience. Unsubstantiated 'expert' claims may violate Article 11.",
+  },
+  "nar_article15": {
+    "id": "nar_article15",
+    "authority": "NAR Code of Ethics Article 15",
+    "severity": "warn",
+    "terms": [
+      "the only agent who", "unlike other agents", "better than other agents",
+      "unlike my competitors", "other agents don't", "no other agent",
+      "agents won't tell you", "what agents hide",
+    ],
+    "message": "NAR Article 15: comparative claims disparaging other agents or brokers may violate Article 15. Focus on your own value, not competitor criticism.",
+  },
+  "local_zoning": {
+    "id": "local_zoning",
+    "authority": "State Real Estate Commission / State Tort Law",
+    "severity": "warn",
+    "terms": [
+      "can be converted to", "commercial potential", "development opportunity",
+      "adu possible", "adu potential", "zoning allows", "zoning permits",
+      "can build", "buildable lot", "development ready",
+      "convert to commercial", "commercial conversion",
+    ],
+    "message": "Zoning / State Commission: zoning claims require verified municipal records. Unverified development or conversion claims may constitute material misrepresentation.",
+  },
+
+  # ── EXISTING RULES (unchanged) ───────────────────────────────────────────
+
   "sec_investment_disclosure": {
     "id": "sec_investment_disclosure",
     "authority": "SEC Rule 10b-5 / Securities Act Section 17(b)",
@@ -535,12 +671,87 @@ COMPLIANCE_RULES = {
 
 
 COMPLIANCE_PROFILES = {
-  "residential": ["fair_housing", "nar_article12", "respa_section8", "clear_cooperation", "state_commission"],
-  "commercial":  ["nar_article12", "respa_section8", "state_commission", "sec_investment_disclosure", "sec_investment_risk", "finra_communications", "fincen_aml", "cercla_environmental", "commercial_investment_disclaimer"],
-  "data_center": ["nar_article12", "state_commission", "sec_investment_disclosure", "sec_investment_risk", "finra_communications", "fincen_aml", "tier_certification_claims", "soc2_claims", "ferc_power_claims", "cfius_awareness", "critical_infrastructure_disclosure", "ppa_claims", "commercial_investment_disclaimer"],
-  "investment":  ["nar_article12", "state_commission", "sec_investment_disclosure", "sec_investment_risk", "fincen_aml", "commercial_investment_disclaimer"],
-  "mortgage":    ["nmls_disclosure", "regulation_z", "respa_section8", "fair_housing", "state_commission"],
-  "b2b_saas":    ["ftc_endorsement", "ftc_claims", "can_spam", "nar_article12"],
+  # ── residential: 5 → 16 rules (Item #3) ─────────────────────────────────
+  "residential": [
+    "fair_housing",
+    "nar_article12",
+    "respa_section8",
+    "clear_cooperation",
+    "state_commission",
+    "cfpb_udaap",
+    "hud_advertising",
+    "epa_lead_paint",
+    "fha_advertising",
+    "ada_disability",
+    "doj_steering",
+    "flood_zone",
+    "nar_article2",
+    "nar_article11",
+    "nar_article15",
+    "local_zoning",
+  ],
+  # ── commercial: add cfpb_udaap, ada_disability, local_zoning, nar_article2
+  "commercial": [
+    "nar_article12",
+    "respa_section8",
+    "state_commission",
+    "sec_investment_disclosure",
+    "sec_investment_risk",
+    "finra_communications",
+    "fincen_aml",
+    "cercla_environmental",
+    "commercial_investment_disclaimer",
+    "cfpb_udaap",
+    "ada_disability",
+    "local_zoning",
+    "nar_article2",
+  ],
+  "data_center": [
+    "nar_article12",
+    "state_commission",
+    "sec_investment_disclosure",
+    "sec_investment_risk",
+    "finra_communications",
+    "fincen_aml",
+    "tier_certification_claims",
+    "soc2_claims",
+    "ferc_power_claims",
+    "cfius_awareness",
+    "critical_infrastructure_disclosure",
+    "ppa_claims",
+    "commercial_investment_disclaimer",
+  ],
+  # ── investment: add cfpb_udaap, fha_advertising, local_zoning, nar_article2
+  "investment": [
+    "nar_article12",
+    "state_commission",
+    "sec_investment_disclosure",
+    "sec_investment_risk",
+    "fincen_aml",
+    "commercial_investment_disclaimer",
+    "cfpb_udaap",
+    "fha_advertising",
+    "local_zoning",
+    "nar_article2",
+  ],
+  # ── mortgage: add cfpb_udaap, fha_advertising, hud_advertising, ada_disability
+  "mortgage": [
+    "nmls_disclosure",
+    "regulation_z",
+    "respa_section8",
+    "fair_housing",
+    "state_commission",
+    "cfpb_udaap",
+    "fha_advertising",
+    "hud_advertising",
+    "ada_disability",
+  ],
+  "b2b_saas": [
+    "ftc_endorsement",
+    "ftc_claims",
+    "can_spam",
+    "nar_article12",
+  ],
 }
 
 
@@ -624,10 +835,16 @@ def _get_rules_for_profile(profile_name):
     return [COMPLIANCE_RULES[rid] for rid in rule_ids if rid in COMPLIANCE_RULES]
 
 
-def _run_compliance_check(content, agent_name, brokerage, mls_names=None, niche="", custom_rule_ids=None, content_mode="agent"):
+def _run_compliance_check(
+    content, agent_name, brokerage, mls_names=None,
+    niche="", custom_rule_ids=None, content_mode="agent",
+    state=""
+):
     content_lower = content.lower()
     notes         = []
     statuses      = {}
+    # disclosureChecks carries per-rule results for the PDF sub-row (Item #2)
+    disclosure_checks = []
 
     if content_mode == "b2b":
         profile_name = "b2b_saas"
@@ -642,23 +859,43 @@ def _run_compliance_check(content, agent_name, brokerage, mls_names=None, niche=
 
     for rule in rules:
         triggered = [t for t in rule["terms"] if t in content_lower]
+        rule_authority = rule.get("authority", rule["id"])
+
+        # Personalise state_commission message with the agent's state (Item #3)
+        if rule["id"] == "state_commission" and state:
+            rule_authority = f"{state} Real Estate Commission"
+            msg = f"{state} Real Estate Commission: language may conflict with {state} state advertising standards."
+        else:
+            msg = rule["message"]
+
         if triggered:
             statuses[rule["id"]] = rule["severity"]
-            notes.append(f"[{rule.get('authority', '')}] {rule['message']} (triggered: '{triggered[0]}')")
+            flag = "⚠ fail" if rule["severity"] == "fail" else "⚠ warn"
+            notes.append(f"[{rule_authority}] {msg} (triggered: '{triggered[0]}')")
+            disclosure_checks.append(f"{flag} | {rule_authority} | {msg}")
         else:
             statuses[rule["id"]] = "pass"
+            disclosure_checks.append(f"✓ pass | {rule_authority}")
 
     if brokerage and content_mode == "agent":
         brokerage_words = [w.lower() for w in brokerage.split() if len(w) > 3]
         if not any(w in content_lower for w in brokerage_words):
             statuses["brokerage_disclosure"] = "warn"
             notes.append(f"Brokerage disclosure: '{brokerage}' not detected. Verify brokerage name appears before publishing.")
+            disclosure_checks.append(f"⚠ warn | Brokerage Disclosure | '{brokerage}' not detected in content.")
+        else:
+            statuses["brokerage_disclosure"] = "pass"
+            disclosure_checks.append(f"✓ pass | Brokerage Disclosure")
 
     if agent_name and content_mode == "agent":
         name_parts = [p.lower() for p in agent_name.split() if len(p) > 2]
         if not any(p in content_lower for p in name_parts):
             statuses["agent_disclosure"] = "warn"
             notes.append(f"Licensee disclosure: '{agent_name}' not detected. State law requires licensee name on all advertising.")
+            disclosure_checks.append(f"⚠ warn | Licensee Disclosure | '{agent_name}' not detected.")
+        else:
+            statuses["agent_disclosure"] = "pass"
+            disclosure_checks.append(f"✓ pass | Licensee Disclosure")
 
     if content_mode == "b2b":
         company_name = agent_name or "HomeBridge"
@@ -666,19 +903,31 @@ def _run_compliance_check(content, agent_name, brokerage, mls_names=None, niche=
         if not any(p in content_lower for p in company_parts):
             statuses["company_disclosure"] = "warn"
             notes.append(f"Company disclosure: '{company_name}' not detected in content.")
+            disclosure_checks.append(f"⚠ warn | Company Disclosure | '{company_name}' not detected.")
+        else:
+            statuses["company_disclosure"] = "pass"
+            disclosure_checks.append(f"✓ pass | Company Disclosure")
 
     mls_list = [m.strip() for m in (mls_names or []) if m and m.strip()]
     if mls_list and content_mode == "agent":
-        notes.append(f"MLS reminder: Verify advertising standards for {', '.join(mls_list)} before publishing.")
+        mls_str = ", ".join(mls_list)
+        notes.append(f"MLS reminder: Verify advertising standards for {mls_str} before publishing.")
+        disclosure_checks.append(f"ℹ info | MLS Standards | Verify {mls_str} advertising rules before publishing.")
 
+    # Jurisdiction / profile reminder note
     if content_mode == "b2b":
         notes.append("FTC reminder: B2B marketing content should avoid unsubstantiated performance claims. Testimonials require FTC-compliant disclosure.")
+        disclosure_checks.append("ℹ info | FTC Act | B2B content: substantiate all performance claims.")
     elif profile_name == "data_center":
         notes.append("Jurisdiction note: Data center transactions may involve additional federal and international regulatory review.")
+        disclosure_checks.append("ℹ info | Federal / International | Data center transactions may require additional regulatory review.")
     elif profile_name == "commercial":
         notes.append("Jurisdiction note: Commercial real estate advertising may be subject to state securities laws.")
+        disclosure_checks.append("ℹ info | State Securities | Commercial advertising may be subject to state securities laws.")
     else:
-        notes.append("State rules: Automated checks cover federal and NAR standards. Verify your state commission's advertising requirements.")
+        state_label = f"{state} Real Estate Commission" if state else "State Real Estate Commission"
+        notes.append(f"State rules: Automated checks cover federal and NAR standards. Verify {state_label} advertising requirements.")
+        disclosure_checks.append(f"ℹ info | {state_label} | Verify state-specific advertising requirements.")
 
     def _worst(ids):
         vals = [statuses.get(i, "pass") for i in ids]
@@ -686,9 +935,11 @@ def _run_compliance_check(content, agent_name, brokerage, mls_names=None, niche=
         if "warn" in vals: return "warn"
         return "pass"
 
-    fair_housing_status = _worst(["fair_housing"])
+    fair_housing_status = _worst(["fair_housing", "doj_steering", "hud_advertising"])
     disclosure_status   = _worst(["brokerage_disclosure", "agent_disclosure", "company_disclosure"])
-    nar_status          = _worst(["nar_article12"])
+    nar_status          = _worst(["nar_article12", "nar_article2", "nar_article11", "nar_article15"])
+    state_status        = _worst(["state_commission", "local_zoning", "flood_zone"])
+    mls_status          = _worst(["clear_cooperation"])
     all_vals            = list(statuses.values())
 
     if "fail" in all_vals:
@@ -706,6 +957,9 @@ def _run_compliance_check(content, agent_name, brokerage, mls_names=None, niche=
         narStandards=nar_status,
         overallStatus=overall,
         notes=notes,
+        stateCompliance=state_status,
+        mlsCompliance=mls_status,
+        disclosureChecks=disclosure_checks,
     )
 
 
@@ -1308,9 +1562,6 @@ DEFAULT_SITUATIONS = [
 
 # ─────────────────────────────────────────────────────────
 # LIGHTER SIDE — occasional humor to break up the feed
-# Appears roughly 1-in-6 situations when selected.
-# Keeps content human, memorable, and actually enjoyable
-# to follow. Real estate has genuinely good material.
 # ─────────────────────────────────────────────────────────
 LIGHTER_SIDE_SITUATIONS = [
     "Lighter Side: Why real estate agents make great comedians — we always have an open house",
@@ -1342,11 +1593,47 @@ async def get_situations(niche: Optional[str] = None, include_lighter: bool = Tr
     if include_lighter and len(situations) >= 5:
         import random
         lighter = random.choice(LIGHTER_SIDE_SITUATIONS)
-        # Insert at position 5 so it appears naturally in the list
         insert_at = min(5, len(situations) - 1)
         situations.insert(insert_at, lighter)
 
     return {"niche": niche, "situations": situations}
+
+
+@router.get("/situations/multi")
+async def get_situations_multi(niches: Optional[str] = None, include_lighter: bool = True):
+    """
+    Returns merged situations for multiple niches (comma-separated).
+    Used by the frontend when no single niche chip is active but the
+    agent has multiple primary niches selected in Setup.
+    e.g. GET /content/situations/multi?niches=Residential+Buying+%26+Selling,First-Time+Homebuyers
+    """
+    import random
+    if not niches:
+        return {"niches": [], "situations": list(DEFAULT_SITUATIONS)}
+
+    niche_list = [n.strip() for n in niches.split(",") if n.strip()]
+    merged = []
+    seen   = set()
+    for n in niche_list:
+        pool = NICHE_SITUATIONS.get(n)
+        if not pool:
+            # fuzzy match
+            pool = next((v for k, v in NICHE_SITUATIONS.items() if n.lower() in k.lower()), None)
+        if pool:
+            for s in pool:
+                if s not in seen:
+                    merged.append(s)
+                    seen.add(s)
+
+    if not merged:
+        merged = list(DEFAULT_SITUATIONS)
+
+    if include_lighter and len(merged) >= 5:
+        lighter = random.choice(LIGHTER_SIDE_SITUATIONS)
+        insert_at = min(5, len(merged) - 1)
+        merged.insert(insert_at, lighter)
+
+    return {"niches": niche_list, "situations": merged}
 
 
 @router.post("/generate-content", response_model=ContentResponse)
@@ -1384,11 +1671,13 @@ async def generate_content(payload: ContentRequest) -> ContentResponse:
     agent_name = profile.agentName or ""
     brokerage  = profile.brokerage  or ""
     mls_names  = profile.mlsNames   or []
+    state      = profile.state      or ""
     niche_for_check = ", ".join(payload.identity.primaryCategories) if payload.identity.primaryCategories else ""
 
     compliance = _run_compliance_check(
         raw_text, agent_name, brokerage, mls_names,
         niche=niche_for_check, content_mode=content_mode,
+        state=state,
     )
     try:
         return _parse_claude_output(raw_text, compliance)
@@ -1401,13 +1690,14 @@ def generate_content_core(
     situation="", persona="homeowners", tone="Professional",
     length="Standard", trends=None, brand_voice="",
     short_bio="", audience="", words_avoid="", words_prefer="",
-    mls_names=None, content_mode="agent",
+    mls_names=None, content_mode="agent", state="",
 ):
     profile = AgentProfileModel(
         agentName=agent_name, brokerage=brokerage, market=market,
         brandVoice=brand_voice, shortBio=short_bio,
         audienceDescription=audience, wordsAvoid=words_avoid,
         wordsPrefer=words_prefer, mlsNames=mls_names or [],
+        state=state,
     )
     payload = ContentRequest(
         identity     = IdentityModel(primaryCategories=[niche] if niche else []),
@@ -1429,6 +1719,9 @@ def generate_content_core(
     raw_text    = "\n\n".join(text_chunks).strip()
     if not raw_text:
         raise ValueError("Claude returned empty content")
-    compliance = _run_compliance_check(raw_text, agent_name, brokerage, mls_names or [], niche=niche, content_mode=mode)
+    compliance = _run_compliance_check(
+        raw_text, agent_name, brokerage, mls_names or [],
+        niche=niche, content_mode=mode, state=state,
+    )
     content_response = _parse_claude_output(raw_text, compliance)
     return {"content": content_response.dict(), "compliance": compliance.dict()}
