@@ -942,6 +942,30 @@ def consume_approval_token(token: str):
     conn.close()
 
 
+def lookup_approval_token_record(token: str) -> Optional[dict]:
+    """
+    Fetch a token record regardless of expiry or used status.
+    Used by the resend flow to recover item_id and user_id from an expired token.
+    Returns None only if the token string doesn't exist at all (i.e. was forged).
+    """
+    migrate_approval_tokens()
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT at.id, at.user_id, at.library_item_id, at.action,
+               at.expires_at, at.used,
+               u.email, u.agent_name, u.phone,
+               cl.niche, cl.content, cl.status
+        FROM approval_tokens at
+        JOIN users u ON u.id = at.user_id
+        JOIN content_library cl ON cl.id = at.library_item_id
+        WHERE at.token = ?
+    """, (token,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 # ─────────────────────────────────────────────
 # IDENTITY STRENGTH SCORE
 # ─────────────────────────────────────────────
