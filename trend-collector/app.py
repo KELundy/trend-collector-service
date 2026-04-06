@@ -62,6 +62,7 @@ from database import (
     calculate_identity_score,
     generate_compliance_pdf,
     get_broker_office_stats,
+    get_broker_agent_content,
     save_agent_setup, get_agent_setup,
     get_user_results,
     DB_NAME,
@@ -2210,3 +2211,130 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str) -> st
   </div>
 </body>
 </html>"""
+
+# ─────────────────────────────────────────────────────────
+# AUDIT LOG — GET /support/audit-log
+# Returns all audit events. Accessible to super_admin and support only.
+# Viewing the audit log is itself logged.
+# ─────────────────────────────────────────────────────────
+@app.get("/support/audit-log")
+async def get_audit_log(
+    request: Request,
+    limit:    int = 200,
+    actor_id: int = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from database import get_conn as _gc_al, log_audit_event as _lae
+
+    role = current_user.get("role", "")
+    if role not in ("super_admin", "support"):
+        raise HTTPException(403, "Audit log access requires super_admin or support role.")
+
+    conn = _gc_al()
+    c    = conn.cursor()
+
+    # Join with users table so we can return human-readable actor info
+    if actor_id:
+        c.execute("""
+            SELECT al.id, al.actor_id, al.action, al.target_id, al.detail,
+                   al.ip_address, al.created_at,
+                   u.agent_name, u.email
+            FROM audit_log al
+            LEFT JOIN users u ON u.id = al.actor_id
+            WHERE al.actor_id = ?
+            ORDER BY al.created_at DESC
+            LIMIT ?
+        """, (actor_id, max(1, min(limit, 1000))))
+    else:
+        c.execute("""
+            SELECT al.id, al.actor_id, al.action, al.target_id, al.detail,
+                   al.ip_address, al.created_at,
+                   u.agent_name, u.email
+            FROM audit_log al
+            LEFT JOIN users u ON u.id = al.actor_id
+            ORDER BY al.created_at DESC
+            LIMIT ?
+        """, (max(1, min(limit, 1000)),))
+
+    rows = c.fetchall()
+    conn.close()
+
+    logs = []
+    for r in rows:
+        # Format actor_id as "Name (email)" for display in the existing frontend column
+        actor_name  = r["agent_name"] or ""
+        actor_email = r["email"] or ""
+        if actor_name and actor_email:
+            actor_display = f"{actor_name} ({actor_email})"
+        elif actor_email:
+            actor_display = actor_email
+        elif actor_name:
+            actor_display = actor_name
+        else:
+            actor_display = str(r["actor_id"]) if r["actor_id"] else "—"
+
+        logs.append({
+            "id":         r["id"],
+            "actor_id":   actor_display,
+            "action":     r["action"] or "",
+            "target_id":  r["target_id"],
+            "detail":     r["detail"] or "",
+            "ip_address": r["ip_address"] or "",
+            "created_at": r["created_at"] or "",
+        })
+
+    # Log this view — audit log access is itself audited
+    caller_ip = request.client.host if request.client else None
+    try:
+        _lae(
+            actor_id   = current_user["id"],
+            action     = "audit_log_viewed",
+            detail     = f"Returned {len(logs)} events (limit={limit})",
+            ip_address = caller_ip,
+        )
+    except Exception:
+        pass
+
+    return {"logs": logs, "total": len(logs)}
+
+# ─────────────────────────────────────────────────────────
+# BROKER DASHBOARD — additional endpoints
+# ─────────────────────────────────────────────────────────
+
+@app.get("/auth/broker/office-code")
+async def get_office_code(current_user: dict = Depends(get_current_user)):
+    """
+    Returns a stable office join code for the broker.
+    Derived from user ID — no DB column needed.
+    Agents enter this code during signup to link to the broker's office.
+    """
+    role = current_user.get("role", "")
+    if role not in ("broker", "admin", "super_admin"):
+        raise HTTPException(403, "Broker accounts only.")
+    # Stable 6-char alphanumeric code derived from user ID
+    import hashlib
+    raw   = f"hb-office-{current_user['id']}-{current_user.get('email','')}"
+    hashed = hashlib.sha256(raw.encode()).hexdigest()[:6].upper()
+    return {"office_code": hashed, "user_id": current_user["id"]}
+
+
+@app.get("/broker/agent-content")
+async def broker_get_agent_content(
+    agent_id: int,
+    limit:    int = 20,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Returns recent content items for a specific agent in the broker's office.
+    Agent ownership is verified — a broker cannot view agents outside their office.
+    Used by the broker dashboard per-agent drill-down.
+    """
+    if current_user.get("role") not in ("broker", "admin", "super_admin"):
+        raise HTTPException(403, "Broker accounts only.")
+    items = get_broker_agent_content(
+        broker_id = current_user["id"],
+        agent_id  = agent_id,
+        limit     = max(1, min(limit, 100)),
+    )
+    return {"items": items, "agent_id": agent_id, "count": len(items)}
+
