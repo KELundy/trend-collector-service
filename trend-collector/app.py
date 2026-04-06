@@ -2768,3 +2768,29 @@ async def approval_resend(token: str = ""):
 
     return {"ok": sent_email or sent_sms, "email_sent": sent_email, "sms_sent": sent_sms}
 
+# ─────────────────────────────────────────────
+# DIAGNOSTIC — temporary, super_admin only
+# GET /debug/library-raw
+# ─────────────────────────────────────────────
+@app.get("/debug/library-raw")
+async def debug_library_raw(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(403, "Super admin only.")
+    from database import get_conn as _gc_dbg
+    conn = _gc_dbg()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, status, context, niche,
+               saved_at, approved_at,
+               SUBSTR(content, 1, 60) as content_preview
+        FROM content_library
+        WHERE user_id = ?
+        ORDER BY saved_at DESC
+    """, (current_user["id"],))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {
+        "user_id": current_user["id"],
+        "total_rows": len(rows),
+        "rows": rows,
+    }
