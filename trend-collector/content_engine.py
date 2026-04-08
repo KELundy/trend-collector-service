@@ -38,6 +38,18 @@ class AgentProfileModel(BaseModel):
     designations: Optional[List[str]] = Field(default_factory=list)
     languagePref: Optional[str] = Field("english")
     state: Optional[str] = Field(None)
+    # CTA / Booking fields — agent configures once, appear in every post
+    ctaType:  Optional[str] = Field(None)   # "calendar" | "text" | "email" | "authority"
+    ctaUrl:   Optional[str] = Field(None)   # e.g. calendly.com/kevin-lundy
+    ctaLabel: Optional[str] = Field(None)   # e.g. "Book a free 15-min call"
+    # MLS data — agent pastes from their MLS report for hyper-local stats
+    mlsData:  Optional[str] = Field(None)
+    # Voice Profile fields — Zone of Greatness / authentic differentiation
+    originStory:       Optional[str] = Field(None)
+    unfairAdvantage:   Optional[str] = Field(None)
+    signaturePerspective: Optional[str] = Field(None)
+    notForClient:      Optional[str] = Field(None)
+    notificationEmail: Optional[str] = Field(None)
 
 
 class ComplianceBadge(BaseModel):
@@ -140,86 +152,180 @@ def _build_content_prompt(payload):
     )
     brokerage_compliance = brokerage if brokerage else "agent's brokerage"
 
-    return f"""You are ghostwriting for {agent_display}, a real estate professional in {market}.
+    # ── CTA / booking block ───────────────────────────────────────────────────
+    cta_url   = profile.ctaUrl   or ""
+    cta_label = profile.ctaLabel or ""
+    cta_type  = profile.ctaType  or ""
+    if cta_url:
+        if cta_type == "calendar":
+            cta_instruction = (
+                "CTA REQUIREMENT: The cta field MUST end with a calendar booking link.\n"
+                f'Use label: "{cta_label or "Book a free 15-min call"}"\n'
+                f"URL: {cta_url}\n"
+                f'Format it as: "{cta_label or "Book a free 15-min call"}: {cta_url}"\n'
+                "This is a real link — include it verbatim. Agents lose leads without it."
+            )
+        elif cta_type == "text":
+            cta_instruction = (
+                "CTA REQUIREMENT: The cta field MUST invite a direct text message.\n"
+                f'Label: "{cta_label or "Text me directly"}"\n'
+                f"Link: {cta_url}\n"
+                f'Format: "{cta_label or "Text me directly"}: {cta_url}"'
+            )
+        else:
+            cta_instruction = (
+                f"CTA REQUIREMENT: The cta field MUST include this link verbatim: {cta_url}\n"
+                f'Label: "{cta_label or "Get in touch"}"'
+            )
+    else:
+        cta_instruction = (
+            "CTA REQUIREMENT: Write a low-pressure genuine invitation to a conversation. "
+            "Plant curiosity, not urgency. No 'call me today' commands."
+        )
 
-Your job is to write content that sounds exactly like a knowledgeable human being sharing what they know — not like a marketing campaign, not like an advertisement, and absolutely not like a sales pitch.
+    # ── MLS data block ────────────────────────────────────────────────────────
+    mls_data  = profile.mlsData or ""
+    mls_block = ""
+    if mls_data.strip():
+        mls_block = (
+            "\nLOCAL MARKET DATA (from agent's MLS report — use specific numbers in content)\n"
+            + "─" * 40 + "\n"
+            + mls_data.strip() + "\n"
+            "INSTRUCTION: Reference at least one specific metric from this data in the post or script. "
+            "Real numbers make content shareable. "
+            '"Days on market dropped from 18 to 11" beats "homes are selling faster."\n'
+        )
 
-WHO {agent_name.upper()} IS
-{"─" * 40}
-{bio_text}{audience_text}Market: {market}
-{desig_context}
-{lang_instruction}
-Specialization: {primary_categories}
-Areas of depth: {subniches_text}
+    # ── Voice Profile / Zone of Greatness block ───────────────────────────────
+    origin      = profile.originStory          or ""
+    advantage   = profile.unfairAdvantage      or ""
+    perspective = profile.signaturePerspective or ""
+    not_for     = profile.notForClient         or ""
 
-WHAT THIS CONTENT IS ABOUT
-{"─" * 40}
-Situation: {payload.situation}
-Relevant signals: {selected_trends}
-Context: {trend_prefs}
+    voice_profile_block = ""
+    if any([origin, advantage, perspective, not_for]):
+        parts = []
+        if origin:      parts.append(f"Why {agent_name} does this: {origin}")
+        if advantage:   parts.append(f"Their unfair advantage: {advantage}")
+        if perspective: parts.append(f"Their signature belief: {perspective}")
+        if not_for:     parts.append(f"Who they are NOT for: {not_for}")
+        voice_profile_block = (
+            f"\nZONE OF GREATNESS — {agent_name.upper()}'S AUTHENTIC VOICE\n"
+            + "─" * 40 + "\n"
+            + "\n".join(parts) + "\n\n"
+            "INSTRUCTION: Let these shape the texture and point of view of the content. "
+            "This agent is not trying to sound like every other agent. They have a specific perspective. "
+            "The content should feel like it could only come from this person.\n"
+        )
 
-VOICE & STYLE
-{"─" * 40}
-{tone_text}{length_text}{avoid_text}{prefer_text}
-THE MOST IMPORTANT THING
-{"─" * 40}
-This content must sound like a real person thinking out loud. The reader should feel like they're getting insight from someone who knows this world deeply — not like they're being sold to.
+    market_first_word = market.split()[0].replace(",", "")
 
-BANNED FOREVER:
-- "Don't miss out" / "Act now" / "Limited time"
-- "Call me today" as the opener or the whole point
-- Exclamation points used to manufacture excitement
-- Hype phrases: "game-changer", "incredible opportunity", "the market is on fire"
-- Generic prompts to "like, share, and follow"
+    return (
+        f"You are ghostwriting for {agent_display}, a real estate professional in {market}.\n\n"
+        "Your job is to write content that sounds exactly like a knowledgeable human being sharing "
+        "what they know — not like a marketing campaign, not like an advertisement, and absolutely "
+        "not like a sales pitch.\n\n"
+        f"WHO {agent_name.upper()} IS\n"
+        + "─" * 40 + "\n"
+        + bio_text + audience_text
+        + f"Market: {market}\n"
+        + (desig_context + "\n" if desig_context else "")
+        + (lang_instruction + "\n" if lang_instruction else "")
+        + f"Specialization: {primary_categories}\n"
+        + f"Areas of depth: {subniches_text}\n"
+        + voice_profile_block
+        + f"\nWHAT THIS CONTENT IS ABOUT\n"
+        + "─" * 40 + "\n"
+        + f"Situation: {payload.situation}\n"
+        + f"Relevant signals: {selected_trends}\n"
+        + f"Context: {trend_prefs}\n"
+        + mls_block
+        + f"\nVOICE & STYLE\n"
+        + "─" * 40 + "\n"
+        + tone_text + length_text + avoid_text + prefer_text
+        + "\nTHE MOST IMPORTANT THING\n"
+        + "─" * 40 + "\n"
+        "This content must sound like a real person thinking out loud. The reader should feel like "
+        "they're getting insight from someone who knows this world deeply — not like they're being sold to.\n\n"
+        "AUTHENTICITY REQUIREMENTS — NON-NEGOTIABLE:\n"
+        "1. Take a REAL POSITION. 'It depends' is not a position. Pick a side and defend it.\n"
+        "2. Include ONE QUOTABLE LINE — a single sentence that stands alone as a screenshot-worthy insight. "
+        "This is the sentence that gets shared. Make it specific, surprising, or counter-intuitive.\n"
+        f"3. End the POST with a GENUINE LOCAL QUESTION that only a {market} expert would ask, "
+        f"and that only people actually interested in {market} real estate would answer. "
+        f'Examples: "Are you one of the buyers I\'ve talked to this week who\'s still waiting?" '
+        f'/ "Has your block felt different this spring?" '
+        "NOT: 'What do you think?' or 'Have any questions?'\n"
+        "4. SOCIAL MEDIA IS A CONVERSATION, NOT A BILLBOARD. The post should invite a specific reply, "
+        "not broadcast at an audience. Write to one person, not a crowd.\n\n"
+        "SHAREABILITY RUBRIC — every post must pass all four:\n"
+        "- Would someone share this because it makes THEM look smart? (not because it promotes the agent)\n"
+        "- Does it contain a specific, surprising insight that most people don't know?\n"
+        "- Could the headline stand alone as something worth forwarding?\n"
+        "- Is there zero hedge language? (remove 'it depends,' 'every situation is different,' 'consult a professional')\n\n"
+        "BANNED FOREVER:\n"
+        "- 'Don't miss out' / 'Act now' / 'Limited time'\n"
+        "- 'Call me today' as the opener or the whole point\n"
+        "- Exclamation points used to manufacture excitement\n"
+        "- Hype phrases: 'game-changer', 'incredible opportunity', 'the market is on fire'\n"
+        "- Generic prompts to 'like, share, and follow'\n"
+        "- Hedge language: 'it depends,' 'every market is different,' 'results may vary'\n\n"
+        "LIGHTER SIDE SPECIAL INSTRUCTION:\n"
+        "If the situation starts with 'Lighter Side:', write with warmth and genuine humor. "
+        "The tone should feel like a funny, self-aware professional — not a stand-up comedian. "
+        "Think: the kind of post a trusted colleague sends that makes you smile and share it. "
+        "Keep it short. One sharp observation or a tight list. End with something that invites "
+        "a reply or a smile — never a hard sell. The humor should be relatable, never mean.\n\n"
+        "WHAT GREAT CONTENT SOUNDS LIKE:\n"
+        f"- An observation the agent genuinely made: 'Something I've been noticing in {market} lately...'\n"
+        "- A nuanced take only someone in the field would have: 'Most people assume X, but what's actually happening is Y...'\n"
+        f"- A real position: 'Here's my honest take on whether you should buy right now in {market}...'\n"
+        "- Honest acknowledgment of complexity: 'There's no clean answer here, but the thing worth understanding is...'\n\n"
+        "VIDEO SCRIPT — NEWS FORMAT:\n"
+        "Structure the script as follows:\n"
+        f"1. HOOK (5 sec): One sharp local observation — something happening in {market} RIGHT NOW. "
+        f"Sounds like: 'Something shifted in {market} this week that most people haven't noticed yet.'\n"
+        f"2. CONTEXT (15 sec): The real situation, explained in plain language. Specific to {market}.\n"
+        f"3. IMPLICATION (25 sec): What this means for buyers/sellers/investors in {market} specifically. "
+        "Reference real local details — neighborhoods, developments, micro-markets.\n"
+        "4. CTA (10 sec): Natural, conversational close. Not a sales pitch.\n"
+        "Include on a separate line: [B-ROLL: description of a specific local visual to film]\n"
+        f"Include on a separate line: [GREEN SCREEN: description of ideal background — e.g., 'aerial view of {market} downtown']\n"
+        "Teleprompter pace: write for 130-150 words per minute. Mark natural pause points with ' / '.\n\n"
+        f"THE CTA FIELD:\n{cta_instruction}\n\n"
+        f"IDENTITY RULES\n"
+        + "─" * 40 + "\n"
+        + f"1. {agent_name} must appear naturally in the post as a first-person voice or sign-off.\n"
+        + f"2. {brokerage_disclosure}\n"
+        + f"3. Always say \"{market}\" specifically — never \"your local area.\"\n"
+        + "4. The script must sound like someone actually talking — natural pauses, real sentences.\n\n"
+        + "COMPLIANCE RULES\n"
+        + "─" * 40 + "\n"
+        "- Fair Housing Act: No language implying preference by protected class. No steering. Focus on property facts.\n"
+        "- NAR Code of Ethics Article 12: Truthful only. No guaranteed outcomes. No 'best agent' language.\n"
+        f"- Brokerage disclosure: {brokerage_compliance} must be identifiable. Agent's licensed name must appear.\n"
+        "- No specific financial predictions. No guaranteed investment returns.\n\n"
+        "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
+        + "─" * 40 + "\n"
+        "{\n"
+        '  "headline": "A clear, specific, human headline with a real point of view. One sentence, no period. Something worth sharing.",\n'
+        f'  "thumbnailIdea": "A grounded realistic visual concept specific to this niche and {market}. 1-2 sentences.",\n'
+        f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
+        f'  "post": "A full social post in {agent_name}\'s voice. Takes a real position. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
+        '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
+        '  "script": "News-format teleprompter script with [B-ROLL] and [GREEN SCREEN] direction notes."\n'
+        "}\n\n"
+        "HARD RULES:\n"
+        "- Every value must be complete — no placeholders\n"
+        f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
+        "- post MUST end with a genuine local question (not generic)\n"
+        f"- {market} must appear in the post or script\n"
+        "- cta MUST include the booking URL if one was provided\n"
+        "- No line breaks inside JSON string values — use spaces between sentences\n"
+        "- Return ONLY the JSON object."
+    )
 
-LIGHTER SIDE SPECIAL INSTRUCTION:
-If the situation starts with "Lighter Side:", write with warmth and genuine humor.
-The tone should feel like a funny, self-aware professional — not a stand-up comedian.
-Think: the kind of post a trusted colleague sends that makes you smile and share it.
-Keep it short. One sharp observation or a tight list. End with something that invites
-a reply or a smile — never a hard sell. The humor should be relatable, never mean.
 
-WHAT GREAT CONTENT SOUNDS LIKE:
-- An observation the agent genuinely made: "Something I've been noticing in {market} lately..."
-- A nuanced take only someone in the field would have: "Most people assume X, but what's actually happening is Y..."
-- Honest acknowledgment of complexity: "There's no clean answer here, but the thing worth understanding is..."
-
-THE CLOSING:
-- Never a hard sell. Instead, plant a seed of curiosity.
-- Good: "If you're thinking about this, it's worth a conversation — no agenda, just context."
-- Bad: "Call {agent_name} TODAY to get started on your real estate journey!"
-
-IDENTITY RULES
-{"─" * 40}
-1. {agent_name} must appear naturally in the post as a first-person voice or sign-off.
-2. {brokerage_disclosure}
-3. Always say "{market}" specifically — never "your local area."
-4. The script must sound like someone actually talking — natural pauses, real sentences.
-
-COMPLIANCE RULES
-{"─" * 40}
-- Fair Housing Act: No language implying preference by protected class. No steering. Focus on property facts.
-- NAR Code of Ethics Article 12: Truthful only. No guaranteed outcomes. No "best agent" language.
-- Brokerage disclosure: {brokerage_compliance} must be identifiable. Agent's licensed name must appear.
-- No specific financial predictions. No guaranteed investment returns.
-
-OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE
-{"─" * 40}
-{{
-  "headline": "A clear, specific, human headline. One sentence, no period.",
-  "thumbnailIdea": "A grounded realistic visual concept specific to this niche and market. 1-2 sentences.",
-  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated)",
-  "post": "A full social post in {agent_name}'s voice. NOT a sales pitch. Ends with: — {agent_name}{brokerage_footer}",
-  "cta": "A low-pressure genuine next step — an invitation to a conversation, not a sales command.",
-  "script": "A complete 45-75 second spoken script. Natural, conversational, specific to {market}. No announcer voice."
-}}
-
-HARD RULES:
-- Every value must be complete — no placeholders
-- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement
-- {market} must appear in the post or script
-- No line breaks inside JSON string values — use spaces between sentences
-- Return ONLY the JSON object."""
 
 
 def _build_b2b_content_prompt(payload):
@@ -814,6 +920,11 @@ NICHE_COMPLIANCE_PROFILE = {
   "Agent Productivity & Technology": "b2b_saas",
   "Real Estate Compliance": "b2b_saas",
   "PropTech & Innovation": "b2b_saas",
+  "FSBO (For Sale By Owner)": "residential",
+  "Expired Listings": "residential",
+  "Circle Prospecting & Geographic Farming": "residential",
+  "Sphere of Influence & Database Reactivation": "residential",
+  "New Agent Sphere & First Contacts": "residential",
   "Mortgage & Lending": "mortgage",
   "Seniors & Downsizing": "residential",
   "Luxury": "residential",
@@ -1539,6 +1650,56 @@ NICHE_SITUATIONS = {
     "Instagram and TikTok already labeling AI content — LinkedIn is next",
     "Real estate technology consolidation — what survives and what doesn't",
   ],
+  "FSBO (For Sale By Owner)": [
+    "Why FSBOs sell for less than listed — and what sellers don't want to hear",
+    "The week 3 reality check that changes most FSBO sellers' minds",
+    "What a FSBO seller actually saves (and what they actually lose)",
+    "Legal exposure FSBOs take on that most sellers don't realize",
+    "The paperwork problem — what happens when an offer comes in without an agent",
+    "Why buyers' agents avoid showing FSBOs to their clients",
+    "The pricing trap most FSBO sellers fall into on day one",
+    "What I tell every FSBO seller before they make a decision either way",
+  ],
+  "Expired Listings": [
+    "Why a home expires off the market — the real reasons agents don't say out loud",
+    "What to do differently the second time a home goes on market",
+    "The pricing conversation that should have happened in week one",
+    "Condition issues that killed the deal before the first showing",
+    "Why days on market hurt a relisting — and how to reset perception",
+    "What buyers think when they see 'back on market' — and how to overcome it",
+    "The agent relationship problem that leads to expired listings",
+    "How to relaunch a listing and actually get traction this time",
+  ],
+  "Circle Prospecting & Geographic Farming": [
+    "Just listed — what this means for values on your street",
+    "Just sold — here's what it says about demand in this neighborhood",
+    "What's happening to home values in this specific zip code right now",
+    "Why your neighborhood is getting more attention from buyers than you'd expect",
+    "The development being approved nearby that will change this area",
+    "How many homes have sold in this neighborhood in the last 90 days",
+    "What a buyer offered over asking in your area this week",
+    "Why investors are targeting this specific zip code right now",
+  ],
+  "Sphere of Influence & Database Reactivation": [
+    "Checking in on your home equity — what your property is worth today",
+    "For the people in my network thinking about making a move this year",
+    "What I'd tell a close friend who asked me if now is a good time to sell",
+    "The question I get most from people I know: should I wait or move now?",
+    "A note to past clients — here's what's changed since we last worked together",
+    "Why people I've worked with before keep referring their friends and family",
+    "The market update I wish more people in my network would see",
+    "For anyone in my sphere who bought 5+ years ago — your equity story",
+  ],
+  "New Agent Sphere & First Contacts": [
+    "Starting out in real estate — what I wish I'd known sooner",
+    "Building trust before asking for business — the long game in real estate",
+    "Why relationships beat transactions in this industry every time",
+    "What I learned in my first year that changed how I work with clients",
+    "The difference between an agent who lasts and one who doesn't",
+    "How I approach every new client relationship from day one",
+    "What being a new agent in this market has taught me about buyers",
+    "The referral culture in real estate — how it actually works",
+  ],
   "Mortgage & Lending": [
     "Rate buydown strategies changing the math for buyers right now",
     "DSCR loans opening up investment property access for more borrowers",
@@ -1691,6 +1852,9 @@ def generate_content_core(
     length="Standard", trends=None, brand_voice="",
     short_bio="", audience="", words_avoid="", words_prefer="",
     mls_names=None, content_mode="agent", state="",
+    cta_type="", cta_url="", cta_label="",
+    mls_data="", origin_story="", unfair_advantage="",
+    signature_perspective="", not_for_client="",
 ):
     profile = AgentProfileModel(
         agentName=agent_name, brokerage=brokerage, market=market,
@@ -1698,6 +1862,14 @@ def generate_content_core(
         audienceDescription=audience, wordsAvoid=words_avoid,
         wordsPrefer=words_prefer, mlsNames=mls_names or [],
         state=state,
+        ctaType=cta_type or None,
+        ctaUrl=cta_url or None,
+        ctaLabel=cta_label or None,
+        mlsData=mls_data or None,
+        originStory=origin_story or None,
+        unfairAdvantage=unfair_advantage or None,
+        signaturePerspective=signature_perspective or None,
+        notForClient=not_for_client or None,
     )
     payload = ContentRequest(
         identity     = IdentityModel(primaryCategories=[niche] if niche else []),
