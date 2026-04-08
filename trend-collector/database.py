@@ -52,6 +52,8 @@ def init_db():
         ("agent_slug",          "TEXT DEFAULT NULL"),
         ("is_licensed",         "INTEGER DEFAULT 1"),
         ("staff_type",          "TEXT DEFAULT NULL"),
+        ("team_id",             "INTEGER DEFAULT NULL"),
+        ("notification_email",  "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -1530,6 +1532,91 @@ def get_broker_office_stats(broker_id: int) -> list:
             "status":         activity_status,
         })
 
+    conn.close()
+    return results
+
+
+def get_team_stats(team_id: int) -> list:
+    """
+    Returns per-agent stats for every active agent linked to this team.
+    Mirrors get_broker_office_stats but queries by team_id.
+    Used by the team dashboard (same broker-panel UI).
+    """
+    import json
+    from datetime import datetime, timedelta
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, email, agent_name, brokerage, created_at
+        FROM users WHERE team_id=? AND role='agent' AND is_active=1
+        ORDER BY agent_name ASC
+    """, (team_id,))
+    agents = c.fetchall()
+    results = []
+    now = datetime.utcnow()
+
+    for agent in agents:
+        uid = agent["id"]
+        c.execute("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN status='approved'  THEN 1 ELSE 0 END) as approved,
+                   SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published,
+                   SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END) as pending,
+                   MAX(COALESCE(approved_at, saved_at)) as last_activity
+            FROM content_library WHERE user_id=?
+        """, (uid,))
+        stats = c.fetchone()
+        c.execute("SELECT compliance FROM content_library WHERE user_id=? AND status IN ('approved','published')", (uid,))
+        passing = 0
+        for cr in c.fetchall():
+            try:
+                comp = json.loads(cr["compliance"]) if isinstance(cr["compliance"],str) else cr["compliance"]
+                if isinstance(comp, dict):
+                    v = str(comp.get("overallStatus") or comp.get("overall_verdict") or "").lower()
+                    if comp.get("passed") is True: v = "pass"
+                    if v in ("pass","compliant","ok","green"): passing += 1
+            except Exception:
+                pass
+        total_reviewed  = (stats["approved"] or 0) + (stats["published"] or 0)
+        compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
+        identity_score  = 0
+        try:
+            c.execute("SELECT setup_json FROM agent_setup WHERE user_id=?", (uid,))
+            sr = c.fetchone()
+            if sr:
+                setup = json.loads(sr["setup_json"] or "{}")
+                if setup.get("shortBio","").strip():   identity_score += 15
+                if setup.get("market","").strip():     identity_score += 10
+                niches = setup.get("primaryNiches", [])
+                identity_score += 10 if len(niches)>=2 else (5 if len(niches)==1 else 0)
+                if setup.get("brandVoice","").strip(): identity_score += 5
+            pub = stats["published"] or 0
+            identity_score += 30 if pub>=5 else (20 if pub>=2 else (10 if pub>=1 else 0))
+            if compliance_rate is not None:
+                identity_score += 30 if compliance_rate==100 else (22 if compliance_rate>=90 else (12 if compliance_rate>=75 else 0))
+            identity_score = min(identity_score, 100)
+        except Exception:
+            pass
+        c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id=? AND active=1", (uid,))
+        sched = c.fetchone()
+        last_act = stats["last_activity"]
+        if not last_act or stats["total"] == 0:
+            activity_status = "new"
+        else:
+            try:
+                days_ago = (now - datetime.fromisoformat(str(last_act)[:19])).days
+                activity_status = "active" if days_ago <= 30 else "inactive"
+            except Exception:
+                activity_status = "active"
+        results.append({
+            "id": uid, "name": agent["agent_name"], "agent_name": agent["agent_name"],
+            "email": agent["email"], "brokerage": agent["brokerage"] or "",
+            "joined": agent["created_at"], "total_content": stats["total"] or 0,
+            "pending": stats["pending"] or 0, "approved": stats["approved"] or 0,
+            "published": stats["published"] or 0, "compliance_rate": compliance_rate,
+            "score": identity_score, "has_schedule": (sched["cnt"]>0) if sched else False,
+            "last_activity": last_act, "status": activity_status,
+        })
     conn.close()
     return results
 
