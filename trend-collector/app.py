@@ -29,6 +29,8 @@ else:
 STRIPE_PRICES = {
     "agent_monthly":           os.getenv("STRIPE_PRICE_AGENT_MONTHLY",          ""),
     "agent_annual":            os.getenv("STRIPE_PRICE_AGENT_ANNUAL",           ""),
+    "team_monthly":            os.getenv("STRIPE_PRICE_TEAM_MONTHLY",           ""),
+    "team_annual":             os.getenv("STRIPE_PRICE_TEAM_ANNUAL",            ""),
     "office_starter_monthly":  os.getenv("STRIPE_PRICE_OFFICE_STARTER_MONTHLY", ""),
     "office_starter_annual":   os.getenv("STRIPE_PRICE_OFFICE_STARTER_ANNUAL",  ""),
     "office_growth_monthly":   os.getenv("STRIPE_PRICE_OFFICE_GROWTH_MONTHLY",  ""),
@@ -38,6 +40,7 @@ STRIPE_PRICES = {
 }
 
 OFFICE_SEAT_LIMITS = {
+    "team":           5,   # $199/month — up to 5 agents, no broker required
     "office_starter": 5,
     "office_growth":  15,
     "office_team":    30,
@@ -63,6 +66,7 @@ from database import (
     generate_compliance_pdf,
     get_broker_office_stats,
     get_broker_agent_content,
+    get_team_stats,
     save_agent_setup, get_agent_setup,
     get_user_results,
     DB_NAME,
@@ -373,7 +377,10 @@ def _run_scheduled_generation(sched: dict):
             headline   = content_to_save.get("headline", "Your scheduled content is ready")
 
             # Email — always attempt (email is on the user record)
-            to_email = user_row["email"] if user_row else ""
+            # Use notification_email if set, else fall back to account email
+            to_email = ""
+            if user_row:
+                to_email = user_row["notification_email"] if user_row["notification_email"] else user_row["email"]
             if to_email:
                 try:
                     asyncio.run(send_approval_email(to_email, agent_name, headline, approve_url))
@@ -673,16 +680,16 @@ async def stripe_webhook(request: Request):
 
 @app.get("/broker/office-stats")
 async def broker_office_stats(current_user=Depends(get_current_user)):
-    if current_user.get("role") not in ("broker", "admin", "super_admin"):
-        raise HTTPException(status_code=403, detail="Broker accounts only.")
+    if current_user.get("role") not in ("broker", "team", "admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Broker or team accounts only.")
     stats = get_broker_office_stats(current_user["id"])
     return {"agents": stats, "count": len(stats)}
 
 
 @app.post("/broker/agent-compliance-report")
 async def broker_agent_report(req: dict, current_user=Depends(get_current_user)):
-    if current_user.get("role") not in ("broker", "admin", "super_admin"):
-        raise HTTPException(status_code=403, detail="Broker accounts only.")
+    if current_user.get("role") not in ("broker", "team", "admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Broker or team accounts only.")
     agent_id = req.get("agent_id")
     if not agent_id: raise HTTPException(status_code=400, detail="agent_id required.")
     from database import get_conn
@@ -1378,7 +1385,7 @@ async def set_user_role(request: Request, current_user: dict = Depends(get_curre
     new_role   = str(body.get("role", "")).strip()
 
     valid_roles = ("super_admin", "admin", "support",
-                   "broker", "agent", "assistant")
+                   "broker", "team", "agent", "assistant")
     if new_role not in valid_roles:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
 
@@ -1590,7 +1597,7 @@ async def admin_set_role(user_id: int, request: Request,
     _require_super_admin(current_user)
     body = await request.json()
     new_role = str(body.get("role", "")).strip()
-    valid_roles = ("super_admin", "admin", "support", "broker", "agent", "assistant")
+    valid_roles = ("super_admin", "admin", "support", "broker", "team", "agent", "assistant")
     if new_role not in valid_roles:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
     # Cannot demote yourself
@@ -1727,7 +1734,7 @@ async def admin_create_user(request: Request,
 
     if not email or not password or not agent_name:
         raise HTTPException(400, "email, password, and agent_name are required.")
-    valid_roles = ("super_admin","admin","support","broker","agent","assistant")
+    valid_roles = ("super_admin","admin","support","broker","team","agent","assistant")
     if role not in valid_roles:
         raise HTTPException(400, f"Invalid role.")
 
@@ -2159,7 +2166,7 @@ async def send_approval_request(
     results = {"token_created": True, "email_sent": False, "sms_sent": False}
 
     # Send email
-    to_email = current_user.get("email", "")
+    to_email = current_user.get("notification_email") or current_user.get("email", "")
     if to_email:
         try:
             await send_approval_email(to_email, agent_name, headline, approve_url)
@@ -2564,14 +2571,68 @@ async def broker_get_agent_content(
     Agent ownership is verified — a broker cannot view agents outside their office.
     Used by the broker dashboard per-agent drill-down.
     """
-    if current_user.get("role") not in ("broker", "admin", "super_admin"):
-        raise HTTPException(403, "Broker accounts only.")
+    if current_user.get("role") not in ("broker", "team", "admin", "super_admin"):
+        raise HTTPException(403, "Broker or team accounts only.")
     items = get_broker_agent_content(
         broker_id = current_user["id"],
         agent_id  = agent_id,
         limit     = max(1, min(limit, 100)),
     )
     return {"items": items, "agent_id": agent_id, "count": len(items)}
+
+
+
+# ─────────────────────────────────────────────────────────
+# TEAM DASHBOARD
+# ─────────────────────────────────────────────────────────
+@app.get("/team/stats")
+async def team_stats(current_user: dict = Depends(get_current_user)):
+    """
+    Returns per-agent stats for all agents linked to this team lead.
+    Team lead = role 'team', agents linked via team_id = current_user["id"].
+    Also accessible to admin and super_admin for support purposes.
+    """
+    if current_user.get("role") not in ("team", "admin", "super_admin"):
+        raise HTTPException(403, "Team accounts only.")
+    stats = get_team_stats(current_user["id"])
+    return {"agents": stats, "count": len(stats)}
+
+
+@app.get("/auth/team/team-code")
+async def get_team_code(current_user: dict = Depends(get_current_user)):
+    """
+    Returns a stable team join code for the team lead.
+    Agents enter this code during signup to link to the team.
+    Mirrors /auth/broker/office-code.
+    """
+    if current_user.get("role") not in ("team", "admin", "super_admin"):
+        raise HTTPException(403, "Team accounts only.")
+    import hashlib
+    raw    = f"hb-team-{current_user['id']}-{current_user.get('email','')}"
+    hashed = hashlib.sha256(raw.encode()).hexdigest()[:6].upper()
+    return {"team_code": hashed, "user_id": current_user["id"]}
+
+
+@app.post("/auth/profile/notification-email")
+async def update_notification_email(
+    payload: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Updates the notification_email for the current user.
+    This is the address approval notifications and contact form inquiries go to.
+    Falls back to login email if not set.
+    """
+    from database import get_conn as _gc_ne
+    notification_email = payload.get("notification_email", "").strip()
+    conn = _gc_ne()
+    conn.execute(
+        "UPDATE users SET notification_email=? WHERE id=?",
+        (notification_email or None, current_user["id"])
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "notification_email": notification_email or None}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
