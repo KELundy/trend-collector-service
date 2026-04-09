@@ -1897,3 +1897,152 @@ def generate_content_core(
     )
     content_response = _parse_claude_output(raw_text, compliance)
     return {"content": content_response.dict(), "compliance": compliance.dict()}
+
+
+# ─────────────────────────────────────────────
+# LOCAL INTEL ENDPOINT
+# POST /content/local-intel
+# ─────────────────────────────────────────────
+class LocalIntelRequest(BaseModel):
+    location:     str
+    niche:        Optional[str] = "Residential Buying & Selling"
+    market:       Optional[str] = None
+    agentProfile: Optional[AgentProfileModel] = None
+
+
+@router.post("/local-intel")
+async def local_intel(payload: LocalIntelRequest):
+    """
+    Researches a location, address, or development using Claude's web search tool,
+    then generates a hyper-local impact post in the agent's voice.
+    Returns the same shape as /generate-content so the frontend handler is identical.
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    profile  = payload.agentProfile or AgentProfileModel()
+    agent_name   = profile.agentName or "the agent"
+    brokerage    = profile.brokerage or ""
+    market       = payload.market or profile.market or "their local market"
+    niche        = payload.niche or "Residential Buying & Selling"
+    service_areas = profile.serviceAreas or []
+    cta_url      = profile.ctaUrl or ""
+    cta_label    = profile.ctaLabel or ""
+    cta_type     = profile.ctaType or ""
+    origin       = profile.originStory or ""
+    perspective  = profile.signaturePerspective or ""
+    advantage    = profile.unfairAdvantage or ""
+    brand_voice  = profile.brandVoice or "conversational and genuine"
+
+    brokerage_footer = f" | {brokerage}" if brokerage else ""
+
+    if cta_url:
+        cta_instruction = (
+            f'CTA REQUIREMENT: End the cta field with this link verbatim: {cta_url}\n'
+            f'Label: "{cta_label or "Get in touch"}"'
+        )
+    else:
+        cta_instruction = "CTA REQUIREMENT: Write a low-pressure genuine invitation to a conversation."
+
+    voice_block = ""
+    if any([origin, perspective, advantage]):
+        parts = []
+        if origin:      parts.append(f"Why {agent_name} does this: {origin}")
+        if perspective: parts.append(f"Signature belief: {perspective}")
+        if advantage:   parts.append(f"Unfair advantage: {advantage}")
+        voice_block = (
+            f"\nAGENT VOICE — {agent_name.upper()}\n"
+            + "─" * 40 + "\n"
+            + "\n".join(parts) + "\n"
+            "Write in this agent's specific voice. The post should feel like it could only come from them.\n"
+        )
+
+    market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+
+    research_prompt = f"""You are a local real estate market researcher and ghostwriter for {agent_name}, a real estate professional serving {market_display}.
+
+RESEARCH TASK:
+Use your web search tool to find current, specific information about: "{payload.location}"
+
+Search for:
+1. Any development projects, building permits, zoning changes, or planning commission approvals
+2. Recent local news stories about this location or area
+3. Impact on nearby neighborhoods, property values, and the real estate market
+4. Timeline, scale, and specifics (unit counts, building types, estimated completion)
+
+After researching, write a social media post in {agent_name}'s voice that:
+- Names specific details from your research (numbers, dates, project names)
+- Takes a clear position on what this means for buyers and sellers
+- References specific neighborhoods by name
+- Ends with a genuine local question only someone who knows this market would ask
+- Includes the agent's booking link in the CTA
+
+{voice_block}
+
+VOICE: {brand_voice}
+MARKET: {market_display}
+NICHE AUDIENCE: {niche}
+
+{cta_instruction}
+
+COMPLIANCE RULES:
+- Fair Housing Act: No language implying preference by protected class
+- NAR Article 12: Truthful only. No guaranteed outcomes
+- Brokerage disclosure: End post with — {agent_name}{brokerage_footer}
+- No specific financial predictions or guaranteed investment returns
+- post MUST end with a genuine local question
+
+Include a sources line at the end of the post body listing the sources used.
+Format: "📍 Sources: [source 1], [source 2]"
+
+OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE:
+{{
+  "headline": "A specific headline naming the development or location and its impact. One sentence, no period.",
+  "thumbnailIdea": "A realistic local visual — aerial view, street-level shot, or before/after concept. 1-2 sentences.",
+  "hashtags": "#hashtag1 #hashtag2 (8-10 tags including neighborhood and city-specific tags)",
+  "post": "Full social post in {agent_name}'s voice. Specific details from research. Takes a real position. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
+  "cta": "The CTA as specified — include booking URL if provided.",
+  "script": "News-anchor format teleprompter script covering this development. Include [B-ROLL: local footage suggestion] and [GREEN SCREEN: background suggestion]."
+}}
+
+HARD RULES:
+- Include specific facts from your research — no vague generalities
+- post MUST contain {agent_name}{brokerage_footer if brokerage else ""}
+- Return ONLY the JSON object"""
+
+    try:
+        response = client.messages.create(
+            model    = "claude-sonnet-4-6",
+            max_tokens = 2000,
+            tools    = [{"type": "web_search_20250305", "name": "web_search"}],
+            messages = [{"role": "user", "content": research_prompt}],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error calling Claude: {str(e)}")
+
+    # Extract text from response — may contain tool_use and tool_result blocks
+    try:
+        text_chunks = [
+            b.text for b in (response.content or [])
+            if getattr(b, "type", "") == "text"
+        ]
+        raw_text = "\n\n".join(text_chunks).strip()
+        if not raw_text:
+            raise ValueError("Claude returned empty content after research.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error parsing Claude response: {str(e)}")
+
+    # Run compliance check
+    mls_names = profile.mlsNames or []
+    state     = profile.state or ""
+    compliance = _run_compliance_check(
+        raw_text, agent_name, brokerage, mls_names,
+        niche=niche, content_mode="agent", state=state,
+    )
+
+    try:
+        return _parse_claude_output(raw_text, compliance)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error structuring response: {str(e)}")
