@@ -259,9 +259,16 @@ def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America
     except Exception:
         hour, minute = 8, 0
 
-    if frequency == "daily":    delta = timedelta(days=1)
-    elif frequency == "3x_week": delta = timedelta(days=2)
-    else:                        delta = timedelta(days=7)
+    if frequency == "daily":
+        delta = timedelta(days=1)
+    elif frequency == "3x_week":
+        delta = timedelta(days=2)
+    elif frequency == "biweekly":
+        delta = timedelta(days=14)
+    elif frequency == "monthly":
+        delta = timedelta(days=30)
+    else:  # "weekly" and any unknown value
+        delta = timedelta(days=7)
 
     try:
         from zoneinfo import ZoneInfo
@@ -289,8 +296,15 @@ def content_scheduler_worker():
         try:
             due = schedules_get_due()
             if due: print(f"[Scheduler] {len(due)} schedule(s) due.")
+            # Group by user so we send ONE notification email per user
+            # regardless of how many niches are scheduled in the same window.
+            # This prevents agents with multiple niches getting flooded with emails.
+            from collections import defaultdict
+            by_user = defaultdict(list)
             for sched in due:
-                _run_scheduled_generation(sched)
+                by_user[sched["user_id"]].append(sched)
+            for user_id, scheds in by_user.items():
+                _run_scheduled_generation_for_user(user_id, scheds)
         except Exception as e:
             print(f"[Scheduler] Error in worker: {e}")
         time.sleep(15 * 60)
@@ -414,7 +428,149 @@ def _run_scheduled_generation(sched: dict):
         schedule_mark_ran(sched_id, next_run)
 
 
-def classify_topic_to_niches(topic: str) -> list:
+def _run_scheduled_generation_for_user(user_id: int, scheds: list):
+    """
+    Run all due schedules for a single user and send ONE consolidated
+    notification email/SMS covering all generated niches.
+    Prevents agents with multiple niches from receiving a flood of emails
+    in a single 15-minute scheduler window.
+    """
+    saved_items   = []  # (niche, item_id, headline) tuples
+    failed_niches = []
+
+    for sched in scheds:
+        niche    = sched["niche"]
+        sched_id = sched["id"]
+        try:
+            from database import get_conn, create_approval_token
+            conn = get_conn()
+            c = conn.cursor()
+            c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            user_row = c.fetchone()
+            try:
+                c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+                setup_row = c.fetchone()
+                setup = json.loads(setup_row["setup_json"]) if setup_row else {}
+            except Exception:
+                setup = {}
+            conn.close()
+
+            if not user_row:
+                print(f"[Scheduler] User {user_id} not found, skipping niche '{niche}'.")
+                continue
+
+            result = generate_content_core(
+                agent_name  = user_row["agent_name"],
+                brokerage   = user_row["brokerage"],
+                market      = setup.get("market", ""),
+                niche       = niche,
+                situation   = setup.get("defaultSituation") or "Market update and current conditions",
+                persona     = setup.get("defaultPersona") or "homeowners",
+                tone        = setup.get("tone", "Professional"),
+                length      = setup.get("length", "Standard"),
+                trends      = setup.get("trends", []),
+                brand_voice = setup.get("brandVoice", ""),
+                short_bio   = setup.get("shortBio", ""),
+                audience    = setup.get("audienceDescription", ""),
+                words_avoid = setup.get("wordsAvoid", ""),
+                words_prefer= setup.get("wordsPrefer", ""),
+                mls_names   = setup.get("mlsNames", []),
+                state       = setup.get("state", ""),
+                cta_type    = setup.get("ctaType", ""),
+                cta_url     = setup.get("ctaUrl", ""),
+                cta_label   = setup.get("ctaLabel", ""),
+                origin_story         = setup.get("originStory", ""),
+                unfair_advantage     = setup.get("unfairAdvantage", ""),
+                signature_perspective= setup.get("signaturePerspective", ""),
+                not_for_client       = setup.get("notForClient", ""),
+            )
+
+            content_to_save = dict(result["content"])
+            if "generated_at" in content_to_save:
+                from datetime import datetime as _dt
+                val = content_to_save["generated_at"]
+                if isinstance(val, _dt):
+                    content_to_save["generated_at"] = val.isoformat()
+
+            compliance_to_save = dict(result["compliance"])
+            saved_item = library_save(
+                user_id    = user_id,
+                niche      = niche,
+                content    = content_to_save,
+                compliance = compliance_to_save,
+                source     = "scheduled",
+            )
+            item_id  = saved_item.get("id")
+            headline = content_to_save.get("headline", "Your scheduled content is ready")
+            saved_items.append((niche, item_id, headline))
+            print(f"[Scheduler] ✓ Saved item {item_id} for user {user_id} / '{niche}'")
+
+        except Exception as e:
+            print(f"[Scheduler] ✗ Generation failed for user {user_id} / '{niche}': {e}")
+            failed_niches.append(niche)
+        finally:
+            next_run = _compute_next_run(
+                sched.get("frequency",  "weekly"),
+                sched.get("time_of_day", "08:00"),
+                sched.get("timezone",   "America/Denver"),
+            )
+            schedule_mark_ran(sched_id, next_run)
+
+    # Send ONE consolidated notification for all successfully generated items
+    if not saved_items:
+        return
+
+    try:
+        from social import send_approval_email, send_approval_sms
+        import asyncio
+        from database import get_conn as _gc2, create_approval_token
+
+        conn2 = _gc2()
+        c2    = conn2.cursor()
+        c2.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        user_row = c2.fetchone()
+        c2.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+        setup_row = c2.fetchone()
+        setup = json.loads(setup_row["setup_json"]) if setup_row else {}
+        conn2.close()
+
+        if not user_row:
+            return
+
+        agent_name = user_row["agent_name"] or "Agent"
+        to_email   = user_row["notification_email"] or user_row["email"] or ""
+        phone      = (user_row["phone"] or "") or setup.get("approvalPhone", "") or setup.get("phone", "")
+        api_url    = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
+
+        # Use first item for the primary approval link; headline reflects count
+        first_niche, first_item_id, first_headline = saved_items[0]
+        token       = create_approval_token(user_id, first_item_id)
+        approve_url = f"{api_url}/approve?token={token}"
+
+        if len(saved_items) == 1:
+            headline_for_email = first_headline
+        else:
+            niches_str = ", ".join(n for n, _, _ in saved_items)
+            headline_for_email = f"{len(saved_items)} new posts ready — {niches_str}"
+
+        if to_email:
+            try:
+                asyncio.run(send_approval_email(to_email, agent_name, headline_for_email, approve_url))
+                print(f"[Scheduler] ✓ Consolidated approval email sent to {to_email} ({len(saved_items)} item(s))")
+            except Exception as email_err:
+                print(f"[Scheduler] ✗ Email failed: {email_err}")
+
+        if phone:
+            try:
+                asyncio.run(send_approval_sms(phone, agent_name, headline_for_email, approve_url))
+                print(f"[Scheduler] ✓ Approval SMS sent to {phone}")
+            except Exception as sms_err:
+                print(f"[Scheduler] ✗ SMS failed: {sms_err}")
+
+    except Exception as notify_err:
+        print(f"[Scheduler] ✗ Notification error (content was saved): {notify_err}")
+
+
     prompt = f"""You are a real estate niche classifier. Given a trend topic, return a JSON list of real estate niches it belongs to. No explanation, only JSON.\nTrend topic: "{topic}" """
     try:
         response = anthropic_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=200, messages=[{"role": "user", "content": prompt}])
@@ -2267,7 +2423,7 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str,
       'expired'     — token expired, show resend option
       'error'       — generic error
     """
-    app_url = "https://app.homebridgegroup.co"
+    app_url = "https://app.homebridgegroup.co?view=agent"
 
     # ── Shared styles ────────────────────────────────────────────────────────
     styles = """
@@ -2315,9 +2471,9 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str,
     if compliance_status in ("compliant", "pass", "ok"):
         comp_html = "<span class='comp-badge comp-pass'>✓ Compliance Verified</span>"
     elif compliance_status in ("review", "warn"):
-        comp_html = "<span class='comp-badge comp-review'>⚠ Review Recommended</span>"
+        comp_html = "<span class='comp-badge comp-review'>⚠ Soft flags noted — safe to approve, review notes below</span>"
     elif compliance_status == "attention":
-        comp_html = "<span class='comp-badge comp-attention'>✗ Attention Required</span>"
+        comp_html = "<span class='comp-badge comp-attention'>✗ Attention Required — please review before approving</span>"
     else:
         comp_html = ""
 
