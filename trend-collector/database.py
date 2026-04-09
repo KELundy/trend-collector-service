@@ -40,20 +40,24 @@ def init_db():
     """)
     # Non-destructive migrations for existing deployments
     for col, defn in [
-        ("role",           "TEXT DEFAULT 'agent'"),
-        ("broker_id",      "INTEGER DEFAULT NULL"),
-        ("phone",          "TEXT DEFAULT ''"),
-        ("plan",           "TEXT DEFAULT 'trial'"),
-        ("billing_cycle",  "TEXT DEFAULT 'monthly'"),
-        ("sub_status",     "TEXT DEFAULT 'trial'"),
-        ("trial_ends_at",  "TEXT DEFAULT NULL"),
+        ("role",                   "TEXT DEFAULT 'agent'"),
+        ("broker_id",              "INTEGER DEFAULT NULL"),
+        ("phone",                  "TEXT DEFAULT ''"),
+        ("plan",                   "TEXT DEFAULT 'trial'"),
+        ("billing_cycle",          "TEXT DEFAULT 'monthly'"),
+        ("sub_status",             "TEXT DEFAULT 'trial'"),
+        ("trial_ends_at",          "TEXT DEFAULT NULL"),
         ("stripe_customer_id",     "TEXT DEFAULT NULL"),
         ("stripe_subscription_id", "TEXT DEFAULT NULL"),
-        ("agent_slug",          "TEXT DEFAULT NULL"),
-        ("is_licensed",         "INTEGER DEFAULT 1"),
-        ("staff_type",          "TEXT DEFAULT NULL"),
-        ("team_id",             "INTEGER DEFAULT NULL"),
-        ("notification_email",  "TEXT DEFAULT NULL"),
+        ("agent_slug",             "TEXT DEFAULT NULL"),
+        ("is_licensed",            "INTEGER DEFAULT 1"),
+        ("staff_type",             "TEXT DEFAULT NULL"),
+        ("team_id",                "INTEGER DEFAULT NULL"),
+        ("notification_email",     "TEXT DEFAULT NULL"),
+        # Usage limits — added Session 5
+        ("generation_count",       "INTEGER DEFAULT 0"),
+        ("generation_reset_date",  "TEXT DEFAULT NULL"),
+        ("monthly_limit",          "INTEGER DEFAULT 30"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -102,7 +106,31 @@ def init_db():
             last_run TEXT,
             next_run TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            day_of_week TEXT DEFAULT NULL,
             UNIQUE(user_id, niche),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    # Non-destructive: add day_of_week to existing schedules table
+    try:
+        c.execute("ALTER TABLE schedules ADD COLUMN day_of_week TEXT DEFAULT NULL")
+    except Exception:
+        pass
+
+    # Local signals — hyper-local market intelligence per agent
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS local_signals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
+            area            TEXT NOT NULL,
+            headline        TEXT NOT NULL,
+            summary         TEXT,
+            source_url      TEXT,
+            signal_type     TEXT DEFAULT 'general',
+            relevance_score REAL DEFAULT 0.5,
+            used            INTEGER DEFAULT 0,
+            collected_at    TEXT DEFAULT (datetime('now')),
+            expires_at      TEXT DEFAULT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
@@ -769,23 +797,21 @@ def _row_to_item(row) -> dict:
 # SCHEDULES
 # ─────────────────────────────────────────────
 def schedule_upsert(user_id: int, niche: str, frequency: str,
-                    time_of_day: str, timezone: str = "America/Denver") -> dict:
+                    time_of_day: str, timezone: str = "America/Denver",
+                    day_of_week: str = None) -> dict:
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run)
-        VALUES (?, ?, ?, ?, ?, 1, NULL)
+        INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run, day_of_week)
+        VALUES (?, ?, ?, ?, ?, 1, NULL, ?)
         ON CONFLICT(user_id, niche) DO UPDATE SET
             frequency   = excluded.frequency,
             time_of_day = excluded.time_of_day,
             timezone    = excluded.timezone,
             active      = 1,
-            next_run    = NULL
-    """, (user_id, niche, frequency, time_of_day, timezone))
-    # Setting next_run = NULL means the scheduler will pick this up on its next
-    # 15-minute poll and _compute_next_run will calculate the correct next UTC time
-    # based on the agent's local timezone. This also makes testing easy — save your
-    # schedule and it fires within 15 minutes.
+            next_run    = NULL,
+            day_of_week = excluded.day_of_week
+    """, (user_id, niche, frequency, time_of_day, timezone, day_of_week))
     conn.commit()
     c.execute("SELECT * FROM schedules WHERE user_id = ? AND niche = ?", (user_id, niche))
     row = c.fetchone()
@@ -850,6 +876,9 @@ def schedule_delete(user_id: int, niche: str) -> bool:
 
 
 def _schedule_row(row) -> dict:
+    dow = None
+    try: dow = row["day_of_week"]
+    except Exception: pass
     return {
         "id":         row["id"],
         "userId":     row["user_id"],
@@ -860,6 +889,7 @@ def _schedule_row(row) -> dict:
         "active":     bool(row["active"]),
         "lastRun":    row["last_run"],
         "nextRun":    row["next_run"],
+        "dayOfWeek":  dow,
     }
 
 
@@ -1804,3 +1834,177 @@ def update_password(user_id: int, new_password_hash: str):
     conn = get_conn()
     conn.execute("UPDATE users SET password_hash=? WHERE id=?", (new_password_hash, user_id))
     conn.commit(); conn.close()
+
+# ─────────────────────────────────────────────
+# LOCAL SIGNALS
+# ─────────────────────────────────────────────
+
+def signals_save(user_id: int, area: str, headline: str, summary: str,
+                 source_url: str, signal_type: str = "general",
+                 relevance_score: float = 0.5):
+    """Save a hyper-local signal for an agent."""
+    from datetime import timedelta
+    conn = get_conn()
+    expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
+    conn.execute("""
+        INSERT INTO local_signals
+            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at))
+    conn.commit()
+    conn.close()
+
+
+def signals_get_latest(user_id: int, limit: int = 5) -> list:
+    """Get the most recent unused high-relevance signals for an agent."""
+    conn = get_conn()
+    c = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    c.execute("""
+        SELECT * FROM local_signals
+        WHERE user_id = ?
+          AND used = 0
+          AND (expires_at IS NULL OR expires_at > ?)
+        ORDER BY relevance_score DESC, collected_at DESC
+        LIMIT ?
+    """, (user_id, now, limit))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def signals_mark_used(signal_id: int):
+    """Mark a signal as used so it doesn't surface again."""
+    conn = get_conn()
+    conn.execute("UPDATE local_signals SET used = 1 WHERE id = ?", (signal_id,))
+    conn.commit()
+    conn.close()
+
+
+def signals_purge_expired():
+    """Remove expired signals — called by the signal collector on each run."""
+    conn = get_conn()
+    now = datetime.utcnow().isoformat()
+    conn.execute("DELETE FROM local_signals WHERE expires_at IS NOT NULL AND expires_at < ?", (now,))
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────
+# USAGE LIMITS
+# ─────────────────────────────────────────────
+
+# Monthly limits by plan
+PLAN_LIMITS = {
+    "trial":          10,
+    "agent":          30,
+    "team":           75,
+    "office_starter": 150,
+    "office_growth":  400,
+    "enterprise":     9999,
+}
+
+# Roles that are never limited
+UNLIMITED_ROLES = {"super_admin", "admin"}
+
+
+def usage_check(user_id: int, role: str, plan: str) -> dict:
+    """
+    Check whether the user has generation capacity remaining.
+    Returns {"allowed": bool, "used": int, "limit": int, "resets_on": str}
+    Always allowed for super_admin and admin.
+    Resets on the 1st of each month UTC.
+    """
+    if role in UNLIMITED_ROLES:
+        return {"allowed": True, "used": 0, "limit": 9999, "resets_on": None}
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT generation_count, generation_reset_date, monthly_limit FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"allowed": False, "used": 0, "limit": 0, "resets_on": None}
+
+    count      = row["generation_count"] or 0
+    reset_date = row["generation_reset_date"]
+    limit      = row["monthly_limit"] or PLAN_LIMITS.get(plan, 30)
+    today      = datetime.utcnow()
+
+    # Compute reset date — 1st of next month
+    if today.month == 12:
+        next_reset = datetime(today.year + 1, 1, 1)
+    else:
+        next_reset = datetime(today.year, today.month + 1, 1)
+    resets_on = next_reset.strftime("%B 1, %Y")
+
+    # If reset date has passed, reset the counter
+    if reset_date:
+        try:
+            rd = datetime.fromisoformat(reset_date)
+            if today >= rd:
+                _usage_reset(user_id, next_reset.isoformat())
+                count = 0
+        except Exception:
+            pass
+    else:
+        # First time — set reset date
+        _usage_reset(user_id, next_reset.isoformat())
+
+    return {
+        "allowed":    count < limit,
+        "used":       count,
+        "limit":      limit,
+        "resets_on":  resets_on,
+    }
+
+
+def usage_increment(user_id: int):
+    """Increment the generation counter for a user."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET generation_count = COALESCE(generation_count, 0) + 1 WHERE id = ?",
+        (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _usage_reset(user_id: int, next_reset_iso: str):
+    """Reset generation count and set next reset date."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET generation_count = 0, generation_reset_date = ? WHERE id = ?",
+        (next_reset_iso, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def usage_set_limit(user_id: int, limit: int):
+    """Override monthly limit for a specific user (admin use)."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET monthly_limit = ? WHERE id = ?", (limit, user_id))
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────
+# SCHEDULE — day_of_week support
+# ─────────────────────────────────────────────
+
+def schedule_row_with_days(row) -> dict:
+    """Extend _schedule_row to include day_of_week."""
+    base = {
+        "id":         row["id"],
+        "userId":     row["user_id"],
+        "niche":      row["niche"],
+        "frequency":  row["frequency"],
+        "timeOfDay":  row["time_of_day"],
+        "timezone":   row["timezone"],
+        "active":     bool(row["active"]),
+        "lastRun":    row["last_run"],
+        "nextRun":    row["next_run"],
+        "dayOfWeek":  row["day_of_week"] if "day_of_week" in row.keys() else None,
+    }
+    return base
