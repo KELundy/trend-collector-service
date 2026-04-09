@@ -2007,24 +2007,35 @@ async def local_intel(payload: LocalIntelRequest):
         )
 
     market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+    market_str     = market or "the local area"
 
     research_prompt = f"""You are a local real estate market researcher and ghostwriter for {agent_name}, a real estate professional serving {market_display}.
 
-RESEARCH TASK:
-Use your web search tool to find current, specific information about: "{payload.location}"
+RESEARCH TASK — THREE-TIER FALLBACK:
+Search the web for information about: "{payload.location}"
 
-Search for:
-1. Any development projects, building permits, zoning changes, or planning commission approvals
-2. Recent local news stories about this location or area
-3. Impact on nearby neighborhoods, property values, and the real estate market
-4. Timeline, scale, and specifics (unit counts, building types, estimated completion)
+Follow this exact research hierarchy:
 
-After researching, write a social media post in {agent_name}'s voice that:
-- Names specific details from your research (numbers, dates, project names)
-- Takes a clear position on what this means for buyers and sellers
-- References specific neighborhoods by name
+TIER 1 — HYPER-LOCAL (try this first):
+Search specifically for: building permits, planning commission approvals, zoning changes, development announcements, or neighborhood news directly about "{payload.location}".
+If you find 2 or more specific, recent (last 90 days), factual results → use them and skip Tiers 2 and 3.
+
+TIER 2 — METRO LEVEL (if Tier 1 is thin):
+If Tier 1 yields fewer than 2 strong specific results, widen your search to the broader {market_str} metro area.
+Look for: major development trends, market data, policy changes, or infrastructure news affecting {market_str} broadly.
+If you find 2 or more metro-level results → use them and skip Tier 3.
+
+TIER 3 — NATIONAL NICHE (last resort):
+If both Tier 1 and Tier 2 are thin, search for national trends relevant to {niche} that a {market_str} agent could give a local angle on.
+Examples: NAR data releases, regulatory changes, demographic shifts, interest rate impacts on this niche nationally.
+
+AFTER RESEARCHING:
+Write a social media post in {agent_name}'s voice that:
+- Uses the MOST SPECIFIC data you found — prefer Tier 1 over Tier 2 over Tier 3
+- Is honest about the scope: if using metro or national data, frame it that way ("Across {market_str}..." or "A national trend worth knowing...")
+- NEVER fabricates local specifics that weren't in your search results
+- Takes a clear position on what this means for buyers and sellers in {market_str}
 - Ends with a genuine local question only someone who knows this market would ask
-- Includes the agent's booking link in the CTA
 
 {voice_block}
 
@@ -2041,22 +2052,23 @@ COMPLIANCE RULES:
 - No specific financial predictions or guaranteed investment returns
 - post MUST end with a genuine local question
 
-Include a sources line at the end of the post body listing the sources used.
-Format: "📍 Sources: [source 1], [source 2]"
+Include a sources line at the end of the post body.
+Format: "📍 Sources: [list what you found and at what tier — e.g. 'Denver Planning Dept permit record' or 'NAR Q1 2026 report']"
 
 OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE:
 {{
-  "headline": "A specific headline naming the development or location and its impact. One sentence, no period.",
-  "thumbnailIdea": "A realistic local visual — aerial view, street-level shot, or before/after concept. 1-2 sentences.",
-  "hashtags": "#hashtag1 #hashtag2 (8-10 tags including neighborhood and city-specific tags)",
-  "post": "Full social post in {agent_name}'s voice. Specific details from research. Takes a real position. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
+  "headline": "A specific headline reflecting the most local data you found. One sentence, no period.",
+  "thumbnailIdea": "A realistic visual concept tied to the research. 1-2 sentences.",
+  "hashtags": "#hashtag1 #hashtag2 (8-10 tags — include {market_str.split()[0]}-specific tags)",
+  "post": "Full social post in {agent_name}'s voice. Uses real data from research. Takes a position. Includes 📍 Sources line. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
   "cta": "The CTA as specified — include booking URL if provided.",
-  "script": "News-anchor format teleprompter script covering this development. Include [B-ROLL: local footage suggestion] and [GREEN SCREEN: background suggestion]."
+  "script": "News-anchor teleprompter script covering the research findings. Include [B-ROLL: local footage suggestion] and [GREEN SCREEN: background suggestion]."
 }}
 
 HARD RULES:
-- Include specific facts from your research — no vague generalities
+- Use real data from your searches — never invent facts
 - post MUST contain {agent_name}{brokerage_footer if brokerage else ""}
+- If data is metro or national, say so in the post — agents build trust through honesty
 - Return ONLY the JSON object"""
 
     try:
