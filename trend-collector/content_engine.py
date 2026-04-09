@@ -1798,7 +1798,54 @@ async def get_situations_multi(niches: Optional[str] = None, include_lighter: bo
 
 
 @router.post("/generate-content", response_model=ContentResponse)
-async def generate_content(payload: ContentRequest) -> ContentResponse:
+async def generate_content(payload: ContentRequest, request: Request) -> ContentResponse:
+    # ── Usage limit gate ──────────────────────────────────────────────────────
+    # Enforce monthly generation limits before calling Claude.
+    # super_admin and admin are always unlimited.
+    try:
+        from database import usage_check, usage_increment
+        import os as _os
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+        if token and token != "demo-token":
+            import sqlite3 as _sq
+            db_path = _os.getenv("DB_PATH", "/data/homebridge.db")
+            _conn = _sq.connect(db_path)
+            _conn.row_factory = _sq.Row
+            _c = _conn.cursor()
+            # Decode JWT to get user_id
+            try:
+                import jwt as _jwt
+                SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-key-2024")
+                decoded = _jwt.decode(token, SECRET, algorithms=["HS256"])
+                uid = decoded.get("user_id") or decoded.get("sub")
+                if uid:
+                    _c.execute("SELECT id, role, plan FROM users WHERE id = ?", (int(uid),))
+                    urow = _c.fetchone()
+                    if urow:
+                        check = usage_check(urow["id"], urow["role"] or "agent", urow["plan"] or "trial")
+                        if not check["allowed"]:
+                            _conn.close()
+                            from fastapi import HTTPException as _HTTPEx
+                            raise _HTTPEx(
+                                status_code=429,
+                                detail={
+                                    "error":      "generation_limit_reached",
+                                    "message":    f"You've used all {check['limit']} posts included in your plan this month.",
+                                    "used":       check["used"],
+                                    "limit":      check["limit"],
+                                    "resets_on":  check["resets_on"],
+                                    "upgrade_msg":"Contact us to add more generations or upgrade your plan.",
+                                }
+                            )
+                        if urow["role"] not in ("super_admin", "admin"):
+                            usage_increment(urow["id"])
+            except Exception:
+                pass  # Limit check failure never blocks generation
+            _conn.close()
+    except Exception:
+        pass  # Usage check is best-effort — never blocks a legitimate request
+    # ─────────────────────────────────────────────────────────────────────────
     try:
         client = _get_anthropic_client()
     except RuntimeError as e:
