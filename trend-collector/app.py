@@ -142,6 +142,12 @@ async def startup_event():
     print("[Startup] Starting content scheduler...")
     t2 = threading.Thread(target=content_scheduler_worker, daemon=True)
     t2.start()
+    print("[Startup] Starting hyper-local signal collector...")
+    try:
+        from signal_collector import start_signal_collector
+        start_signal_collector()
+    except Exception as e:
+        print(f"[Startup] Signal collector failed to start: {e}")
     print("[Startup] Ready.")
 
 
@@ -211,10 +217,11 @@ async def delete_library_item(item_id: int, current_user=Depends(get_current_use
 
 
 class ScheduleRequest(BaseModel):
-    niche: str
-    frequency: str
-    timeOfDay: str
-    timezone: Optional[str] = "America/Denver"
+    niche:      str
+    frequency:  str
+    timeOfDay:  str
+    timezone:   Optional[str] = "America/Denver"
+    dayOfWeek:  Optional[str] = None  # JSON array e.g. '["mon","wed","fri"]'
 
 class ScheduleDeleteRequest(BaseModel):
     niche: str
@@ -227,7 +234,15 @@ async def get_schedules(current_user=Depends(get_current_user)):
 
 @app.post("/schedules")
 async def upsert_schedule(body: ScheduleRequest, current_user=Depends(get_current_user)):
-    schedule = schedule_upsert(user_id=current_user["id"], niche=body.niche, frequency=body.frequency, time_of_day=body.timeOfDay, timezone=body.timezone)
+    from database import schedule_upsert
+    schedule = schedule_upsert(
+        user_id    = current_user["id"],
+        niche      = body.niche,
+        frequency  = body.frequency,
+        time_of_day= body.timeOfDay,
+        timezone   = body.timezone,
+        day_of_week= body.dayOfWeek,
+    )
     return {"success": True, "schedule": schedule}
 
 
@@ -237,6 +252,85 @@ async def delete_schedule(niche: str, current_user=Depends(get_current_user)):
     if not success:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return {"success": True}
+
+
+# ── Usage limit check ──────────────────────────────────────────────────────────
+def check_generation_limit(user: dict) -> None:
+    """
+    Raises HTTP 429 if agent has exceeded their monthly generation limit.
+    super_admin and admin are always allowed.
+    Called before every generation endpoint.
+    """
+    from database import usage_check, usage_increment
+    role = user.get("role", "agent")
+    plan = user.get("plan", "trial")
+    uid  = user.get("id")
+    check = usage_check(uid, role, plan)
+    if not check["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error":      "generation_limit_reached",
+                "message":    f"You've used all {check['limit']} posts included in your plan this month.",
+                "used":       check["used"],
+                "limit":      check["limit"],
+                "resets_on":  check["resets_on"],
+                "upgrade_msg":"Contact us to add more generations or upgrade your plan.",
+            }
+        )
+    # Increment counter on the way through — only for non-unlimited roles
+    if role not in ("super_admin", "admin"):
+        usage_increment(uid)
+
+
+@app.get("/usage")
+async def get_usage(current_user=Depends(get_current_user)):
+    """Return current generation usage for the logged-in agent."""
+    from database import usage_check
+    check = usage_check(current_user["id"], current_user.get("role","agent"), current_user.get("plan","trial"))
+    return check
+
+
+# ── Local signals endpoint ─────────────────────────────────────────────────────
+@app.get("/signals/latest")
+async def get_latest_signals(current_user=Depends(get_current_user)):
+    """
+    Returns the most recent high-relevance local signals for the agent.
+    Used by the Home dashboard to surface the suggested next action.
+    """
+    from database import signals_get_latest
+    signals = signals_get_latest(current_user["id"], limit=5)
+    return {"signals": signals}
+
+
+@app.post("/signals/trigger")
+async def trigger_signal_collection(current_user=Depends(get_current_user)):
+    """
+    Manually trigger signal collection for the current user.
+    Super admin only — used for testing.
+    """
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(403, "Super admin only.")
+    try:
+        from signal_collector import _collect_signals_for_agent
+        import json as _json
+        conn2 = __import__('database').get_conn()
+        c2    = conn2.cursor()
+        c2.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (current_user["id"],))
+        row = c2.fetchone()
+        conn2.close()
+        setup = _json.loads(row["setup_json"]) if row else {}
+        _collect_signals_for_agent(
+            user_id      = current_user["id"],
+            agent_name   = current_user.get("agent_name", "Agent"),
+            service_areas= setup.get("serviceAreas", []),
+            market       = setup.get("market", ""),
+        )
+        return {"ok": True, "message": "Signal collection triggered."}
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
 
 
 class ScoreRequest(BaseModel):
