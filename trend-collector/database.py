@@ -201,6 +201,35 @@ def init_db():
         )
     """)
 
+    # Platform connections — OAuth token storage
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS platform_connections (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id           INTEGER NOT NULL,
+            platform          TEXT NOT NULL,
+            access_token      TEXT NOT NULL,
+            refresh_token     TEXT DEFAULT '',
+            expires_at        TEXT DEFAULT '',
+            platform_user_id  TEXT DEFAULT '',
+            platform_handle   TEXT DEFAULT '',
+            connected_at      TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, platform)
+        )
+    """)
+
+    # Platform posts — PaperTrail audit of published content
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS platform_posts (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL,
+            library_item_id  INTEGER NOT NULL,
+            platform         TEXT NOT NULL,
+            post_id          TEXT DEFAULT '',
+            post_url         TEXT DEFAULT '',
+            posted_at        TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -788,8 +817,10 @@ def _row_to_item(row) -> dict:
         "publishedAt":     row["published_at"],
         "source":          row["source"] or "manual",
         "context":         ctx,
-        "cir_id":          cir_id,
-        "image_url":       image_url,
+        "cir_id":              cir_id,
+        "image_url":           image_url,
+        "editedAt":            row["edited_at"]            if "edited_at"            in row.keys() else None,
+        "complianceCheckedAt": row["compliance_checked_at"] if "compliance_checked_at" in row.keys() else None,
     }
 
 
