@@ -665,6 +665,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
         print(f"[Scheduler] ✗ Notification error (content was saved): {notify_err}")
 
 
+def classify_topic_to_niches(topic: str) -> list:
     prompt = f"""You are a real estate niche classifier. Given a trend topic, return a JSON list of real estate niches it belongs to. No explanation, only JSON.\nTrend topic: "{topic}" """
     try:
         response = anthropic_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=200, messages=[{"role": "user", "content": prompt}])
