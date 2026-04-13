@@ -844,6 +844,51 @@ async def validate_demo_token(token: str, request: Request):
     return {"valid": True, "message": "Demo access granted"}
 
 
+@app.post("/content/demo-generate")
+async def demo_generate_content(request: Request):
+    """
+    Demo content generation — no auth required.
+    Parses the same payload the frontend sends to /content/generate-content.
+    Called by demo-mode visitors who have no JWT.
+    Uses the agent profile supplied in the request body (Brooke Callahan).
+    """
+    body          = await request.json()
+    agent_profile = body.get("agentProfile", {})
+    identity      = body.get("identity", {})
+    niches        = identity.get("primaryCategories", [])
+    niche         = niches[0] if niches else "Residential Buying & Selling"
+
+    try:
+        result = generate_content_core(
+            agent_name            = agent_profile.get("agentName", "Brooke Callahan"),
+            brokerage             = agent_profile.get("brokerage", "eXp Realty — Austin"),
+            market                = agent_profile.get("market", "Austin, TX"),
+            niche                 = niche,
+            situation             = body.get("situation", "Market update and current conditions"),
+            persona               = body.get("persona") or "homeowners",
+            tone                  = body.get("tone") or "Professional",
+            length                = body.get("length") or "Standard",
+            trends                = body.get("selectedTrends", []),
+            brand_voice           = agent_profile.get("brandVoice", ""),
+            short_bio             = agent_profile.get("shortBio", ""),
+            audience              = agent_profile.get("audienceDescription", ""),
+            words_avoid           = agent_profile.get("wordsAvoid", ""),
+            words_prefer          = agent_profile.get("wordsPrefer", ""),
+            mls_names             = agent_profile.get("mlsNames", []),
+            state                 = agent_profile.get("state", "TX"),
+            cta_type              = agent_profile.get("ctaType", ""),
+            cta_url               = agent_profile.get("ctaUrl", ""),
+            cta_label             = agent_profile.get("ctaLabel", ""),
+            origin_story          = agent_profile.get("originStory", ""),
+            unfair_advantage      = agent_profile.get("unfairAdvantage", ""),
+            signature_perspective = agent_profile.get("signaturePerspective", ""),
+            not_for_client        = agent_profile.get("notForClient", ""),
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Demo generation failed: {str(e)}")
+
+
 @app.post("/office/invite")
 async def invite_agent(request: Request, current_user=Depends(get_current_user)):
     if current_user.get("role") not in ("broker", "admin", "super_admin"):
