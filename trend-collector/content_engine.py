@@ -1816,7 +1816,7 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
             # Decode JWT to get user_id
             try:
                 import jwt as _jwt
-                SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-key-2024")
+                SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
                 decoded = _jwt.decode(token, SECRET, algorithms=["HS256"])
                 uid = decoded.get("user_id") or decoded.get("sub")
                 if uid:
