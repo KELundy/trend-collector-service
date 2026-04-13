@@ -885,7 +885,15 @@ async def demo_generate_content(request: Request):
             signature_perspective = agent_profile.get("signaturePerspective", ""),
             not_for_client        = agent_profile.get("notForClient", ""),
         )
-        return result
+        # generate_content_core returns {"content":{...},"compliance":{...}}
+        # Frontend expects flat format matching the real /generate-content endpoint
+        content = dict(result["content"])
+        if "generated_at" in content:
+            from datetime import datetime as _dt_dg
+            val = content["generated_at"]
+            if isinstance(val, _dt_dg):
+                content["generated_at"] = val.isoformat()
+        return {**content, "compliance": result["compliance"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Demo generation failed: {str(e)}")
 
