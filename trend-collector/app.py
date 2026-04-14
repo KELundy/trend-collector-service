@@ -2054,16 +2054,19 @@ async def admin_stats(current_user: dict = Depends(get_current_user)):
     total_published = c.fetchone()["n"]
     c.execute("SELECT COUNT(*) as n FROM schedules WHERE active=1")
     active_schedules = c.fetchone()["n"]
+    c.execute("SELECT COUNT(*) as n FROM users WHERE agent_slug IS NOT NULL AND agent_slug != '' AND is_active=1")
+    live_authority_pages = c.fetchone()["n"]
     conn.close()
     return {
-        "total_users":      total_users,
-        "new_users_30d":    new_30,
-        "total_brokers":    total_brokers,
-        "total_agents":     total_agents,
-        "total_content":    total_content,
-        "content_this_week":content_week,
-        "total_published":  total_published,
-        "active_schedules": active_schedules,
+        "total_users":          total_users,
+        "new_users_30d":        new_30,
+        "total_brokers":        total_brokers,
+        "total_agents":         total_agents,
+        "total_content":        total_content,
+        "content_this_week":    content_week,
+        "total_published":      total_published,
+        "active_schedules":     active_schedules,
+        "live_authority_pages": live_authority_pages,
     }
 
 
@@ -2325,7 +2328,6 @@ async def submit_waitlist(request: Request):
     email   = str(body.get("email",   "")).strip()[:200]
     role    = str(body.get("role",    "")).strip()[:120]
     company = str(body.get("company", "")).strip()[:200]
-    phone   = str(body.get("phone",   "")).strip()[:30]
     message = str(body.get("message", "")).strip()[:1000]
 
     if not name or not email:
@@ -2339,14 +2341,14 @@ async def submit_waitlist(request: Request):
         c.execute("""
             CREATE TABLE IF NOT EXISTS waitlist (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT, email TEXT, phone TEXT, role TEXT, company TEXT,
+                name TEXT, email TEXT, role TEXT, company TEXT,
                 message TEXT, submitted_at TEXT
             )
         """)
         from datetime import datetime
         c.execute(
-            "INSERT INTO waitlist (name, email, phone, role, company, message, submitted_at) VALUES (?,?,?,?,?,?,?)",
-            (name, email, phone, role, company, message, datetime.utcnow().isoformat())
+            "INSERT INTO waitlist (name, email, role, company, message, submitted_at) VALUES (?,?,?,?,?,?)",
+            (name, email, role, company, message, datetime.utcnow().isoformat())
         )
         conn.commit()
         conn.close()
@@ -2359,7 +2361,7 @@ async def submit_waitlist(request: Request):
         sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
         sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "support@homebridgegroup.co")
         if sendgrid_key:
-            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nRole: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
+            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\nRole: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
             await _httpx.AsyncClient().post(
                 "https://api.sendgrid.com/v3/mail/send",
                 headers={"Authorization": f"Bearer {sendgrid_key}", "Content-Type": "application/json"},
