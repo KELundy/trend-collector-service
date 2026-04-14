@@ -39,9 +39,10 @@ class AgentProfileModel(BaseModel):
     languagePref: Optional[str] = Field("english")
     state: Optional[str] = Field(None)
     # CTA / Booking fields — agent configures once, appear in every post
-    ctaType:  Optional[str] = Field(None)   # "calendar" | "text" | "email" | "authority"
-    ctaUrl:   Optional[str] = Field(None)   # e.g. calendly.com/kevin-lundy
-    ctaLabel: Optional[str] = Field(None)   # e.g. "Book a free 15-min call"
+    ctaType:    Optional[str]  = Field(None)   # legacy single — kept for backward compat
+    ctaUrl:     Optional[str]  = Field(None)
+    ctaLabel:   Optional[str]  = Field(None)
+    ctaMethods: Optional[List[Dict[str, str]]] = Field(default_factory=list)  # [{type, url, label}, ...]
     # MLS data — agent pastes from their MLS report for hyper-local stats
     mlsData:  Optional[str] = Field(None)
     # Voice Profile fields — Zone of Greatness / authentic differentiation
@@ -152,31 +153,44 @@ def _build_content_prompt(payload):
     )
     brokerage_compliance = brokerage if brokerage else "agent's brokerage"
 
-    # ── CTA / booking block ───────────────────────────────────────────────────
-    cta_url   = profile.ctaUrl   or ""
-    cta_label = profile.ctaLabel or ""
-    cta_type  = profile.ctaType  or ""
-    if cta_url:
-        if cta_type == "calendar":
-            cta_instruction = (
-                "CTA REQUIREMENT: The cta field MUST end with a calendar booking link.\n"
-                f'Use label: "{cta_label or "Book a free 15-min call"}"\n'
-                f"URL: {cta_url}\n"
-                f'Format it as: "{cta_label or "Book a free 15-min call"}: {cta_url}"\n'
-                "This is a real link — include it verbatim. Agents lose leads without it."
-            )
-        elif cta_type == "text":
-            cta_instruction = (
-                "CTA REQUIREMENT: The cta field MUST invite a direct text message.\n"
-                f'Label: "{cta_label or "Text me directly"}"\n'
-                f"Link: {cta_url}\n"
-                f'Format: "{cta_label or "Text me directly"}: {cta_url}"'
-            )
-        else:
-            cta_instruction = (
-                f"CTA REQUIREMENT: The cta field MUST include this link verbatim: {cta_url}\n"
-                f'Label: "{cta_label or "Get in touch"}"'
-            )
+    # ── CTA / booking block — multi-method support ──────────────────────────
+    methods = profile.ctaMethods or []
+    # Filter to methods that have a URL
+    active_methods = [m for m in methods if isinstance(m, dict) and m.get("url","").strip()]
+    # Fallback to legacy single fields if no ctaMethods
+    if not active_methods and (profile.ctaUrl or "").strip():
+        active_methods = [{"type": profile.ctaType or "calendar",
+                           "url":  profile.ctaUrl  or "",
+                           "label": profile.ctaLabel or ""}]
+
+    if active_methods:
+        type_phrases = {
+            "calendar": "calendar booking link",
+            "text":     "direct text number",
+            "phone":    "phone number",
+            "email":    "email address",
+            "website":  "website URL",
+            "authority":"authority page URL",
+        }
+        method_lines = []
+        for m in active_methods:
+            t   = m.get("type","calendar")
+            url = m.get("url","").strip()
+            lbl = m.get("label","").strip()
+            phrase = type_phrases.get(t, "contact link")
+            if lbl:
+                method_lines.append(f'  • {lbl}: {url}  [{phrase}]')
+            else:
+                method_lines.append(f'  • {url}  [{phrase}]')
+        combined = "\n".join(method_lines)
+        cta_instruction = (
+            f"CTA REQUIREMENT: The cta field MUST include ALL of the following contact methods verbatim — "
+            f"weave them naturally into a single, human-sounding call to action.\n"
+            f"Contact methods:\n{combined}\n"
+            f"Do not invent labels. Use the provided labels exactly. "
+            f"If multiple methods are listed, present them as natural options: "
+            f"'Book a call, send a text, or visit my site — whatever works best for you.'"
+        )
     else:
         cta_instruction = (
             "CTA REQUIREMENT: Write a low-pressure genuine invitation to a conversation. "
