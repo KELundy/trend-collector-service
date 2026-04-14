@@ -2317,8 +2317,43 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
     return {"image_url": image_url}
 
 
+# ── Waitlist IP-based rate limiter ───────────────────────────────────────────
+# Prevents bot/spam abuse of the public contact form.
+# In-memory rolling window — resets on server restart, which is acceptable
+# for a walkthrough-request form (not a payment or auth endpoint).
+_waitlist_rate: dict = {}   # { ip: [unix_timestamp, ...] }
+_WAITLIST_MAX    = 3        # max submissions allowed per window
+_WAITLIST_WINDOW = 3600     # rolling window in seconds (1 hour)
+
+def _waitlist_check_rate_limit(ip: str) -> bool:
+    """
+    Returns True (request allowed) or False (rate limited).
+    Prunes stale timestamps on every call — no background cleanup needed.
+    """
+    now          = time.time()
+    window_start = now - _WAITLIST_WINDOW
+    hits         = [t for t in _waitlist_rate.get(ip, []) if t > window_start]
+    if len(hits) >= _WAITLIST_MAX:
+        return False
+    hits.append(now)
+    _waitlist_rate[ip] = hits
+    return True
+
+
 @app.post("/waitlist")
 async def submit_waitlist(request: Request):
+    # ── IP extraction — Cloudflare passes real IP in x-forwarded-for ─────────
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    if not _waitlist_check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests from this address. Please try again later."
+        )
+
     try:
         body = await request.json()
     except Exception:
@@ -2326,6 +2361,7 @@ async def submit_waitlist(request: Request):
 
     name    = str(body.get("name",    "")).strip()[:120]
     email   = str(body.get("email",   "")).strip()[:200]
+    phone   = str(body.get("phone",   "")).strip()[:30]
     role    = str(body.get("role",    "")).strip()[:120]
     company = str(body.get("company", "")).strip()[:200]
     message = str(body.get("message", "")).strip()[:1000]
@@ -2341,14 +2377,19 @@ async def submit_waitlist(request: Request):
         c.execute("""
             CREATE TABLE IF NOT EXISTS waitlist (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT, email TEXT, role TEXT, company TEXT,
+                name TEXT, email TEXT, phone TEXT, role TEXT, company TEXT,
                 message TEXT, submitted_at TEXT
             )
         """)
+        # Safe migration: add phone column if table existed before this change
+        try:
+            c.execute("ALTER TABLE waitlist ADD COLUMN phone TEXT")
+        except Exception:
+            pass  # Column already exists — not an error
         from datetime import datetime
         c.execute(
-            "INSERT INTO waitlist (name, email, role, company, message, submitted_at) VALUES (?,?,?,?,?,?)",
-            (name, email, role, company, message, datetime.utcnow().isoformat())
+            "INSERT INTO waitlist (name, email, phone, role, company, message, submitted_at) VALUES (?,?,?,?,?,?,?)",
+            (name, email, phone, role, company, message, datetime.utcnow().isoformat())
         )
         conn.commit()
         conn.close()
@@ -2361,7 +2402,8 @@ async def submit_waitlist(request: Request):
         sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
         sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "support@homebridgegroup.co")
         if sendgrid_key:
-            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\nRole: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
+            phone_line = f"Phone: {phone}\n" if phone else ""
+            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\n{phone_line}Role: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
             await _httpx.AsyncClient().post(
                 "https://api.sendgrid.com/v3/mail/send",
                 headers={"Authorization": f"Bearer {sendgrid_key}", "Content-Type": "application/json"},
