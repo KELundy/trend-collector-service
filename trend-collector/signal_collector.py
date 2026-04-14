@@ -166,6 +166,7 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     Three-tier signal collection for a single agent.
 
     Tier 1 — Hyper-local: specific neighborhoods and service areas
+             SKIPPED when no service areas are set — starts at Tier 2 instead.
     Tier 2 — Metro: broader city/market level
     Tier 3 — National niche: national trends for the agent's primary niche
 
@@ -199,7 +200,11 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     total_saved = 0
 
     # ── TIER 1: Hyper-local ──────────────────────────────────────────────────
-    tier1_prompt = f"""You are a hyper-local real estate market intelligence researcher.
+    # Only run Tier 1 when the agent has specific service areas saved.
+    # Without named neighborhoods the hyper-local prompt returns thin results
+    # and wastes a Claude call — metro (Tier 2) is the right starting scope.
+    if service_areas:
+        tier1_prompt = f"""You are a hyper-local real estate market intelligence researcher.
 
 Search the web for recent news and developments specifically in these neighborhoods: {areas_str} in {market_str}.
 
@@ -225,18 +230,22 @@ Return ONLY a valid JSON array of up to 5 signals:
 
 Return ONLY the JSON array."""
 
-    tier1_signals = _search_signals(client, tier1_prompt, user_id)
-    strong1       = _strong_signal_count(tier1_signals)
-    if tier1_signals:
-        total_saved += _save_signals(tier1_signals, user_id, "local", areas_str)
-        print(f"[Signals] Tier 1 (local): {len(tier1_signals)} signals, {strong1} strong — user {user_id}")
+        tier1_signals = _search_signals(client, tier1_prompt, user_id)
+        strong1       = _strong_signal_count(tier1_signals)
+        if tier1_signals:
+            total_saved += _save_signals(tier1_signals, user_id, "local", areas_str)
+            print(f"[Signals] Tier 1 (local): {len(tier1_signals)} signals, {strong1} strong — user {user_id}")
 
-    if strong1 >= MIN_STRONG_SIGNALS:
-        print(f"[Signals] ✓ User {user_id} — {total_saved} saved from Tier 1. Done.")
-        return
+        if strong1 >= MIN_STRONG_SIGNALS:
+            print(f"[Signals] ✓ User {user_id} — {total_saved} saved from Tier 1. Done.")
+            return
+
+        print(f"[Signals] Tier 1 thin ({strong1} strong) — escalating to Tier 2 (metro) for user {user_id}")
+    else:
+        # No service areas configured — fall back to market city at Tier 2 scope
+        print(f"[Signals] No service areas set for user {user_id} — starting at Tier 2 (market: {market_str})")
 
     # ── TIER 2: Metro-level ──────────────────────────────────────────────────
-    print(f"[Signals] Tier 1 thin ({strong1} strong) — escalating to Tier 2 (metro) for user {user_id}")
 
     tier2_prompt = f"""You are a metro-level real estate market intelligence researcher.
 
