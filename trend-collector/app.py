@@ -665,7 +665,6 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
         print(f"[Scheduler] ✗ Notification error (content was saved): {notify_err}")
 
 
-def classify_topic_to_niches(topic: str) -> list:
     prompt = f"""You are a real estate niche classifier. Given a trend topic, return a JSON list of real estate niches it belongs to. No explanation, only JSON.\nTrend topic: "{topic}" """
     try:
         response = anthropic_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=200, messages=[{"role": "user", "content": prompt}])
@@ -843,59 +842,6 @@ async def validate_demo_token(token: str, request: Request):
     conn.commit()
     conn.close()
     return {"valid": True, "message": "Demo access granted"}
-
-
-@app.post("/content/demo-generate")
-async def demo_generate_content(request: Request):
-    """
-    Demo content generation — no auth required.
-    Parses the same payload the frontend sends to /content/generate-content.
-    Called by demo-mode visitors who have no JWT.
-    Uses the agent profile supplied in the request body (Brooke Callahan).
-    """
-    body          = await request.json()
-    agent_profile = body.get("agentProfile", {})
-    identity      = body.get("identity", {})
-    niches        = identity.get("primaryCategories", [])
-    niche         = niches[0] if niches else "Residential Buying & Selling"
-
-    try:
-        result = generate_content_core(
-            agent_name            = agent_profile.get("agentName", "Brooke Callahan"),
-            brokerage             = agent_profile.get("brokerage", "eXp Realty — Austin"),
-            market                = agent_profile.get("market", "Austin, TX"),
-            niche                 = niche,
-            situation             = body.get("situation", "Market update and current conditions"),
-            persona               = body.get("persona") or "homeowners",
-            tone                  = body.get("tone") or "Professional",
-            length                = body.get("length") or "Standard",
-            trends                = body.get("selectedTrends", []),
-            brand_voice           = agent_profile.get("brandVoice", ""),
-            short_bio             = agent_profile.get("shortBio", ""),
-            audience              = agent_profile.get("audienceDescription", ""),
-            words_avoid           = agent_profile.get("wordsAvoid", ""),
-            words_prefer          = agent_profile.get("wordsPrefer", ""),
-            mls_names             = agent_profile.get("mlsNames", []),
-            state                 = agent_profile.get("state", "TX"),
-            cta_type              = agent_profile.get("ctaType", ""),
-            cta_url               = agent_profile.get("ctaUrl", ""),
-            cta_label             = agent_profile.get("ctaLabel", ""),
-            origin_story          = agent_profile.get("originStory", ""),
-            unfair_advantage      = agent_profile.get("unfairAdvantage", ""),
-            signature_perspective = agent_profile.get("signaturePerspective", ""),
-            not_for_client        = agent_profile.get("notForClient", ""),
-        )
-        # generate_content_core returns {"content":{...},"compliance":{...}}
-        # Frontend expects flat format matching the real /generate-content endpoint
-        content = dict(result["content"])
-        if "generated_at" in content:
-            from datetime import datetime as _dt_dg
-            val = content["generated_at"]
-            if isinstance(val, _dt_dg):
-                content["generated_at"] = val.isoformat()
-        return {**content, "compliance": result["compliance"]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Demo generation failed: {str(e)}")
 
 
 @app.post("/office/invite")
@@ -2379,6 +2325,7 @@ async def submit_waitlist(request: Request):
     email   = str(body.get("email",   "")).strip()[:200]
     role    = str(body.get("role",    "")).strip()[:120]
     company = str(body.get("company", "")).strip()[:200]
+    phone   = str(body.get("phone",   "")).strip()[:30]
     message = str(body.get("message", "")).strip()[:1000]
 
     if not name or not email:
@@ -2392,14 +2339,14 @@ async def submit_waitlist(request: Request):
         c.execute("""
             CREATE TABLE IF NOT EXISTS waitlist (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT, email TEXT, role TEXT, company TEXT,
+                name TEXT, email TEXT, phone TEXT, role TEXT, company TEXT,
                 message TEXT, submitted_at TEXT
             )
         """)
         from datetime import datetime
         c.execute(
-            "INSERT INTO waitlist (name, email, role, company, message, submitted_at) VALUES (?,?,?,?,?,?)",
-            (name, email, role, company, message, datetime.utcnow().isoformat())
+            "INSERT INTO waitlist (name, email, phone, role, company, message, submitted_at) VALUES (?,?,?,?,?,?,?)",
+            (name, email, phone, role, company, message, datetime.utcnow().isoformat())
         )
         conn.commit()
         conn.close()
@@ -2412,7 +2359,7 @@ async def submit_waitlist(request: Request):
         sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
         sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "support@homebridgegroup.co")
         if sendgrid_key:
-            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\nRole: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
+            email_body = f"""New First Look Request\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nRole: {role}\nCompany: {company}\nMessage: {message}\n\nSubmitted via homebridgegroup.co"""
             await _httpx.AsyncClient().post(
                 "https://api.sendgrid.com/v3/mail/send",
                 headers={"Authorization": f"Bearer {sendgrid_key}", "Content-Type": "application/json"},
