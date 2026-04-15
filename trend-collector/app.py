@@ -2966,6 +2966,167 @@ async def get_team_code(current_user: dict = Depends(get_current_user)):
     return {"team_code": hashed, "user_id": current_user["id"]}
 
 
+# ─────────────────────────────────────────────────────────
+# PARTNER PROGRAM
+# Always "Partner Program" — never "affiliate program"
+# Earnings are "Partner Rewards" — never "commissions"
+#
+# GET  /partner/me              — current user's partner record (404 if not enrolled)
+# POST /partner/enroll          — enroll in partner program
+# GET  /partner/payouts         — payout history for current partner
+# GET  /partner/referrals       — referred agents list
+# POST /partner/approve/{id}    — admin: approve pending broker partner
+# GET  /admin/partners          — admin: list all enrolled partners
+# ─────────────────────────────────────────────────────────
+
+class PartnerEnrollRequest(BaseModel):
+    tier: str = "referral"  # 'referral' | 'broker'
+
+
+@app.get("/partner/me")
+async def get_my_partner_record(current_user: dict = Depends(get_current_user)):
+    """
+    Return the current user's partner record.
+    Returns 404 if not enrolled — partner.js uses this to decide
+    whether to show the enrollment flow or the dashboard.
+    """
+    from database import partner_get as _pg
+    partner = _pg(current_user["id"])
+    if not partner:
+        raise HTTPException(404, "Not enrolled in the Partner Program.")
+    return {"partner": partner}
+
+
+@app.post("/partner/enroll")
+async def enroll_in_partner_program(
+    body: PartnerEnrollRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Enroll the current user in the Partner Program.
+    Referral tier: auto-approved, code generated immediately.
+    Broker tier:   status='pending', requires admin approval.
+    Elite tier:    invitation-only, cannot be self-enrolled.
+    """
+    from database import partner_enroll as _pe, partner_get as _pg
+
+    tier = (body.tier or "referral").lower().strip()
+    valid_tiers = ("referral", "broker")
+    if tier not in valid_tiers:
+        raise HTTPException(
+            400,
+            "Elite tier is invitation-only. Referral and Broker tiers are available."
+            if tier == "elite"
+            else f"Invalid tier. Choose 'referral' or 'broker'."
+        )
+
+    # Broker tier only available to licensed roles
+    if tier == "broker" and current_user.get("role") not in (
+        "agent", "broker", "admin", "super_admin"
+    ):
+        raise HTTPException(
+            403, "Broker Partner tier requires a licensed real estate role."
+        )
+
+    # If already enrolled and active, just return the existing record
+    existing = _pg(current_user["id"])
+    if existing and existing.get("status") == "active":
+        return {
+            "partner": existing,
+            "message": "Already enrolled.",
+        }
+
+    partner = _pe(current_user["id"], tier)
+    if not partner:
+        raise HTTPException(500, "Enrollment failed — please try again.")
+
+    msg = (
+        "Welcome to the Partner Program! Your referral code is ready."
+        if tier == "referral"
+        else "Application submitted — we'll review within 1–2 business days."
+    )
+    return {"partner": partner, "message": msg}
+
+
+@app.get("/partner/payouts")
+async def get_my_partner_payouts(current_user: dict = Depends(get_current_user)):
+    """Return payout history for the current partner."""
+    from database import partner_get as _pg, partner_payout_list as _ppl
+
+    partner = _pg(current_user["id"])
+    if not partner:
+        raise HTTPException(404, "Not enrolled in the Partner Program.")
+
+    payouts = _ppl(partner["id"])
+    return {"payouts": payouts, "count": len(payouts)}
+
+
+@app.get("/partner/referrals")
+async def get_my_partner_referrals(current_user: dict = Depends(get_current_user)):
+    """Return referral attributions for the current partner, joined with agent details."""
+    from database import partner_get as _pg, get_conn as _gc_pr
+
+    partner = _pg(current_user["id"])
+    if not partner:
+        raise HTTPException(404, "Not enrolled in the Partner Program.")
+
+    conn = _gc_pr()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT ra.id, ra.attribution_type, ra.referral_code,
+               ra.attributed_at, ra.converted_at,
+               u.email, u.agent_name, u.brokerage
+        FROM referral_attributions ra
+        JOIN users u ON u.id = ra.referred_user_id
+        WHERE ra.partner_id = ?
+        ORDER BY ra.attributed_at DESC
+    """, (partner["id"],))
+    referrals = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    return {"referrals": referrals, "count": len(referrals)}
+
+
+@app.post("/partner/approve/{partner_id}")
+async def approve_partner_application(
+    partner_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Admin or super_admin approves a pending Broker Partner application.
+    Sets status to 'active' and records the approving admin.
+    """
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    from database import partner_approve as _pa
+    success = _pa(partner_id, current_user["id"])
+    if not success:
+        raise HTTPException(
+            404, "Partner not found or already approved."
+        )
+
+    from database import log_audit_event as _lae
+    _lae(
+        actor_id  = current_user["id"],
+        action    = "partner_approved",
+        target_id = partner_id,
+        detail    = f"Broker Partner application approved by {current_user.get('email','')}",
+    )
+    return {"ok": True, "partner_id": partner_id, "status": "active"}
+
+
+@app.get("/admin/partners")
+async def admin_list_all_partners(current_user: dict = Depends(get_current_user)):
+    """Admin: list all enrolled partners for the Partners section of the admin dashboard."""
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    from database import partner_list_all as _pla
+    partners = _pla()
+    return {"partners": partners, "count": len(partners)}
+
+
 @app.post("/auth/profile/notification-email")
 async def update_notification_email(
     payload: dict,
