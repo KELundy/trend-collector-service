@@ -92,7 +92,9 @@ from collectors.tiktok_trends import fetch_tiktok_trends
 from anthropic import Anthropic
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-COLLECTION_INTERVAL_SECONDS = 6 * 60 * 60
+COLLECTION_INTERVAL_SECONDS = int(os.getenv("TREND_INTERVAL_SECONDS", str(24 * 60 * 60)))
+TREND_ENABLED  = os.getenv("TREND_ENABLED",  "true").lower() == "true"
+SIGNAL_ENABLED = os.getenv("SIGNAL_ENABLED", "true").lower() == "true"
 
 app = FastAPI(
     title="HomeBridge Content Engine",
@@ -143,11 +145,14 @@ async def startup_event():
     t2 = threading.Thread(target=content_scheduler_worker, daemon=True)
     t2.start()
     print("[Startup] Starting hyper-local signal collector...")
-    try:
-        from signal_collector import start_signal_collector
-        start_signal_collector()
-    except Exception as e:
-        print(f"[Startup] Signal collector failed to start: {e}")
+    if SIGNAL_ENABLED:
+        try:
+            from signal_collector import start_signal_collector
+            start_signal_collector()
+        except Exception as e:
+            print(f"[Startup] Signal collector failed to start: {e}")
+    else:
+        print("[Startup] Signal collector DISABLED (SIGNAL_ENABLED=false) — set env var to true to enable.")
     print("[Startup] Ready.")
 
 
@@ -666,10 +671,15 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
 
 
 def classify_topic_to_niches(topic: str) -> list:
-    """Classify a trend topic into real estate niches using Claude."""
+    """Classify a trend topic into real estate niches using Claude.
+    Uses Haiku — background classification task, not user-facing content generation."""
     prompt = f"""You are a real estate niche classifier. Given a trend topic, return a JSON list of real estate niches it belongs to. No explanation, only JSON.\nTrend topic: "{topic}" """
     try:
-        response = anthropic_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=200, messages=[{"role": "user", "content": prompt}])
+        response = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}]
+        )
         return json.loads(response.content[0].text)
     except Exception:
         return []
@@ -692,14 +702,17 @@ def collect_all_trends() -> Dict[str, Any]:
 
 def trend_collection_worker():
     while True:
-        try:
-            print("[Trend Collector] Collecting trends...")
-            classified = collect_all_trends()
-            for niche, niche_trends in classified.items():
-                save_trends(niche_trends, niche)
-            print("[Trend Collector] Done.")
-        except Exception as e:
-            print(f"[Trend Collector] Error: {e}")
+        if TREND_ENABLED:
+            try:
+                print("[Trend Collector] Collecting trends...")
+                classified = collect_all_trends()
+                for niche, niche_trends in classified.items():
+                    save_trends(niche_trends, niche)
+                print("[Trend Collector] Done.")
+            except Exception as e:
+                print(f"[Trend Collector] Error: {e}")
+        else:
+            print("[Trend Collector] DISABLED (TREND_ENABLED=false) — skipping this cycle.")
         time.sleep(COLLECTION_INTERVAL_SECONDS)
 
 
