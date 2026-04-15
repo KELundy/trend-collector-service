@@ -851,18 +851,76 @@ async def invite_agent(request: Request, current_user=Depends(get_current_user))
     body  = await request.json()
     name  = (body.get("name")  or "").strip()
     email = (body.get("email") or "").strip()
+    phone = (body.get("phone") or "").strip()[:30]
     if not name or not email: raise HTTPException(400, "Name and email required")
+
+    # Persist invite to DB
     conn = database.get_conn()
     c    = conn.cursor()
     try:
-        c.execute("""CREATE TABLE IF NOT EXISTS office_invites (id INTEGER PRIMARY KEY AUTOINCREMENT, office_id INTEGER NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, invited_at TEXT DEFAULT (datetime('now')), status TEXT DEFAULT 'pending')""")
-        c.execute("INSERT INTO office_invites (office_id, name, email) VALUES (?,?,?)", (current_user["id"], name, email))
+        c.execute("""CREATE TABLE IF NOT EXISTS office_invites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            office_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            phone TEXT,
+            invited_at TEXT DEFAULT (datetime('now')),
+            status TEXT DEFAULT 'pending'
+        )""")
+        # Add phone column if table already existed without it
+        try: c.execute("ALTER TABLE office_invites ADD COLUMN phone TEXT")
+        except Exception: pass
+        c.execute("INSERT INTO office_invites (office_id, name, email, phone) VALUES (?,?,?,?)",
+                  (current_user["id"], name, email, phone))
         conn.commit()
     except Exception as e:
         conn.close()
         raise HTTPException(500, f"Could not store invite: {e}")
     conn.close()
-    return {"ok": True, "message": f"Invite queued for {name} ({email})"}
+
+    # Build invite link — agents register and get linked to this office automatically
+    office_code = current_user.get("office_code", "")
+    frontend_url = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co")
+    invite_url   = f"{frontend_url}/register?office={office_code}" if office_code else frontend_url
+    inviter_name = current_user.get("agent_name") or current_user.get("email", "Your broker")
+
+    # Send invite email via SendGrid
+    email_sent = False
+    sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
+    sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "support@homebridgegroup.co")
+    if sendgrid_key:
+        try:
+            import httpx as _httpx
+            html_body = f"""
+<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;">
+  <div style="font-size:22px;font-weight:700;color:#1a1a1a;margin-bottom:8px;">You're invited to HomeBridge</div>
+  <div style="font-size:15px;color:#444;margin-bottom:24px;">
+    <strong>{inviter_name}</strong> has invited you to join HomeBridge — the platform that writes hyper-local real estate content in your voice, checks it for compliance, and sends it to you for one-tap approval.
+  </div>
+  <a href="{invite_url}" style="display:inline-block;background:#1749c9;color:#fff;font-weight:700;font-size:15px;padding:14px 28px;border-radius:8px;text-decoration:none;margin-bottom:24px;">Accept Invitation →</a>
+  <div style="font-size:13px;color:#666;margin-top:16px;">
+    Or copy this link: <a href="{invite_url}" style="color:#1749c9;">{invite_url}</a>
+  </div>
+  <div style="margin-top:32px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:16px;">
+    HomeBridge · homebridgegroup.co
+  </div>
+</div>"""
+            payload = {
+                "personalizations": [{"to": [{"email": email, "name": name}]}],
+                "from": {"email": sendgrid_from, "name": "HomeBridge"},
+                "subject": f"{inviter_name} invited you to HomeBridge",
+                "content": [{"type": "text/html", "value": html_body}],
+            }
+            r = await _httpx.AsyncClient().post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={"Authorization": f"Bearer {sendgrid_key}", "Content-Type": "application/json"},
+                json=payload, timeout=10,
+            )
+            email_sent = r.status_code in (200, 202)
+        except Exception as e:
+            print(f"[Invite] Email send failed: {e}")
+
+    return {"ok": True, "email_sent": email_sent, "message": f"Invite {'sent' if email_sent else 'queued'} for {name} ({email})"}
 
 
 def check_paywall(user: dict):
