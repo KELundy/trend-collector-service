@@ -2096,12 +2096,16 @@ HARD RULES:
         raise HTTPException(status_code=502, detail=f"Error calling Claude: {str(e)}")
 
     # Extract text from response — may contain tool_use and tool_result blocks
+    # When web_search is used, Claude emits one or more intro text blocks before
+    # the final JSON block.  Joining ALL text blocks contaminates the JSON parse
+    # with preamble text.  Use only the LAST text block — that is always the
+    # structured JSON response regardless of how many searches Claude ran.
     try:
-        text_chunks = [
+        text_blocks = [
             b.text for b in (response.content or [])
             if getattr(b, "type", "") == "text"
         ]
-        raw_text = "\n\n".join(text_chunks).strip()
+        raw_text = text_blocks[-1].strip() if text_blocks else ""
         if not raw_text:
             raise ValueError("Claude returned empty content after research.")
     except Exception as e:
