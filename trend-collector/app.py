@@ -2610,119 +2610,226 @@ async def quick_approve(item_id: int, token: str = ""):
 
 
 
+# Platform display metadata for the approve page
+_PLAT_ICONS = {
+    "instagram": "📸", "facebook": "📘", "linkedin": "💼",
+    "tiktok": "🎵",  "youtube": "▶️",  "twitter": "𝕏",
+    "threads": "🧵",  "reddit": "🤖",   "nextdoor": "🏘️",
+    "email": "✉️",   "google": "🔍",
+}
+_PLAT_LABELS = {
+    "instagram": "Instagram", "facebook": "Facebook",  "linkedin": "LinkedIn",
+    "tiktok":    "TikTok",    "youtube":  "YouTube",   "twitter":  "X / Twitter",
+    "threads":   "Threads",   "reddit":   "Reddit",    "nextdoor": "Nextdoor",
+    "email":     "Email",     "google":   "Google",
+}
+
+
 def _approval_page(state: str, headline: str, agent_name: str, niche: str,
                    post_body: str = "", compliance_status: str = "",
-                   token: str = "") -> str:
+                   token: str = "", platforms: list = None,
+                   published_to: list = None) -> str:
     """
-    Renders the approval page.
+    Renders the mobile-first approval page.
     state values:
-      'preview'     — show content + Approve button (GET, before any action)
-      'success'     — content was just approved (POST response)
-      'already_done'— content was already approved/published
-      'expired'     — token expired, show resend option
-      'error'       — generic error
+      'preview'      — show content + platform checkboxes + Approve buttons
+      'success'      — approved (and optionally published), shows CIR™ confirmation
+      'already_done' — content was already approved/published
+      'expired'      — token expired, show resend option
+      'error'        — generic error
+
+    platforms    — list of {platform, platform_handle} dicts from DB (for preview)
+    published_to — list of platform id strings that were published (for success)
     """
     app_url = "https://app.homebridgegroup.co?view=agent"
+    if platforms is None:
+        platforms = []
+    if published_to is None:
+        published_to = []
 
-    # ── Shared styles ────────────────────────────────────────────────────────
+    # ── Shared styles ─────────────────────────────────────────────────────────
     styles = """
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         background:#f5f4f0;min-height:100vh;display:flex;align-items:center;
-         justify-content:center;padding:20px}
-    .card{background:#fff;border-radius:16px;padding:36px 32px;max-width:560px;
+         background:#f5f4f0;min-height:100vh;padding:20px 16px;
+         display:flex;flex-direction:column;align-items:center}
+    .card{background:#fff;border-radius:16px;padding:28px 22px;max-width:520px;
           width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08)}
-    .brand{font-size:12px;font-weight:700;letter-spacing:.12em;
-           text-transform:uppercase;color:#787870;margin-bottom:20px}
-    .niche-badge{display:inline-block;background:#eef2fb;color:#1749c9;
-                 font-size:11px;font-weight:600;padding:3px 10px;
-                 border-radius:20px;margin-bottom:16px}
-    h1{font-size:20px;font-weight:700;color:#0f0f0d;margin-bottom:10px;line-height:1.35}
-    .post-body{font-size:14px;color:#3d3d38;line-height:1.75;
-               background:#f9f8f6;border-radius:10px;padding:18px 20px;
-               margin:16px 0;white-space:pre-wrap;word-break:break-word}
-    .comp-badge{display:inline-flex;align-items:center;gap:6px;
-                font-size:12px;font-weight:600;padding:5px 12px;
-                border-radius:20px;margin-bottom:20px}
+    .brand{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+           color:#787870;margin-bottom:18px}
+    .brand b{color:#1749c9}
+    .niche-pill{display:inline-block;background:#eef2fb;color:#1749c9;font-size:11px;
+                font-weight:600;padding:3px 10px;border-radius:20px;margin-bottom:12px}
+    h1{font-size:18px;font-weight:700;color:#0f0f0d;line-height:1.4;margin-bottom:12px}
+    .comp{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
+          padding:5px 12px;border-radius:20px;margin-bottom:14px}
     .comp-pass{background:#f0fdf4;color:#15803d}
-    .comp-review{background:#fffbeb;color:#b45309}
-    .comp-attention{background:#fef2f2;color:#b91c1c}
-    .btn{display:block;width:100%;padding:14px;border-radius:10px;
-         font-size:15px;font-weight:700;cursor:pointer;border:none;
-         font-family:inherit;transition:opacity .15s;margin-top:8px}
+    .comp-warn{background:#fffbeb;color:#b45309}
+    .comp-fail{background:#fef2f2;color:#b91c1c}
+    .post{font-size:14px;color:#3d3d38;line-height:1.75;background:#f9f8f6;
+          border-radius:10px;padding:16px 18px;margin-bottom:20px;
+          white-space:pre-wrap;word-break:break-word;
+          max-height:300px;overflow-y:auto}
+    .sect-label{font-size:10px;font-weight:700;text-transform:uppercase;
+                letter-spacing:.08em;color:#aeaeb2;margin-bottom:10px}
+    .plat-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+    .plat-chip{display:flex;align-items:center;gap:7px;padding:9px 14px;
+               border-radius:10px;border:1.5px solid #e5e5ea;background:#fff;
+               cursor:pointer;font-size:13px;font-weight:500;color:#3d3d3f;
+               transition:all .15s;user-select:none;-webkit-user-select:none}
+    .plat-chip.on{border-color:#1749c9;background:#eef2fb;color:#1749c9;font-weight:600}
+    .plat-chip input{position:absolute;opacity:0;width:0;height:0}
+    .no-plat{background:#f9f8f6;border:1px solid #e5e5ea;border-radius:10px;
+             padding:14px 16px;font-size:13px;color:#787870;margin-bottom:18px;
+             line-height:1.55}
+    .no-plat a{color:#1749c9;font-weight:600;text-decoration:none}
+    .btn{display:block;width:100%;padding:15px;border-radius:12px;font-size:15px;
+         font-weight:700;cursor:pointer;border:none;font-family:inherit;
+         letter-spacing:-.01em;text-align:center;transition:opacity .15s;margin-top:8px}
     .btn:hover{opacity:.88}
-    .btn-approve{background:#15803d;color:#fff}
-    .btn-secondary{background:transparent;border:1.5px solid #e8e7e0;
-                   color:#3d3d38;margin-top:10px;font-size:13px;font-weight:600}
+    .btn:disabled{opacity:.4;cursor:default}
+    .btn-green{background:#15803d;color:#fff}
+    .btn-outline{background:transparent;border:1.5px solid #e5e5ea;
+                 color:#3d3d38;font-size:14px;padding:12px}
     .result-icon{font-size:44px;margin-bottom:14px;display:block;text-align:center}
-    .result-title{font-size:22px;font-weight:700;color:#0f0f0d;
-                  text-align:center;margin-bottom:10px}
-    .result-msg{font-size:14px;color:#3d3d38;line-height:1.7;
-                text-align:center;margin-bottom:20px}
-    .cir{font-size:11px;font-weight:700;letter-spacing:.08em;
-         text-transform:uppercase;color:#1749c9;background:#eef2fb;
-         padding:5px 12px;border-radius:20px;display:inline-block;margin-bottom:16px}
-    .footer{margin-top:24px;font-size:12px;color:#b0afa6;text-align:center}
+    .result-title{font-size:22px;font-weight:700;color:#0f0f0d;text-align:center;
+                  margin-bottom:10px}
+    .result-msg{font-size:14px;color:#3d3d38;line-height:1.7;text-align:center;
+                margin-bottom:20px}
+    .cir-badge{font-size:11px;font-weight:700;letter-spacing:.08em;
+               text-transform:uppercase;color:#1749c9;background:#eef2fb;
+               padding:5px 12px;border-radius:20px;display:inline-block;
+               margin-bottom:16px}
+    .pub-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;
+              margin-bottom:18px}
+    .pub-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;
+              font-weight:600;padding:5px 12px;border-radius:20px;
+              background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}
+    .footer{margin-top:22px;font-size:12px;color:#b0afa6;text-align:center;
+            line-height:1.6}
     a{color:#1749c9;text-decoration:none;font-weight:600}
     """
 
-    # ── Compliance badge HTML ─────────────────────────────────────────────────
+    # ── Compliance badge ───────────────────────────────────────────────────────
     if compliance_status in ("compliant", "pass", "ok"):
-        comp_html = "<span class='comp-badge comp-pass'>✓ Compliance Verified</span>"
+        comp_html = "<span class='comp comp-pass'>✓ Compliance Verified</span>"
     elif compliance_status in ("review", "warn"):
-        comp_html = "<span class='comp-badge comp-review'>⚠ Soft flags noted — safe to approve, review notes below</span>"
-    elif compliance_status == "attention":
-        comp_html = "<span class='comp-badge comp-attention'>✗ Attention Required — please review before approving</span>"
+        comp_html = "<span class='comp comp-warn'>⚠ Soft flags — safe to approve, review notes in app</span>"
+    elif compliance_status in ("attention", "fail"):
+        comp_html = "<span class='comp comp-fail'>✗ Attention Required — review before approving</span>"
     else:
         comp_html = ""
 
-    # ── PREVIEW state — show content + Approve button ─────────────────────────
+    # ── PREVIEW state ─────────────────────────────────────────────────────────
     if state == "preview":
-        post_html = f"<div class='post-body'>{post_body}</div>" if post_body else ""
-        niche_html = f"<div class='niche-badge'>{niche}</div>" if niche else ""
+        niche_html = f"<div class='niche-pill'>{niche}</div>" if niche else ""
+        post_html  = f"<div class='post'>{post_body}</div>" if post_body else ""
+
+        # Build platform section
+        if platforms:
+            chips = ""
+            for p in platforms:
+                pid    = (p.get("platform") or "").lower()
+                handle = p.get("platform_handle") or p.get("handle") or ""
+                icon   = _PLAT_ICONS.get(pid, "🔗")
+                label  = _PLAT_LABELS.get(pid, pid.capitalize())
+                hdisplay = f" · {handle}" if handle else ""
+                chips += f"""<label class="plat-chip on" id="chip-{pid}">
+          <input type="checkbox" name="platforms" value="{pid}" checked
+                 onchange="toggleChip(this)"> {icon} {label}{hdisplay}
+        </label>"""
+            platform_section = f"""
+      <div class="sect-label">Publish to</div>
+      <div class="plat-grid">{chips}</div>"""
+            primary_btn = """<button type="submit" id="pub-btn" class="btn btn-green">
+        ✓ Approve &amp; Publish
+      </button>"""
+            secondary_btn = """<button type="submit" name="approve_only" value="1"
+              class="btn btn-outline">
+        Approve Only
+      </button>"""
+        else:
+            platform_section = f"""
+      <div class="no-plat">
+        📱 No social platforms connected yet.<br>
+        <a href="{app_url}">Connect platforms in the app →</a>
+      </div>"""
+            primary_btn = """<button type="submit" name="approve_only" value="1"
+              class="btn btn-green">
+        ✓ Approve This Post
+      </button>"""
+            secondary_btn = ""
+
+        plat_script = """
+<script>
+function toggleChip(cb) {
+  cb.closest('.plat-chip').classList.toggle('on', cb.checked);
+  var btn = document.getElementById('pub-btn');
+  if (!btn) return;
+  var any = [].some.call(document.querySelectorAll('.plat-chip input'), function(c){ return c.checked; });
+  btn.disabled = !any;
+  btn.textContent = any ? '✓ Approve & Publish' : 'Select a platform above';
+}
+</script>""" if platforms else ""
+
         return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Review Your Content — HomeBridge</title>
 <style>{styles}</style></head>
 <body><div class="card">
-  <div class="brand">HomeBridge · Content Approval</div>
+  <div class="brand">Home<b>Bridge</b> · Content Review</div>
   {niche_html}
   <h1>{headline}</h1>
   {comp_html}
   {post_html}
   <form method="POST" action="/approve?token={token}">
-    <button type="submit" class="btn btn-approve">✓ Approve This Post</button>
+    {platform_section}
+    {primary_btn}
+    {secondary_btn}
   </form>
-  <a href="{app_url}" style="display:block;text-align:center;margin-top:14px;
-     font-size:13px;color:#787870;">Edit in App instead →</a>
   <div class="footer">
-    Approving creates a CIR™ Certified Identity Record and marks this content
-    ready to publish. You can always edit or delete it in the app.
+    Approving creates a CIR™ Certified Identity Record.<br>
+    <a href="{app_url}">Edit in App instead →</a>
   </div>
-</div></body></html>"""
+</div>{plat_script}</body></html>"""
 
     # ── SUCCESS state ─────────────────────────────────────────────────────────
     if state == "success":
-        cir_html = f"<div class='cir'>CIR™ {niche}</div><br>" if niche else ""
+        # niche slot is overloaded with cir_id in the POST handler
+        cir_id   = niche  # passed as niche arg from POST handler
+        cir_html = f"<div class='cir-badge'>CIR™ {cir_id}</div><br>" if cir_id else ""
+
+        if published_to:
+            pub_chips = "".join(
+                f"<span class='pub-chip'>{_PLAT_ICONS.get(p,'🔗')} {_PLAT_LABELS.get(p, p.capitalize())}</span>"
+                for p in published_to
+            )
+            pub_html = f"<div class='pub-list'>{pub_chips}</div>"
+            action_line = "Your post has been approved, a CIR™ record created, and queued for publishing."
+            btn_label  = "Open App →"
+        else:
+            pub_html   = ""
+            action_line = "Your approval has been recorded and a CIR™ Certified Identity Record has been created. Open the app to publish when ready."
+            btn_label  = "Open App to Publish →"
+
         return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Content Approved — HomeBridge</title>
 <style>{styles}</style></head>
 <body><div class="card">
-  <div class="brand">HomeBridge</div>
+  <div class="brand">Home<b>Bridge</b></div>
   <span class="result-icon">✓</span>
   <div class="result-title">Content Approved</div>
   {cir_html}
+  {pub_html}
   <div class="result-msg">
-    <strong>{headline}</strong><br><br>
-    Your approval has been recorded and a CIR™ Certified Identity Record
-    has been created. This post is now ready to publish.
+    <strong>{headline}</strong><br><br>{action_line}
   </div>
-  <a href="{app_url}" class="btn btn-approve" style="text-align:center;display:block;
-     text-decoration:none;padding:14px;border-radius:10px;">
-    Open App to Publish →
+  <a href="{app_url}" class="btn btn-green"
+     style="text-decoration:none;display:block;padding:15px;border-radius:12px;">
+    {btn_label}
   </a>
   <div class="footer">HomeBridge · homebridgegroup.co</div>
 </div></body></html>"""
@@ -3215,16 +3322,27 @@ async def approval_preview(token: str = ""):
             status_code=200,
         )
 
+    # Fetch connected platforms for the platform checkbox section
+    try:
+        from database import get_platform_connections as _gpc
+        platforms = _gpc(record["user_id"])
+    except Exception:
+        platforms = []
+
     return HTMLResponse(_approval_page(
         "preview", headline, record.get("agent_name",""), record.get("niche",""),
         post_body=post_body, compliance_status=comp_status, token=token,
+        platforms=platforms,
     ))
 
 
 @app.post("/approve")
-async def approval_confirm(token: str = ""):
+async def approval_confirm(request: Request, token: str = ""):
     """
-    Performs the actual approval. Called by the Approve button form POST.
+    Performs the actual approval. Called by the Approve/Publish form POST.
+    Reads selected platform checkboxes from form data.
+    If platforms selected: approves + marks copied_platforms + sets published.
+    If approve_only flag: approves only, no platform update.
     """
     from database import validate_approval_token, consume_approval_token, library_update
     from fastapi.responses import HTMLResponse
@@ -3233,6 +3351,15 @@ async def approval_confirm(token: str = ""):
 
     if not token:
         return HTMLResponse(_approval_page("error", "No token provided.", "", ""), status_code=400)
+
+    # Read form data — platform checkboxes and approve_only flag
+    try:
+        form_data        = await request.form()
+        selected_platforms = list(form_data.getlist("platforms"))
+        approve_only     = bool(form_data.get("approve_only"))
+    except Exception:
+        selected_platforms = []
+        approve_only     = True  # safe default
 
     record = validate_approval_token(token)
     if not record:
@@ -3262,6 +3389,7 @@ async def approval_confirm(token: str = ""):
             status_code=200,
         )
 
+    # ── Step 1: Approve ───────────────────────────────────────────────────────
     consume_approval_token(token)
     updated = library_update(item_id, user_id, {
         "status":      "approved",
@@ -3274,11 +3402,26 @@ async def approval_confirm(token: str = ""):
     except Exception:
         headline = "Content approved"
 
-    # Pass CIR ID in the niche slot for the success page display
     cir_id = updated.get("cir_id", "") if updated else ""
+
+    # ── Step 2: Publish to selected platforms (if any) ────────────────────────
+    published_to = []
+    if selected_platforms and not approve_only:
+        try:
+            library_update(item_id, user_id, {
+                "status":           "published",
+                "copied_platforms": selected_platforms,
+                "published_at":     _dt_conf.utcnow().isoformat(),
+            })
+            published_to = selected_platforms
+            print(f"[Approve] Item {item_id} approved + published to {selected_platforms} for user {user_id}")
+        except Exception as pub_err:
+            # Publishing failure must never block approval — item is approved regardless
+            print(f"[Approve] Platform update failed (item still approved): {pub_err}")
 
     return HTMLResponse(_approval_page(
         "success", headline, record.get("agent_name",""), cir_id,
+        published_to=published_to,
     ))
 
 
