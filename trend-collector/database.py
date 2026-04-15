@@ -17,6 +17,67 @@ def get_conn():
 
 
 # ─────────────────────────────────────────────
+# PRIVATE HELPERS
+# ─────────────────────────────────────────────
+
+def _compliance_verdict(comp_raw) -> str:
+    """
+    Parse raw compliance JSON and return a normalized verdict string.
+    Centralizes the compliance-parsing logic that was previously duplicated
+    in 6 separate functions (get_user_results, calculate_identity_score,
+    generate_compliance_pdf, get_broker_office_stats, get_team_stats,
+    get_broker_agent_content).
+
+    Returns: 'pass' | 'warn' | 'fail' | 'pending'
+    """
+    try:
+        comp = json.loads(comp_raw) if isinstance(comp_raw, str) else comp_raw
+        if not isinstance(comp, dict):
+            return "pending"
+        # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
+        v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
+        if comp.get("passed") is True:
+            v = "pass"
+        if v in ("pass", "compliant", "ok", "green"):
+            return "pass"
+        if v in ("warn", "warning", "review"):
+            return "warn"
+        if v in ("attention", "fail", "error"):
+            return "fail"
+        return "pending"
+    except Exception:
+        return "pending"
+
+
+def _calc_lightweight_identity(c, uid: int, compliance_rate, published_count: int) -> int:
+    """
+    Compute a lightweight identity score (0–100) for broker/team dashboards.
+    Uses agent_setup JSON + published count + compliance rate.
+    Centralizes logic previously duplicated in get_broker_office_stats
+    and get_team_stats.
+    The full score engine is in calculate_identity_score().
+    """
+    score = 0
+    try:
+        c.execute("SELECT setup_json FROM agent_setup WHERE user_id=?", (uid,))
+        sr = c.fetchone()
+        if sr:
+            setup = json.loads(sr["setup_json"] or "{}")
+            if setup.get("shortBio", "").strip():   score += 15
+            if setup.get("market", "").strip():      score += 10
+            niches = setup.get("primaryNiches", [])
+            score += 10 if len(niches) >= 2 else (5 if len(niches) == 1 else 0)
+            if setup.get("brandVoice", "").strip():  score += 5
+        score += 30 if published_count >= 5 else (20 if published_count >= 2 else (10 if published_count >= 1 else 0))
+        if compliance_rate is not None:
+            score += 30 if compliance_rate == 100 else (22 if compliance_rate >= 90 else (12 if compliance_rate >= 75 else 0))
+        score = min(score, 100)
+    except Exception:
+        pass
+    return score
+
+
+# ─────────────────────────────────────────────
 # INIT — creates all tables on startup
 # ─────────────────────────────────────────────
 def init_db():
@@ -58,6 +119,9 @@ def init_db():
         ("generation_count",       "INTEGER DEFAULT 0"),
         ("generation_reset_date",  "TEXT DEFAULT NULL"),
         ("monthly_limit",          "INTEGER DEFAULT 30"),
+        # Partner Program — added Session 12
+        ("partner_tier",           "TEXT DEFAULT NULL"),
+        ("partner_code",           "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -134,6 +198,11 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+    # Non-destructive: Signal Exclusivity — track when a signal was consumed (Session 12)
+    try:
+        c.execute("ALTER TABLE local_signals ADD COLUMN used_at TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
 
     # Agent setup — stores identity/profile data server-side
     c.execute("""
@@ -227,6 +296,101 @@ def init_db():
             post_id          TEXT DEFAULT '',
             post_url         TEXT DEFAULT '',
             posted_at        TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Password reset tokens
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            token      TEXT UNIQUE NOT NULL,
+            expires_at TEXT NOT NULL,
+            used       INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Waitlist
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS waitlist (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            email      TEXT UNIQUE NOT NULL,
+            name       TEXT DEFAULT '',
+            source     TEXT DEFAULT '',
+            notes      TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Office invites — broker-initiated agent invitations
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS office_invites (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            broker_id   INTEGER NOT NULL,
+            email       TEXT NOT NULL,
+            phone       TEXT DEFAULT '',
+            agent_name  TEXT DEFAULT '',
+            status      TEXT DEFAULT 'pending',
+            token       TEXT UNIQUE,
+            invited_at  TEXT DEFAULT (datetime('now')),
+            accepted_at TEXT DEFAULT NULL,
+            FOREIGN KEY (broker_id) REFERENCES users(id)
+        )
+    """)
+
+    # ── PARTNER PROGRAM — Session 12 ──────────────────────────────────────────
+    # Always "Partner Program" — never "affiliate program"
+    # Earnings are "Partner Rewards" — never "commissions"
+
+    # Partners — enrolled users and their tier/status
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS partners (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id        INTEGER NOT NULL UNIQUE,
+            tier           TEXT    NOT NULL DEFAULT 'referral',
+            status         TEXT    NOT NULL DEFAULT 'pending',
+            referral_code  TEXT    NOT NULL UNIQUE,
+            enrolled_at    TEXT    DEFAULT (datetime('now')),
+            approved_at    TEXT    DEFAULT NULL,
+            approved_by    INTEGER DEFAULT NULL,
+            total_referred INTEGER DEFAULT 0,
+            total_earned   REAL    DEFAULT 0.0,
+            FOREIGN KEY (user_id)     REFERENCES users(id),
+            FOREIGN KEY (approved_by) REFERENCES users(id)
+        )
+    """)
+
+    # Referral attributions — tracks which partner referred which subscriber
+    # Last-touch wins. One attribution per referred_user lifetime.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS referral_attributions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            partner_id       INTEGER NOT NULL,
+            referred_user_id INTEGER NOT NULL UNIQUE,
+            attribution_type TEXT    NOT NULL DEFAULT 'link',
+            referral_code    TEXT    DEFAULT NULL,
+            attributed_at    TEXT    DEFAULT (datetime('now')),
+            converted_at     TEXT    DEFAULT NULL,
+            FOREIGN KEY (partner_id)       REFERENCES partners(id),
+            FOREIGN KEY (referred_user_id) REFERENCES users(id)
+        )
+    """)
+
+    # Partner payouts — monthly reward cycle
+    # 30-day holdback (Referral/Broker), 15-day (Elite), $50 minimum (Referral/Broker)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS partner_payouts (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            partner_id         INTEGER NOT NULL,
+            amount             REAL    NOT NULL,
+            period_start       TEXT    NOT NULL,
+            period_end         TEXT    NOT NULL,
+            status             TEXT    NOT NULL DEFAULT 'pending',
+            stripe_transfer_id TEXT    DEFAULT NULL,
+            created_at         TEXT    DEFAULT (datetime('now')),
+            paid_at            TEXT    DEFAULT NULL,
+            FOREIGN KEY (partner_id) REFERENCES partners(id)
         )
     """)
 
@@ -341,7 +505,7 @@ def migrate_roles_to_new_system():
 def migrate_approval_tokens():
     """
     Non-destructive migration — creates approval_tokens table if it doesn't exist.
-    Safe to call on every startup.
+    Safe to call on every startup. Table is also created in init_db().
     """
     conn = get_conn()
     c    = conn.cursor()
@@ -391,42 +555,8 @@ def log_audit_event(actor_id: int, action: str,
         conn.close()
     except Exception as e:
         print(f"[Audit] Log failed: {e}")
-
-
-    """Creates platform_connections and platform_posts tables if they don't exist."""
-    conn = get_conn()
-    c = conn.cursor()
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS platform_connections (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id           INTEGER NOT NULL,
-            platform          TEXT NOT NULL,
-            access_token      TEXT NOT NULL,
-            refresh_token     TEXT DEFAULT '',
-            expires_at        TEXT DEFAULT '',
-            platform_user_id  TEXT DEFAULT '',
-            platform_handle   TEXT DEFAULT '',
-            connected_at      TEXT DEFAULT (datetime('now')),
-            UNIQUE(user_id, platform)
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS platform_posts (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id          INTEGER NOT NULL,
-            library_item_id  INTEGER NOT NULL,
-            platform         TEXT NOT NULL,
-            post_id          TEXT DEFAULT '',
-            post_url         TEXT DEFAULT '',
-            posted_at        TEXT DEFAULT (datetime('now'))
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-    print("[DB] platform_connections and platform_posts tables ready.")
+    # NOTE: Orphaned CREATE TABLE block that previously ran here on every call
+    # has been removed. platform_connections and platform_posts are created in init_db().
 
 
 # ─────────────────────────────────────────────
@@ -574,15 +704,8 @@ def get_user_results(user_id: int) -> dict:
     passing = 0
     comp_rows = c.fetchall()
     for row in comp_rows:
-        try:
-            comp = json.loads(row["compliance"]) if isinstance(row["compliance"], str) else row["compliance"]
-            if isinstance(comp, dict):
-                # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
-                v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
-                if comp.get("passed") is True: v = "pass"
-                if v in ("pass","compliant","ok","green"): passing += 1
-        except Exception:
-            pass
+        if _compliance_verdict(row["compliance"]) == "pass":
+            passing += 1
     compliance_rate = round((passing / total_approved) * 100) if total_approved > 0 else None
 
     c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (user_id,))
@@ -1086,19 +1209,9 @@ def calculate_identity_score(user_id: int, setup: dict) -> dict:
         compliance_rate = None
         integrity_breakdown = {"label": "No content yet", "rate": None}
     else:
-        compliant_count = 0
-        for r in rows:
-            try:
-                comp = json.loads(r["compliance"]) if isinstance(r["compliance"], str) else r["compliance"]
-                if isinstance(comp, dict):
-                    # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
-                    verdict = comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or ""
-                    if str(verdict).lower() in ("pass", "compliant", "ok", "green"):
-                        compliant_count += 1
-                    elif comp.get("passed") is True:
-                        compliant_count += 1
-            except Exception:
-                pass
+        compliant_count = sum(
+            1 for r in rows if _compliance_verdict(r["compliance"]) == "pass"
+        )
         compliance_rate = round((compliant_count / total_items) * 100) if total_items > 0 else 0
         if compliance_rate == 100:   integrity = 25
         elif compliance_rate >= 90:  integrity = 20
@@ -1279,17 +1392,10 @@ def generate_compliance_pdf(
     total = len(rows)
     passing = review_count = fail_count = 0
     for r in rows:
-        try:
-            comp = json.loads(r["compliance"]) if isinstance(r["compliance"], str) else r["compliance"]
-            v = ""
-            if isinstance(comp, dict):
-                # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
-                v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
-                if comp.get("passed") is True: v = "pass"
-            if v in ("pass","compliant","ok","green"): passing += 1
-            elif v in ("warn","warning","review"):      review_count += 1
-            else:                                        fail_count += 1
-        except: fail_count += 1
+        v = _compliance_verdict(r["compliance"])
+        if v == "pass":   passing += 1
+        elif v == "warn": review_count += 1
+        else:             fail_count += 1
 
     compliance_rate = round((passing / total) * 100) if total > 0 else 0
     generated_at    = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p UTC")
@@ -1320,16 +1426,12 @@ def generate_compliance_pdf(
         except: return s[:10]
 
     def compliance_label(comp_raw):
-        try:
-            comp = json.loads(comp_raw) if isinstance(comp_raw, str) else comp_raw
-            if not isinstance(comp, dict): return ("—", "neutral")
-            # FIX: check overallStatus (camelCase) — the actual field from ComplianceBadge
-            v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
-            if comp.get("passed") is True: v = "pass"
-            if v in ("pass","compliant","ok","green"): return ("Verified", "pass")
-            if v in ("warn","warning","review"):        return ("Review",   "warn")
-            return ("Attention", "fail")
-        except: return ("—", "neutral")
+        """PDF-local helper — wraps _compliance_verdict with label/color key for ReportLab."""
+        v = _compliance_verdict(comp_raw)
+        if v == "pass":    return ("Verified",   "pass")
+        if v == "warn":    return ("Review",      "warn")
+        if v == "fail":    return ("Attention",   "fail")
+        return ("—", "neutral")
 
     def verdict_para(comp_raw):
         label_text, kind = compliance_label(comp_raw)
@@ -1515,45 +1617,13 @@ def get_broker_office_stats(broker_id: int) -> list:
 
         # Compliance rate
         c.execute("SELECT compliance FROM content_library WHERE user_id=? AND status IN ('approved','published')", (uid,))
-        passing = 0
-        comp_rows = c.fetchall()
-        for cr in comp_rows:
-            try:
-                comp = json.loads(cr["compliance"]) if isinstance(cr["compliance"],str) else cr["compliance"]
-                if isinstance(comp, dict):
-                    v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
-                    if comp.get("passed") is True: v = "pass"
-                    if v in ("pass","compliant","ok","green"): passing += 1
-            except Exception:
-                pass
-        total_reviewed = (stats["approved"] or 0) + (stats["published"] or 0)
+        passing = sum(1 for cr in c.fetchall() if _compliance_verdict(cr["compliance"]) == "pass")
+        total_reviewed  = (stats["approved"] or 0) + (stats["published"] or 0)
         compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
 
-        # Lightweight identity score — weighted sum, no full engine call
-        # Foundation: bio + market + niches (from setup), Presence: published count, Integrity: compliance rate
-        identity_score = 0
-        try:
-            c.execute("SELECT setup_json FROM agent_setup WHERE user_id=?", (uid,))
-            setup_row = c.fetchone()
-            if setup_row:
-                setup = json.loads(setup_row["setup_json"] or "{}")
-                if setup.get("shortBio","").strip():     identity_score += 15
-                if setup.get("market","").strip():       identity_score += 10
-                niches = setup.get("primaryNiches", [])
-                if len(niches) >= 2:                     identity_score += 10
-                elif len(niches) == 1:                   identity_score += 5
-                if setup.get("brandVoice","").strip():   identity_score += 5
-            pub = stats["published"] or 0
-            if pub >= 5:   identity_score += 30
-            elif pub >= 2: identity_score += 20
-            elif pub >= 1: identity_score += 10
-            if compliance_rate is not None:
-                if compliance_rate == 100:   identity_score += 30
-                elif compliance_rate >= 90:  identity_score += 22
-                elif compliance_rate >= 75:  identity_score += 12
-            identity_score = min(identity_score, 100)
-        except Exception:
-            pass
+        # Lightweight identity score (extracted helper — Session 12)
+        published_count = stats["published"] or 0
+        identity_score  = _calc_lightweight_identity(c, uid, compliance_rate, published_count)
 
         # Active schedule
         c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id=? AND active=1", (uid,))
@@ -1627,37 +1697,16 @@ def get_team_stats(team_id: int) -> list:
             FROM content_library WHERE user_id=?
         """, (uid,))
         stats = c.fetchone()
+
         c.execute("SELECT compliance FROM content_library WHERE user_id=? AND status IN ('approved','published')", (uid,))
-        passing = 0
-        for cr in c.fetchall():
-            try:
-                comp = json.loads(cr["compliance"]) if isinstance(cr["compliance"],str) else cr["compliance"]
-                if isinstance(comp, dict):
-                    v = str(comp.get("overallStatus") or comp.get("overall_verdict") or "").lower()
-                    if comp.get("passed") is True: v = "pass"
-                    if v in ("pass","compliant","ok","green"): passing += 1
-            except Exception:
-                pass
+        passing = sum(1 for cr in c.fetchall() if _compliance_verdict(cr["compliance"]) == "pass")
         total_reviewed  = (stats["approved"] or 0) + (stats["published"] or 0)
         compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
-        identity_score  = 0
-        try:
-            c.execute("SELECT setup_json FROM agent_setup WHERE user_id=?", (uid,))
-            sr = c.fetchone()
-            if sr:
-                setup = json.loads(sr["setup_json"] or "{}")
-                if setup.get("shortBio","").strip():   identity_score += 15
-                if setup.get("market","").strip():     identity_score += 10
-                niches = setup.get("primaryNiches", [])
-                identity_score += 10 if len(niches)>=2 else (5 if len(niches)==1 else 0)
-                if setup.get("brandVoice","").strip(): identity_score += 5
-            pub = stats["published"] or 0
-            identity_score += 30 if pub>=5 else (20 if pub>=2 else (10 if pub>=1 else 0))
-            if compliance_rate is not None:
-                identity_score += 30 if compliance_rate==100 else (22 if compliance_rate>=90 else (12 if compliance_rate>=75 else 0))
-            identity_score = min(identity_score, 100)
-        except Exception:
-            pass
+
+        # Lightweight identity score (extracted helper — Session 12)
+        published_count = stats["published"] or 0
+        identity_score  = _calc_lightweight_identity(c, uid, compliance_rate, published_count)
+
         c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id=? AND active=1", (uid,))
         sched = c.fetchone()
         last_act = stats["last_activity"]
@@ -1669,6 +1718,7 @@ def get_team_stats(team_id: int) -> list:
                 activity_status = "active" if days_ago <= 30 else "inactive"
             except Exception:
                 activity_status = "active"
+
         results.append({
             "id": uid, "name": agent["agent_name"], "agent_name": agent["agent_name"],
             "email": agent["email"], "brokerage": agent["brokerage"] or "",
@@ -1719,15 +1769,12 @@ def get_broker_agent_content(broker_id: int, agent_id: int, limit: int = 20) -> 
         except Exception:
             cd = {}
 
-        try:
-            comp    = json.loads(r["compliance"]) if r["compliance"] else {}
-            verdict = str(comp.get("overallStatus") or comp.get("overall_verdict") or "").lower()
-            if verdict in ("pass","compliant","ok","green"): compliance_label = "pass"
-            elif verdict in ("warn","review"):               compliance_label = "review"
-            elif verdict == "attention":                     compliance_label = "attention"
-            else:                                            compliance_label = "pending"
-        except Exception:
-            compliance_label = "pending"
+        # Use _compliance_verdict for consistent parsing
+        verdict = _compliance_verdict(r["compliance"])
+        if verdict == "pass":   comp_label = "pass"
+        elif verdict == "warn": comp_label = "review"
+        elif verdict == "fail": comp_label = "attention"
+        else:                   comp_label = "pending"
 
         try:
             plats = json.loads(r["copied_platforms"] or "[]")
@@ -1740,7 +1787,7 @@ def get_broker_agent_content(broker_id: int, agent_id: int, limit: int = 20) -> 
             "status":      r["status"] or "pending",
             "headline":    cd.get("headline", ""),
             "post":        (cd.get("post", "")[:200] + "…") if len(cd.get("post","")) > 200 else cd.get("post",""),
-            "compliance":  compliance_label,
+            "compliance":  comp_label,
             "platforms":   plats,
             "cir_id":      r["cir_id"] or "",
             "saved_at":    r["saved_at"] or "",
@@ -1811,6 +1858,10 @@ def cancel_subscription(user_id: int):
 # PASSWORD RESET
 # ─────────────────────────────────────────────
 def init_reset_tokens_table():
+    """
+    Legacy compatibility wrapper. password_reset_tokens is now created in init_db().
+    Safe to call — CREATE TABLE IF NOT EXISTS is idempotent.
+    """
     conn = get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -1866,6 +1917,7 @@ def update_password(user_id: int, new_password_hash: str):
     conn.execute("UPDATE users SET password_hash=? WHERE id=?", (new_password_hash, user_id))
     conn.commit(); conn.close()
 
+
 # ─────────────────────────────────────────────
 # LOCAL SIGNALS
 # ─────────────────────────────────────────────
@@ -1905,9 +1957,12 @@ def signals_get_latest(user_id: int, limit: int = 5) -> list:
 
 
 def signals_mark_used(signal_id: int):
-    """Mark a signal as used so it doesn't surface again."""
+    """Mark a signal as used so it doesn't surface again. Records used_at timestamp."""
     conn = get_conn()
-    conn.execute("UPDATE local_signals SET used = 1 WHERE id = ?", (signal_id,))
+    conn.execute(
+        "UPDATE local_signals SET used = 1, used_at = datetime('now') WHERE id = ?",
+        (signal_id,)
+    )
     conn.commit()
     conn.close()
 
@@ -2021,21 +2076,243 @@ def usage_set_limit(user_id: int, limit: int):
 
 
 # ─────────────────────────────────────────────
-# SCHEDULE — day_of_week support
+# PARTNER PROGRAM
+# ─────────────────────────────────────────────
+# Always "Partner Program" — never "affiliate program"
+# Earnings are "Partner Rewards" — never "commissions"
+# Tiers: 'referral' (15% / 24mo), 'broker' (20% / lifetime), 'elite' (25% / lifetime)
+
+def partner_enroll(user_id: int, tier: str = "referral") -> dict:
+    """
+    Enroll a user in the Partner Program. Generates a unique referral code.
+    Auto-approves Referral tier; Broker tier requires admin approval.
+    Returns the partner record.
+    """
+    import secrets
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # Generate a unique 8-char referral code
+    for _ in range(10):
+        code = secrets.token_hex(4).upper()  # e.g. "A3F2B1C8"
+        c.execute("SELECT id FROM partners WHERE referral_code=?", (code,))
+        if not c.fetchone():
+            break
+
+    status = "active" if tier == "referral" else "pending"
+    approved_at = datetime.utcnow().isoformat() if tier == "referral" else None
+
+    c.execute("""
+        INSERT INTO partners (user_id, tier, status, referral_code, enrolled_at, approved_at)
+        VALUES (?, ?, ?, ?, datetime('now'), ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            tier        = excluded.tier,
+            status      = excluded.status,
+            approved_at = excluded.approved_at
+    """, (user_id, tier, status, code, approved_at))
+
+    # Mirror referral_code onto users table for fast lookup
+    conn.execute(
+        "UPDATE users SET partner_tier=?, partner_code=? WHERE id=?",
+        (tier, code, user_id)
+    )
+    conn.commit()
+
+    c.execute("SELECT * FROM partners WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def partner_get(user_id: int) -> Optional[dict]:
+    """Get a partner record by user_id."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM partners WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def partner_get_by_code(code: str) -> Optional[dict]:
+    """Look up a partner by their referral code. Used at subscription time."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT p.*, u.email, u.agent_name
+        FROM partners p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.referral_code=? AND p.status='active'
+    """, (code.upper(),))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def partner_approve(partner_id: int, approved_by: int) -> bool:
+    """Approve a pending partner (Broker/Elite tier admin action)."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute(
+        "UPDATE partners SET status='active', approved_at=datetime('now'), approved_by=? WHERE id=? AND status='pending'",
+        (approved_by, partner_id)
+    )
+    affected = c.rowcount
+    if affected:
+        c.execute("SELECT user_id, tier, referral_code FROM partners WHERE id=?", (partner_id,))
+        row = c.fetchone()
+        if row:
+            conn.execute(
+                "UPDATE users SET partner_tier=?, partner_code=? WHERE id=?",
+                (row["tier"], row["referral_code"], row["user_id"])
+            )
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def partner_list_all() -> list:
+    """Return all partner records — admin use only."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT p.*, u.email, u.agent_name, u.brokerage
+        FROM partners p
+        JOIN users u ON u.id = p.user_id
+        ORDER BY p.enrolled_at DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def referral_attribute(partner_id: int, referred_user_id: int,
+                       attribution_type: str = "link",
+                       referral_code: str = None) -> bool:
+    """
+    Record that a partner referred a new subscriber.
+    Last-touch wins — UPSERT on referred_user_id (unique constraint).
+    attribution_type: 'link' (60-day cookie) | 'code' (verbal, no expiry)
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO referral_attributions
+                (partner_id, referred_user_id, attribution_type, referral_code, attributed_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(referred_user_id) DO UPDATE SET
+                partner_id       = excluded.partner_id,
+                attribution_type = excluded.attribution_type,
+                referral_code    = excluded.referral_code,
+                attributed_at    = datetime('now')
+        """, (partner_id, referred_user_id, attribution_type, referral_code))
+        # Increment partner's total_referred
+        conn.execute(
+            "UPDATE partners SET total_referred = total_referred + 1 WHERE id=?",
+            (partner_id,)
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[Partner] Attribution failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def referral_convert(referred_user_id: int) -> bool:
+    """Mark a referral as converted (subscriber activated their account)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE referral_attributions SET converted_at=datetime('now') WHERE referred_user_id=? AND converted_at IS NULL",
+        (referred_user_id,)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def partner_payout_create(partner_id: int, amount: float,
+                           period_start: str, period_end: str) -> dict:
+    """
+    Create a pending payout record for a partner.
+    Called by the monthly reward cycle job.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        INSERT INTO partner_payouts (partner_id, amount, period_start, period_end, status)
+        VALUES (?, ?, ?, ?, 'pending')
+    """, (partner_id, amount, period_start, period_end))
+    conn.commit()
+    payout_id = c.lastrowid
+    c.execute("SELECT * FROM partner_payouts WHERE id=?", (payout_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def partner_payout_list(partner_id: int) -> list:
+    """Return all payout records for a partner, newest first."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT * FROM partner_payouts WHERE partner_id=?
+        ORDER BY created_at DESC
+    """, (partner_id,))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def partner_payout_mark_paid(payout_id: int, stripe_transfer_id: str) -> bool:
+    """Mark a payout as paid after Stripe Connect transfer completes."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        UPDATE partner_payouts
+        SET status='paid', stripe_transfer_id=?, paid_at=datetime('now')
+        WHERE id=? AND status IN ('pending','processing')
+    """, (stripe_transfer_id, payout_id))
+    # Update partner's total_earned
+    c.execute("SELECT amount, partner_id FROM partner_payouts WHERE id=?", (payout_id,))
+    row = c.fetchone()
+    if row:
+        conn.execute(
+            "UPDATE partners SET total_earned = total_earned + ? WHERE id=?",
+            (row["amount"], row["partner_id"])
+        )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def partner_payout_list_all_pending() -> list:
+    """Return all pending payouts — admin use for payout processing."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT pp.*, p.tier, p.referral_code, u.email, u.agent_name
+        FROM partner_payouts pp
+        JOIN partners p ON p.id = pp.partner_id
+        JOIN users u ON u.id = p.user_id
+        WHERE pp.status = 'pending'
+        ORDER BY pp.created_at ASC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+# ─────────────────────────────────────────────
+# SCHEDULE — day_of_week support (legacy alias)
 # ─────────────────────────────────────────────
 
 def schedule_row_with_days(row) -> dict:
-    """Extend _schedule_row to include day_of_week."""
-    base = {
-        "id":         row["id"],
-        "userId":     row["user_id"],
-        "niche":      row["niche"],
-        "frequency":  row["frequency"],
-        "timeOfDay":  row["time_of_day"],
-        "timezone":   row["timezone"],
-        "active":     bool(row["active"]),
-        "lastRun":    row["last_run"],
-        "nextRun":    row["next_run"],
-        "dayOfWeek":  row["day_of_week"] if "day_of_week" in row.keys() else None,
-    }
-    return base
+    """
+    Legacy alias for _schedule_row — kept for backward compatibility.
+    _schedule_row already includes dayOfWeek; this is a pass-through.
+    """
+    return _schedule_row(row)
