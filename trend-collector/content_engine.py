@@ -1933,13 +1933,14 @@ def generate_content_core(
         notForClient=not_for_client or None,
     )
     payload = ContentRequest(
-        identity     = IdentityModel(primaryCategories=[niche] if niche else []),
-        situation    = situation,
-        persona      = persona,
-        tone         = tone,
-        length       = length,
-        agentProfile = profile,
-        content_mode = content_mode,
+        identity       = IdentityModel(primaryCategories=[niche] if niche else []),
+        situation      = situation,
+        persona        = persona,
+        tone           = tone,
+        length         = length,
+        selectedTrends = [str(t).strip() for t in (trends or []) if t and str(t).strip()],
+        agentProfile   = profile,
+        content_mode   = content_mode,
     )
     client = _get_anthropic_client()
     mode   = (content_mode or "agent").lower()
