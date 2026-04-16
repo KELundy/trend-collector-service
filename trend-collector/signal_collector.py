@@ -22,7 +22,7 @@ import time
 import threading
 from datetime import datetime
 
-COLLECT_INTERVAL_HOURS  = float(os.getenv("SIGNAL_COLLECT_HOURS", "24"))
+COLLECT_INTERVAL_HOURS  = int(os.getenv("SIGNAL_COLLECT_HOURS", "24"))  # Default 24hr — override via Render env var
 HIGH_RELEVANCE_THRESHOLD = 0.6 # Minimum score to count as "strong"
 MIN_STRONG_SIGNALS       = 2   # Escalate if fewer than this many strong signals found
 _collector_started       = False
@@ -97,7 +97,7 @@ def _search_signals(client, prompt: str, user_id: int) -> list:
     """
     try:
         response = client.messages.create(
-            model      = "claude-haiku-4-5-20251001",
+            model      = "claude-sonnet-4-6",
             max_tokens = 1500,
             tools      = [{"type": "web_search_20250305", "name": "web_search"}],
             messages   = [{"role": "user", "content": prompt}],
