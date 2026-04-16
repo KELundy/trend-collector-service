@@ -558,6 +558,21 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 print(f"[Scheduler] User {user_id} not found, skipping niche '{niche}'.")
                 continue
 
+            # ── Fetch hyper-local signals to enrich content generation ──────
+            local_signal_trends = []
+            try:
+                from database import signals_get_latest as _sgl
+                raw_signals = _sgl(user_id, limit=5)
+                local_signal_trends = [
+                    f"{s.get('headline','')} ({s.get('area','')})".strip()
+                    for s in raw_signals
+                    if s.get("headline")
+                ]
+                if local_signal_trends:
+                    print(f"[Scheduler] ✓ {len(local_signal_trends)} local signal(s) injected for user {user_id}")
+            except Exception as _sig_e:
+                print(f"[Scheduler] Signal fetch failed (non-blocking): {_sig_e}")
+
             result = generate_content_core(
                 agent_name  = user_row["agent_name"],
                 brokerage   = user_row["brokerage"],
@@ -567,7 +582,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 persona     = setup.get("defaultPersona") or "homeowners",
                 tone        = setup.get("tone", "Professional"),
                 length      = setup.get("length", "Standard"),
-                trends      = setup.get("trends", []),
+                trends      = local_signal_trends + (setup.get("trends", []) or []),
                 brand_voice = setup.get("brandVoice", ""),
                 short_bio   = setup.get("shortBio", ""),
                 audience    = setup.get("audienceDescription", ""),
@@ -2640,6 +2655,7 @@ _PLAT_LABELS = {
 
 def _approval_page(state: str, headline: str, agent_name: str, niche: str,
                    post_body: str = "", compliance_status: str = "",
+                   compliance_notes: list = None,
                    token: str = "", platforms: list = None,
                    published_to: list = None) -> str:
     """
@@ -2679,6 +2695,11 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str,
     .comp-pass{background:#f0fdf4;color:#15803d}
     .comp-warn{background:#fffbeb;color:#b45309}
     .comp-fail{background:#fef2f2;color:#b91c1c}
+    .comp-notes{margin:0 0 14px 0;padding:10px 14px;background:#fffbeb;border:1px solid #fde68a;
+                border-radius:10px;list-style:none}
+    .comp-notes li{font-size:12px;color:#78350f;line-height:1.6;padding:3px 0;
+                   border-bottom:1px solid #fde68a}
+    .comp-notes li:last-child{border-bottom:none}
     .post{font-size:14px;color:#3d3d38;line-height:1.75;background:#f9f8f6;
           border-radius:10px;padding:16px 18px;margin-bottom:20px;
           white-space:pre-wrap;word-break:break-word;
@@ -2727,9 +2748,21 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str,
     if compliance_status in ("compliant", "pass", "ok"):
         comp_html = "<span class='comp comp-pass'>✓ Compliance Verified</span>"
     elif compliance_status in ("review", "warn"):
-        comp_html = "<span class='comp comp-warn'>⚠ Soft flags — safe to approve, review notes in app</span>"
+        _notes_list = compliance_notes or []
+        if _notes_list:
+            _note_items = "".join(f"<li>{n}</li>" for n in _notes_list[:4])
+            _notes_html = f"<ul class='comp-notes'>{_note_items}</ul>"
+        else:
+            _notes_html = ""
+        comp_html = f"<span class='comp comp-warn'>⚠ Soft flag — review before approving</span>{_notes_html}"
     elif compliance_status in ("attention", "fail"):
-        comp_html = "<span class='comp comp-fail'>✗ Attention Required — review before approving</span>"
+        _notes_list = compliance_notes or []
+        if _notes_list:
+            _note_items = "".join(f"<li>{n}</li>" for n in _notes_list[:4])
+            _notes_html = f"<ul class='comp-notes' style='border-color:#fecaca;background:#fef2f2'>{_note_items}</ul>"
+        else:
+            _notes_html = ""
+        comp_html = f"<span class='comp comp-fail'>✗ Attention Required — review before approving</span>{_notes_html}"
     else:
         comp_html = ""
 
@@ -2818,13 +2851,15 @@ function toggleChip(cb) {
                 f"<span class='pub-chip'>{_PLAT_ICONS.get(p,'🔗')} {_PLAT_LABELS.get(p, p.capitalize())}</span>"
                 for p in published_to
             )
-            pub_html = f"<div class='pub-list'>{pub_chips}</div>"
+            pub_html    = f"<div class='pub-list'>{pub_chips}</div>"
             action_line = "Your post has been approved, a CIR™ record created, and queued for publishing."
-            btn_label  = "Open App →"
+            btn_label   = "Open App →"
+            open_app_url = "https://app.homebridgegroup.co?view=agent"
         else:
-            pub_html   = ""
-            action_line = "Your approval has been recorded and a CIR™ Certified Identity Record has been created. Open the app to publish when ready."
-            btn_label  = "Open App to Publish →"
+            pub_html     = ""
+            action_line  = "Your approval has been recorded and a CIR™ Certified Identity Record has been created. Open the app to publish when ready."
+            btn_label    = "Open App to Publish →"
+            open_app_url = "https://app.homebridgegroup.co?view=agent&panel=library"
 
         return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -2840,7 +2875,7 @@ function toggleChip(cb) {
   <div class="result-msg">
     <strong>{headline}</strong><br><br>{action_line}
   </div>
-  <a href="{app_url}" class="btn btn-green"
+  <a href="{open_app_url}" class="btn btn-green"
      style="text-decoration:none;display:block;padding:15px;border-radius:12px;">
     {btn_label}
   </a>
@@ -3328,6 +3363,15 @@ async def approval_preview(token: str = ""):
         except Exception: compliance = {}
     comp_status = str(compliance.get("overallStatus") or compliance.get("overall_verdict") or "").lower()
 
+    # Extract compliance notes to show on approval page — agent needs to know what the flag is
+    comp_notes = []
+    try:
+        raw_notes = compliance.get("notes", [])
+        if isinstance(raw_notes, list):
+            comp_notes = [str(n).strip() for n in raw_notes if n and str(n).strip()]
+    except Exception:
+        comp_notes = []
+
     if record["status"] not in ("pending",):
         return HTMLResponse(
             _approval_page("already_done", f"This content is already {record['status']}.",
@@ -3344,8 +3388,8 @@ async def approval_preview(token: str = ""):
 
     return HTMLResponse(_approval_page(
         "preview", headline, record.get("agent_name",""), record.get("niche",""),
-        post_body=post_body, compliance_status=comp_status, token=token,
-        platforms=platforms,
+        post_body=post_body, compliance_status=comp_status, compliance_notes=comp_notes,
+        token=token, platforms=platforms,
     ))
 
 
