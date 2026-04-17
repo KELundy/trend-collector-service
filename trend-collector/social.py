@@ -276,6 +276,7 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
     access_token = conn_data["access_token"]
     post_text    = body.content or body.content_override
 
+    item = None
     if not post_text and body.library_item_id:
         item = database.library_get_item(body.library_item_id, current_user["id"])
         if not item:
@@ -287,7 +288,15 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
     if not post_text:
         raise HTTPException(400, "No content provided to post.")
 
-    image_url = body.image_url or None
+    # Use image_url from request body; fall back to what's saved on the library item
+    if body.image_url:
+        image_url = body.image_url
+    elif body.library_item_id:
+        if item is None:
+            item = database.library_get_item(body.library_item_id, current_user["id"])
+        image_url = (item or {}).get("image_url") or None
+    else:
+        image_url = None
 
     try:
         if platform == "linkedin":
@@ -360,8 +369,16 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
                     upload_url  = reg_data["value"]["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
                     media_asset = reg_data["value"]["asset"]
                     img_resp    = await client.get(image_url)
-                    await client.put(upload_url, content=img_resp.content, headers={"Authorization": f"Bearer {access_token}"})
-        except Exception:
+                    if img_resp.status_code == 200:
+                        put_resp = await client.put(upload_url, content=img_resp.content, headers={"Authorization": f"Bearer {access_token}"})
+                        if put_resp.status_code not in (200, 201):
+                            print(f"[LinkedIn] Image PUT failed {put_resp.status_code}: {put_resp.text[:200]}")
+                            media_asset = None
+                    else:
+                        print(f"[LinkedIn] Image fetch failed {img_resp.status_code} — URL may have expired. Posting text-only.")
+                        media_asset = None
+        except Exception as e:
+            print(f"[LinkedIn] Image upload exception: {e}")
             media_asset = None
 
     if media_asset:
