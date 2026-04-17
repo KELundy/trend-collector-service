@@ -161,33 +161,30 @@ def _strong_signal_count(signals: list) -> int:
 
 def _collect_signals_for_agent(user_id: int, agent_name: str,
                                 service_areas: list, market: str,
-                                primary_niches: list = None):
+                                primary_niches: list = None,
+                                force: bool = False):
     """
     Three-tier signal collection for a single agent.
-
-    Tier 1 — Hyper-local: specific neighborhoods and service areas
-             SKIPPED when no service areas are set — starts at Tier 2 instead.
-    Tier 2 — Metro: broader city/market level
-    Tier 3 — National niche: national trends for the agent's primary niche
-
-    Escalates automatically when fewer than MIN_STRONG_SIGNALS found at
-    the current tier. All signals saved with tier tag for frontend labeling.
+    force=True bypasses the freshness check — used by manual trigger endpoint.
     """
     from database import get_conn
 
-    # Skip if we already have fresh signals from the last 4 hours
-    conn = get_conn()
-    c    = conn.cursor()
-    c.execute("""
-        SELECT COUNT(*) as n FROM local_signals
-        WHERE user_id = ?
-          AND collected_at > datetime('now', '-23 hours')
-    """, (user_id,))
-    recent_count = c.fetchone()["n"]
-    conn.close()
-    if recent_count >= 3:
-        print(f"[Signals] User {user_id} has fresh signals — skipping.")
-        return
+    # Skip if we already have fresh signals — unless forced
+    if not force:
+        conn = get_conn()
+        c    = conn.cursor()
+        c.execute("""
+            SELECT COUNT(*) as n FROM local_signals
+            WHERE user_id = ?
+              AND collected_at > datetime('now', '-23 hours')
+        """, (user_id,))
+        recent_count = c.fetchone()["n"]
+        conn.close()
+        if recent_count >= 3:
+            print(f"[Signals] User {user_id} has fresh signals — skipping.")
+            return
+    else:
+        print(f"[Signals] Force collection triggered for user {user_id} — bypassing freshness check.")
 
     client = _get_anthropic_client()
     if not client:
