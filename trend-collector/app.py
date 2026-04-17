@@ -330,6 +330,7 @@ async def trigger_signal_collection(current_user=Depends(get_current_user)):
             agent_name   = current_user.get("agent_name", "Agent"),
             service_areas= setup.get("serviceAreas", []),
             market       = setup.get("market", ""),
+            force        = True,
         )
         return {"ok": True, "message": "Signal collection triggered."}
     except Exception as e:
