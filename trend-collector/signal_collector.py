@@ -181,7 +181,7 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     c.execute("""
         SELECT COUNT(*) as n FROM local_signals
         WHERE user_id = ?
-          AND collected_at > datetime('now', '-4 hours')
+          AND collected_at > datetime('now', '-23 hours')
     """, (user_id,))
     recent_count = c.fetchone()["n"]
     conn.close()
