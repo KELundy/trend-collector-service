@@ -2682,7 +2682,8 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str,
                    post_body: str = "", compliance_status: str = "",
                    compliance_notes: list = None,
                    token: str = "", platforms: list = None,
-                   published_to: list = None) -> str:
+                   published_to: list = None,
+                   item_id: int = None) -> str:
     """
     Renders the mobile-first approval page.
     state values:
@@ -2695,7 +2696,7 @@ def _approval_page(state: str, headline: str, agent_name: str, niche: str,
     platforms    — list of {platform, platform_handle} dicts from DB (for preview)
     published_to — list of platform id strings that were published (for success)
     """
-    app_url = "https://app.homebridgegroup.co?view=agent"
+    app_url = f"https://app.homebridgegroup.co?view=agent&panel=library{'&item=' + str(item_id) if item_id else ''}"
     if platforms is None:
         platforms = []
     if published_to is None:
@@ -2879,12 +2880,12 @@ function toggleChip(cb) {
             pub_html    = f"<div class='pub-list'>{pub_chips}</div>"
             action_line = "Your post has been approved, a CIR™ record created, and queued for publishing."
             btn_label   = "Open App →"
-            open_app_url = "https://app.homebridgegroup.co?view=agent"
+            open_app_url = f"https://app.homebridgegroup.co?view=agent&panel=library{'&item=' + str(item_id) if item_id else ''}"
         else:
             pub_html     = ""
             action_line  = "Your approval has been recorded and a CIR™ Certified Identity Record has been created. Open the app to publish when ready."
-            btn_label    = "Open App to Publish →"
-            open_app_url = "https://app.homebridgegroup.co?view=agent&panel=library"
+            btn_label    = "Publish Now →"
+            open_app_url = f"https://app.homebridgegroup.co?view=agent&panel=library{'&item=' + str(item_id) if item_id else ''}"
 
         return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -3504,6 +3505,7 @@ async def approval_confirm(request: Request, token: str = ""):
     return HTMLResponse(_approval_page(
         "success", headline, record.get("agent_name",""), cir_id,
         published_to=published_to,
+        item_id=item_id,
     ))
 
 
