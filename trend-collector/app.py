@@ -2399,6 +2399,7 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
                     "n":       1,
                     "size":    "1792x1024",
                     "quality": "hd",
+                    "style":   "natural",   # "vivid" (default) = artistic/illustrated; "natural" = photorealistic
                 }
             )
     except Exception as e:
