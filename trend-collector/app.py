@@ -93,8 +93,8 @@ from anthropic import Anthropic
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 COLLECTION_INTERVAL_SECONDS = int(os.getenv("TREND_INTERVAL_SECONDS", str(24 * 60 * 60)))
-TREND_ENABLED  = os.getenv("TREND_ENABLED",  "true").lower() == "true"
-SIGNAL_ENABLED = os.getenv("SIGNAL_ENABLED", "true").lower() == "true"
+TREND_ENABLED  = os.getenv("TREND_ENABLED",  "true").lower()  == "true"
+SIGNAL_ENABLED = os.getenv("SIGNAL_ENABLED", "false").lower() == "true"  # off by default — set SIGNAL_ENABLED=true in Render when ready to go live
 
 app = FastAPI(
     title="HomeBridge Content Engine",
@@ -2339,6 +2339,11 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
     """
     Generate a social-ready image for a library item using DALL-E 3.
     Requires OPENAI_API_KEY in Render environment variables.
+
+    profile_photo (base64 JPEG) is accepted but not yet passed to DALL-E 3 —
+    DALL-E 3 is text-to-image only and cannot use a reference image for likeness.
+    Upgrade path: switch model to "gpt-image-1" when ready — it supports reference
+    images natively and will use profile_photo to approximate the agent's appearance.
     """
     import os as _os
     import httpx as _httpx
@@ -2353,16 +2358,34 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
     niche            = str(body.get("niche",          "real estate")).strip()
     market           = str(body.get("market",         "")).strip()
     library_item_id  = body.get("library_item_id")
+    profile_photo    = body.get("profile_photo")  # base64 JPEG — reserved for GPT-Image-1 upgrade
 
-    # Build a clean, professional real estate image prompt
+    # Determine whether to feature a person in the scene
+    # When the agent has uploaded a profile photo they want to appear in content —
+    # include a professional agent figure. Without a photo, default to property/market scenes.
+    if profile_photo:
+        person_instruction = (
+            "A professional real estate agent is prominently featured in this scene, "
+            "dressed in business-casual attire, confident and approachable. "
+            "The agent's face is clearly visible. Natural, candid pose — not stiff or stock-photo."
+        )
+    else:
+        person_instruction = ""
+
+    # Build prompt — thumbnail_idea already contains photorealistic style directives
+    # injected by the frontend (app.js). Reinforce quality at the backend level too.
     parts = []
     if thumbnail_idea:  parts.append(thumbnail_idea)
-    if market:          parts.append(f"Location: {market}")
+    if person_instruction: parts.append(person_instruction)
+    if market:          parts.append(f"Location context: {market}")
     if niche:           parts.append(f"Real estate context: {niche}")
-    base = ". ".join(parts) if parts else f"Professional real estate photography, {niche}"
+
+    base = ". ".join(filter(None, parts)) if parts else f"Professional real estate photography, {niche}"
     prompt = (
-        f"{base}. Professional real estate photography, warm natural lighting, "
-        f"high quality, photorealistic. No text, no watermarks, no people."
+        f"{base}. "
+        f"Photorealistic DSLR photography, 35mm lens, natural lighting, sharp focus. "
+        f"No text overlays, no watermarks, no logos. "
+        f"Cinematic composition, professional quality."
     )
 
     try:
@@ -2375,7 +2398,7 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
                     "prompt":  prompt[:4000],
                     "n":       1,
                     "size":    "1792x1024",
-                    "quality": "standard",
+                    "quality": "hd",
                 }
             )
     except Exception as e:
