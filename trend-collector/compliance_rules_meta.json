@@ -1,0 +1,248 @@
+{
+  "_comment": "HomeBridge Compliance Rule Library — Mountain/Western Region, Phase 2",
+  "_note": "This file is the single source of truth for rule verification dates and citations. Update it when a compliance partner completes a review cycle. Do NOT edit the 'version' field by hand — it is managed by the /admin/compliance/verify-state endpoint.",
+  "version": "2026-Q2",
+  "generated": "2026-04-17",
+  "scope": "Mountain/Western Region (14 states) — CO live, others staged",
+
+  "federal": {
+    "fair_housing_act": {
+      "citation": "42 U.S.C. § 3604(c) — Fair Housing Act",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Phrase lists grounded in HUD formal guidance, administrative case law, and federal court decisions. Master bedroom/bath explicitly cleared per Achtenberg 1995. Context-dependent language evaluated in semantic pass.",
+      "source_url": "https://uscode.house.gov/view.xhtml?req=(title:42+section:3604+edition:prelim)",
+      "next_review": "2027-04",
+      "cadence": "annual + triggered (review when HUD issues new enforcement guidance)"
+    },
+    "hud_advertising_guidance": {
+      "citation": "HUD 24 C.F.R. § 100.75 / FHEO Guidance April 29, 2024",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "April 2024 guidance covers digital/social platforms explicitly. Ordinary reader standard codified. Next major review point: any new FHEO digital advertising guidance.",
+      "source_url": "https://www.hud.gov/sites/dfiles/FHEO/documents/FHEO_Guidance_on_Advertising_through_Digital_Platforms-4-29-24.pdf",
+      "next_review": "2026-10",
+      "cadence": "semi-annual + triggered (FHEO digital guidance updates)"
+    },
+    "hud_regulations_part109": {
+      "citation": "HUD 24 C.F.R. Part 109 — Fair Housing Advertising Regulations (1989, operative)",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Part 109 was formally withdrawn in 1996 but remains operative enforcement guidance. The word/phrase lists derived from Part 109 continue to be applied in HUD enforcement proceedings.",
+      "source_url": "https://www.hud.gov/program_offices/fair_housing_equal_opp/advertising",
+      "next_review": "2027-04",
+      "cadence": "annual"
+    },
+    "achtenberg_memo": {
+      "citation": "Achtenberg Memo, January 9, 1995 — HUD FHEO Internal Enforcement Guidance",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Explicitly clears 'master bedroom,' 'master bath,' 'desirable neighborhood,' and similar terms. This memo has not been superseded. Master bedroom is NOT flagged in Pass 1.",
+      "source_url": "https://www.hud.gov/sites/documents/DOC_7770.PDF",
+      "next_review": "2027-04",
+      "cadence": "annual — verify memo has not been superseded"
+    },
+    "nar_code_of_ethics": {
+      "citation": "NAR Code of Ethics Articles 10 and 12 (2026 edition)",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "NAR updates the Code of Ethics each January. 2026 edition verified. Article 10 adds sexual orientation and gender identity beyond FHA protected classes. Article 12 requires truthful presentation.",
+      "source_url": "https://www.nar.realtor/about-nar/governing-documents/code-of-ethics/2026-code-of-ethics-standards-of-practice",
+      "next_review": "2027-01",
+      "cadence": "annual — NAR releases updated edition each January"
+    },
+    "doj_steering": {
+      "citation": "FHA § 3604(a)-(c) / DOJ 28 C.F.R. Part 42 / HUD 24 C.F.R. § 100.75(c)(3)",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Steering phrase list derived from DOJ enforcement patterns and HUD Part 109 guidance. Blockbusting phrases included per FHA § 3604(e).",
+      "source_url": "https://www.justice.gov/crt/fair-housing-act-1",
+      "next_review": "2027-04",
+      "cadence": "annual + triggered (DOJ consent decree / new enforcement cases)"
+    },
+    "respa_section8": {
+      "citation": "RESPA § 8 — 12 U.S.C. § 2607 / CFPB 12 C.F.R. Part 1024",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Kickback and unearned fee prohibition. Phrase list targets explicit referral fee solicitations.",
+      "source_url": "https://www.consumerfinance.gov/rules-policy/regulations/1024/",
+      "next_review": "2027-04",
+      "cadence": "annual"
+    },
+    "regulation_z": {
+      "citation": "Regulation Z — 12 C.F.R. Part 1026 (TILA)",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Trigger terms for mortgage advertising. Any mention of specific rates or terms triggers full disclosure requirements.",
+      "source_url": "https://www.consumerfinance.gov/rules-policy/regulations/1026/",
+      "next_review": "2027-04",
+      "cadence": "annual"
+    },
+    "cfpb_udaap": {
+      "citation": "CFPB UDAAP — 12 U.S.C. §§ 5531, 5536",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Unfair, deceptive, or abusive acts or practices. Applies to mortgage and financial services content.",
+      "source_url": "https://www.consumerfinance.gov/compliance/supervisory-guidance/unfair-deceptive-abusive-acts-practices-udaap/",
+      "next_review": "2027-04",
+      "cadence": "annual"
+    }
+  },
+
+  "states": {
+    "CO": {
+      "label": "Colorado Real Estate Commission",
+      "citation": "4 CCR 725-1, Rule 6.10",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Rule 6.10 governs advertising. Square footage disclosure requirement verified. Franchise legend requirement verified. CREC website reviewed April 2026 — no pending rule changes detected.",
+      "source_url": "https://dre.colorado.gov/laws-rules-and-contracts",
+      "next_review": "2026-07",
+      "cadence": "quarterly — CO is the live production state",
+      "status": "live"
+    },
+    "WY": {
+      "label": "Wyoming Real Estate Commission",
+      "citation": "W.S. § 33-28-119",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Advertising statute verified April 2026. Wyoming has limited advertising rule specificity; general disclosure requirements apply.",
+      "source_url": "https://realestate.wyo.gov/laws-rules",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "MT": {
+      "label": "Montana Board of Realty Regulation",
+      "citation": "ARM 24.210.641 / MCA § 37-51-321",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "ARM 24.210.641 is the advertising rule. MCA § 37-51-321 is the underlying statutory authority. Verified April 2026.",
+      "source_url": "https://boards.bsd.dli.mt.gov/rea",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "ID": {
+      "label": "Idaho Real Estate Commission",
+      "citation": "Idaho Code § 54-2038 / IREC Guideline 13",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Idaho Code § 54-2038 is the advertising statute. IREC Guideline 13 provides advertising specifics. Verified April 2026.",
+      "source_url": "https://irec.idaho.gov/laws-rules",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "UT": {
+      "label": "Utah Division of Real Estate",
+      "citation": "Utah Admin. Code R162-2f-401h",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "R162-2f-401h governs advertising. Brokerage name disclosure requirements verified. Verified April 2026.",
+      "source_url": "https://realestate.utah.gov/laws-rules",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "NM": {
+      "label": "New Mexico Real Estate Commission",
+      "citation": "NMAC 16.61.32.8",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "NMAC 16.61.32.8 is the advertising rule. Verified April 2026.",
+      "source_url": "https://www.rld.nm.gov/real-estate/rules-and-regulations/",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "TX": {
+      "label": "Texas Real Estate Commission (TREC)",
+      "citation": "22 TAC §535.155 / §535.154",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "§535.155 governs advertising; §535.154 covers team advertising. TREC rules frequently updated — check TREC website before each quarterly review. Verified April 2026.",
+      "source_url": "https://www.trec.texas.gov/agency-information/laws-rules",
+      "next_review": "2026-07",
+      "cadence": "quarterly — TREC is an active rulemaking body",
+      "status": "staged"
+    },
+    "AZ": {
+      "label": "Arizona Department of Real Estate (ADRE)",
+      "citation": "A.A.C. R4-28-502",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "A.A.C. R4-28-502 updated December 13, 2025. Significant revision — verify against current ADRE rule text before each review. Verified April 2026.",
+      "source_url": "https://azre.gov/laws-rules-and-policies",
+      "next_review": "2026-07",
+      "cadence": "quarterly — recent December 2025 rule revision warrants close monitoring",
+      "status": "staged"
+    },
+    "NV": {
+      "label": "Nevada Real Estate Division",
+      "citation": "NAC 645.610 / NRS 645.315",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "NAC 645.610 is the advertising regulation. NRS 645.315 is the statutory authority. Verified April 2026.",
+      "source_url": "https://red.nv.gov/Content/Licensing/Laws_and_Regulations/",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "OR": {
+      "label": "Oregon Real Estate Agency",
+      "citation": "OAR 863-015-0125",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "OAR 863-015-0125 governs advertising. Oregon Real Estate Agency website reviewed April 2026.",
+      "source_url": "https://www.oregon.gov/rea/laws/Pages/administrative-rules.aspx",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "WA": {
+      "label": "Washington Department of Licensing (DOL)",
+      "citation": "WAC 308-124B-210",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "WAC 308-124B-210 governs advertising. Washington DOL online advertising guidelines also verified. Specialty claim substantiation requirement noted. Verified April 2026.",
+      "source_url": "https://app.leg.wa.gov/wac/default.aspx?cite=308-124B-210",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "CA": {
+      "label": "California Department of Real Estate (DRE)",
+      "citation": "Cal. Bus. & Prof. Code §10140.6 / 10 CCR §2770.1",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "AB 1650 (eff. Jan. 1, 2018) eliminated the print ad license number exception. DRE RE 559 governs team name advertising. License number disclosure required on all first-point-of-contact materials. Verified April 2026.",
+      "source_url": "https://www.dre.ca.gov/Licensees/LawsAndRegulations.html",
+      "next_review": "2026-07",
+      "cadence": "quarterly — California DRE is highly active; monitor for new bulletins",
+      "status": "staged"
+    },
+    "AK": {
+      "label": "Alaska Real Estate Commission",
+      "citation": "AS 08.88 / 12 AAC 64.110, 64.112, 64.120, 64.127, 64.128, 64.130",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "Best Practice advertising guidance verified. Brokerage name required in all advertising including social media. Written consent required before advertising property. Verified April 2026.",
+      "source_url": "https://www.commerce.alaska.gov/web/cbpl/ProfessionalLicensing/RealEstateCommission.aspx",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    },
+    "HI": {
+      "label": "Hawaii Real Estate Commission",
+      "citation": "HAR § 16-99-11",
+      "verified_date": "2026-04",
+      "verified_by": "HomeBridge Compliance Team",
+      "review_notes": "HAR § 16-99-11 governs advertising comprehensively. Leasehold disclosure requirement is Hawaii-specific — any leasehold property must be identified as such. EHO logotype required in all advertising. Verified April 2026.",
+      "source_url": "https://cca.hawaii.gov/reb/",
+      "next_review": "2026-07",
+      "cadence": "quarterly",
+      "status": "staged"
+    }
+  }
+}
