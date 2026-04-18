@@ -80,7 +80,7 @@ except ImportError:
         print("[Startup] migrate_context_column not available in this database.py version")
 
 from auth import router as auth_router, get_current_user
-from content_engine import router as content_engine_router, generate_content_core
+from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core
 from social import router as social_router
 
 from collectors.google_trends import fetch_google_trends
@@ -118,6 +118,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(content_engine_router)
 app.include_router(social_router)
+app.include_router(compliance_admin_router)
 
 
 @app.on_event("startup")
