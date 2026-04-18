@@ -54,15 +54,30 @@ class AgentProfileModel(BaseModel):
 
 
 class ComplianceBadge(BaseModel):
+    # Per-domain status: "pass" | "warn" | "fail"
     fairHousing: str
     brokerageDisclosure: str
     narStandards: str
-    overallStatus: str
-    notes: List[str] = Field(default_factory=list)
-    # ── NEW FIELDS (Item #3) ──────────────────
     stateCompliance: str = Field(default="pass")
     mlsCompliance: str = Field(default="pass")
+
+    # Overall result
+    # "reviewed"            — no flags detected across both passes
+    # "review-recommended"  — one or more warn-level flags
+    # "attention-required"  — one or more fail-level flags
+    overallStatus: str
+
+    # UI display fields
+    statusLabel: str = Field(default="AI-Reviewed")
+    disclaimer: str  = Field(default="")
+
+    # Pass 1 — rule-based flags
+    notes: List[str] = Field(default_factory=list)
     disclosureChecks: List[str] = Field(default_factory=list)
+
+    # Pass 2 — semantic flags from Claude review
+    semanticFlags: List[Dict[str, Any]] = Field(default_factory=list)
+    semanticAssessment: str = Field(default="")
 
 
 class ContentResponse(BaseModel):
@@ -436,441 +451,770 @@ HARD RULES:
 
 
 
-# ─────────────────────────────────────────────
-# COMPLIANCE RULE ENGINE
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPLIANCE ENGINE v2
+# Rebuilt against actual law — not phrase guesses.
+#
+# Sources for every rule in this file:
+#   FHA      — Fair Housing Act, 42 U.S.C. § 3604(c)
+#   HUD75    — HUD 24 C.F.R. § 100.75 (Discriminatory Advertisements)
+#   HUD109   — HUD 24 C.F.R. Part 109 (withdrawn 1996, still operative guidance)
+#   ACHT     — Achtenberg Memo, Jan. 9, 1995 (HUD FHEO internal enforcement guidance)
+#   HUD2024  — HUD FHEO Digital Advertising Guidance, April 29, 2024
+#   NAR10    — NAR Code of Ethics Article 10 / SOP 10-3 (2026 edition)
+#   NAR12    — NAR Code of Ethics Article 12 (2026 edition)
+#   CO610    — Colorado 4 CCR 725-1, Rule 6.10
+#
+# PHRASE LIST POLICY:
+#   Each term appears here because HUD formal guidance, administrative case law,
+#   or a federal court has identified it as presumptively problematic under
+#   § 3604(c). Terms that HUD has explicitly cleared — "master bedroom",
+#   "master bath", "desirable neighborhood", "quiet street", "walk-in closets"
+#   (Achtenberg 1995; HUD Part 109) — are NOT in any rule list below.
+#   Context-dependent language ("safe neighborhood", "school district",
+#   "up and coming") is evaluated in Pass 2 (semantic), not here.
+# ─────────────────────────────────────────────────────────────────────────────
 
 COMPLIANCE_RULES = {
+
+  # ── FAIR HOUSING — PASS 1 catches explicit, unambiguous phrase violations ──
+  # Source: FHA § 3604(c); HUD 24 C.F.R. § 100.75(c)(1)–(3); HUD word/phrase guidance
+  # Severity: FAIL — federal law violation; not a warning
   "fair_housing": {
     "id": "fair_housing",
-    "authority": "Fair Housing Act (42 U.S.C. § 3604)",
+    "authority": "Fair Housing Act, 42 U.S.C. § 3604(c) / HUD 24 C.F.R. § 100.75",
+    "severity": "fail",
+    "terms": [
+      # Familial status — explicit exclusion
+      # Source: FHA § 3604(c); HUD 24 C.F.R. § 100.75(c)(2); HUD Part 109 guidance
+      "no children", "no kids", "adults only", "adults-only", "adults preferred",
+      "no families", "no children allowed", "child-free community",
+      "children not permitted", "adults over 55 only",
+
+      # Familial status — preference signaling (implies non-preferred group excluded)
+      # Source: HUD Part 109; HUD fair housing advertising word/phrase lists
+      # "perfect for families" signals a familial status preference under § 3604(c)
+      "perfect for families", "ideal for families", "great for families",
+      "families preferred", "perfect for a family",
+
+      # Familial status — couple/single preference (implies exclusion of families)
+      # Source: HUD advertising guidance; equivalent to familial status signal
+      "ideal for a couple", "perfect for couples", "perfect for singles",
+      "ideal for single person",
+
+      # Race / national origin — explicit neighborhood demographic descriptor
+      # Source: HUD 24 C.F.R. § 100.75(c)(1): words conveying availability by race prohibited
+      "hispanic neighborhood", "latino neighborhood", "asian neighborhood",
+      "black neighborhood", "white neighborhood", "african american neighborhood",
+      "hispanic community", "asian community", "latin neighborhood",
+      "minority neighborhood", "predominantly white", "predominantly black",
+
+      # Religion — explicit neighborhood religious preference signaling
+      # Source: HUD Part 109 guidance; § 3604(c)
+      "christian neighborhood", "jewish area", "jewish neighborhood",
+      "muslim community", "catholic neighborhood", "faith-based neighborhood",
+
+      # Sex — explicit preference
+      # Source: FHA § 3604(c); HUD 24 C.F.R. § 100.75
+      "women only", "men only", "female only", "male only",
+      "no women", "no men",
+
+      # Disability — exclusionary language
+      # Source: FHA § 3604(f); HUD 24 C.F.R. § 100.75
+      "no handicapped", "not for disabled",
+    ],
+    "message": (
+        "Fair Housing Act § 3604(c): language detected that may indicate a preference, "
+        "limitation, or discrimination based on a protected class. Federal law prohibits "
+        "any notice, statement, or advertisement that indicates preference by race, color, "
+        "religion, sex, handicap, familial status, or national origin. "
+        "Cite: 42 U.S.C. § 3604(c); 24 C.F.R. § 100.75."
+    ),
+  },
+
+  # ── STEERING — DOJ / HUD
+  # Source: FHA § 3604(a); HUD 24 C.F.R. § 100.75(c)(3); DOJ enforcement pattern
+  # Steering = directing buyers toward/away from areas by protected class composition
+  # Severity: FAIL — active enforcement category
+  "doj_steering": {
+    "id": "doj_steering",
+    "authority": "Fair Housing Act § 3604(a)–(c) / DOJ 28 C.F.R. Part 42 / HUD 24 C.F.R. § 100.75(c)(3)",
+    "severity": "fail",
+    "terms": [
+      # Neighborhood demographic transition references
+      # Source: HUD Part 109; DOJ steering enforcement cases
+      "neighborhood is changing", "area is changing", "this area is improving",
+      "neighborhood is improving", "area is transitioning", "transitional neighborhood",
+      "gentrifying", "in transition", "neighborhood in transition",
+
+      # Buyer-community matching language
+      # Source: HUD Part 109 guidance; steering enforcement pattern
+      "you'll love the neighbors", "you'll fit right in", "people like you",
+      "perfect for your community", "community you'll fit into",
+      "neighbors you'll relate to", "your kind of neighborhood",
+
+      # Panic selling / blockbusting language
+      # Source: FHA § 3604(e); HUD Part 109
+      "act before it changes", "buy before the neighborhood changes",
+    ],
+    "message": (
+        "Fair Housing Act § 3604(c) / Steering: language may steer buyers toward or away "
+        "from a neighborhood based on its demographic composition, or imply buyer-community "
+        "matching based on a protected characteristic. "
+        "Cite: 42 U.S.C. § 3604(a),(c); 24 C.F.R. § 100.75(c)(3)."
+    ),
+  },
+
+  # ── HUD ADVERTISING — EHO logo / selective media
+  # Source: HUD 24 C.F.R. § 100.75(c); HUD Part 109 § 109.30; Achtenberg 1995
+  "hud_advertising": {
+    "id": "hud_advertising",
+    "authority": "HUD 24 C.F.R. § 100.75 / 24 C.F.R. Part 109 (1989 guidance)",
     "severity": "warn",
     "terms": [
-      "perfect for families", "great for families", "ideal for families",
-      "walking distance to churches", "good schools nearby", "safe neighborhood",
-      "exclusive neighborhood", "desirable neighborhood", "up and coming",
-      "gentrifying", "transitional neighborhood", "no children", "adults only",
-      "perfect for couples", "ideal for young professionals", "bachelor pad",
-      "master bedroom", "master bath", "integrated", "segregated",
-      "hispanic neighborhood", "asian neighborhood", "school district", "quiet street",
+      # Assistance animal / disability intersection
+      # "no pets" alone does not violate FHA, but these compound formulations do
+      # Source: HUD guidance on assistance animals; FHA § 3604(f)
+      "no pets allowed", "strictly no pets", "no animals of any kind",
+      "no service animals", "no assistance animals",
+      # Age-based preference without 55+ qualification
+      "mature community preferred", "seniors preferred", "adults 50 and over preferred",
     ],
-    "message": "Fair Housing Act: phrase(s) may imply discriminatory steering. Use property-focused language only.",
+    "message": (
+        "HUD 24 C.F.R. § 100.75: language may conflict with FHA advertising standards. "
+        "'No pets' policies require case-by-case review for assistance animals under "
+        "FHA § 3604(f). Age-preference language requires qualification as a valid "
+        "55+ or 62+ community under 42 U.S.C. § 3607(b). "
+        "Equal Housing Opportunity statement recommended on all housing advertising."
+    ),
   },
+
+  # ── NAR ARTICLE 12 — Truth in advertising
+  # Source: NAR Code of Ethics Article 12 (2026); SOP 12-1, 12-4, 12-5
+  # Severity: WARN — ethics violation; not federal law
   "nar_article12": {
     "id": "nar_article12",
-    "authority": "NAR Code of Ethics Article 12",
+    "authority": "NAR Code of Ethics Article 12 (2026) / SOP 12-1, 12-4, 12-5",
     "severity": "warn",
     "terms": [
-      "guaranteed", "i promise", "best in the city", "number one agent",
-      "top agent in", "will sell your home", "promise you", "i guarantee",
-      "100% success", "never fails", "best agent", "highest rated",
-      "#1 agent", "number 1 agent",
+      # Unverifiable performance claims
+      # Source: NAR Article 12; SOP 12-1 ("true picture" requirement)
+      "i guarantee", "i promise", "guaranteed results", "promise you",
+      "100% success", "never fails", "always sells",
+      # Unverifiable superiority claims
+      # Source: NAR Article 12; SOP 12-2 (case interpretations)
+      "best agent in", "best in the city", "number one agent", "#1 agent",
+      "top agent in", "number 1 agent", "highest rated agent",
+      "best agent", "the only agent who",
+      # Authority violations — advertising without authority
+      # Source: NAR SOP 12-4
+      "will sell your home for", "will get you", "will net you",
     ],
-    "message": "NAR Article 12: unverifiable claim detected. Remove or qualify the statement.",
+    "message": (
+        "NAR Code of Ethics Article 12: unverifiable or potentially misleading claim detected. "
+        "REALTORS must 'present a true picture in their advertising, marketing, and other "
+        "representations.' Remove or substantiate the claim. "
+        "Cite: NAR CoE Article 12 (Amended 1/08); SOP 12-1."
+    ),
   },
+
+  # ── RESPA SECTION 8
+  # Source: RESPA 12 U.S.C. § 2607; HUD Regulation X
   "respa_section8": {
     "id": "respa_section8",
-    "authority": "RESPA Section 8 (12 U.S.C. § 2607)",
+    "authority": "RESPA Section 8, 12 U.S.C. § 2607 / HUD Regulation X (24 C.F.R. Part 3500)",
     "severity": "warn",
     "terms": [
       "referral fee", "kickback", "split the commission", "finder's fee",
       "paid for referral", "referral payment", "split my commission",
-      "receive a fee", "compensation for referral", "refer and earn",
+      "receive a fee for referring", "compensation for referral",
+      "refer and earn", "pay you for referrals",
     ],
-    "message": "RESPA Section 8: language may imply a referral fee or kickback arrangement.",
+    "message": (
+        "RESPA Section 8 (12 U.S.C. § 2607): language may imply a referral fee or kickback "
+        "arrangement. RESPA prohibits giving or accepting fees for referrals in connection "
+        "with a federally related mortgage loan. Legal review required. "
+        "Cite: 12 U.S.C. § 2607; 24 C.F.R. § 3500.14."
+    ),
   },
+
+  # ── MLS CLEAR COOPERATION
+  # Source: NAR Clear Cooperation Policy (MLS Policy Statement 8.0)
   "clear_cooperation": {
     "id": "clear_cooperation",
-    "authority": "NAR Clear Cooperation Policy",
+    "authority": "NAR Clear Cooperation Policy (MLS Policy Statement 8.0)",
     "severity": "warn",
     "terms": [
       "pocket listing", "off-market exclusive", "coming soon exclusive",
       "pre-mls", "pre mls", "off mls", "not on the mls",
       "exclusive off-market", "private listing", "silent listing",
+      "never hitting the mls", "bypassing the mls",
     ],
-    "message": "MLS Cooperation: language may conflict with Clear Cooperation Policy.",
+    "message": (
+        "NAR Clear Cooperation Policy: language may conflict with MLS Policy Statement 8.0, "
+        "which requires listing submission to the MLS within one business day of marketing. "
+        "Verify with your MLS before using this language publicly."
+    ),
   },
+
+  # ── CFPB UDAAP
+  # Source: Consumer Financial Protection Act, 12 U.S.C. § 5531
+  "cfpb_udaap": {
+    "id": "cfpb_udaap",
+    "authority": "Consumer Financial Protection Act, 12 U.S.C. § 5531 (UDAAP)",
+    "severity": "fail",
+    "terms": [
+      "easy to qualify", "anyone can get approved", "no credit check needed",
+      "instant pre-approval", "guaranteed financing", "guaranteed approval",
+      "anyone qualifies", "everyone qualifies", "no income verification",
+      "approval guaranteed", "guaranteed loan", "pre-approved for anyone",
+    ],
+    "message": (
+        "CFPB UDAAP (12 U.S.C. § 5531): language implying guaranteed or unrestricted "
+        "financing approval is an unfair, deceptive, or abusive act. "
+        "No lender can guarantee approval in advertising. Legal review required."
+    ),
+  },
+
+  # ── EPA LEAD PAINT
+  # Source: TSCA Title X; EPA 40 C.F.R. Part 745; HUD 24 C.F.R. Part 35
+  "epa_lead_paint": {
+    "id": "epa_lead_paint",
+    "authority": "TSCA Title X / EPA 40 C.F.R. Part 745 / HUD 24 C.F.R. Part 35",
+    "severity": "fail",
+    "terms": [
+      "built in the 1960s", "built in the 1950s", "built in the 1940s",
+      "built in the 1930s", "1960s home", "1950s home", "1940s home",
+      "1930s home", "pre-war home", "original woodwork", "original windows",
+      "original hardwood", "historic details", "original features",
+      "charming older home", "vintage details", "classic older home",
+      "built before 1978",
+    ],
+    "message": (
+        "EPA / TSCA Title X (40 C.F.R. § 745): language suggesting a pre-1978 property "
+        "without lead paint disclosure. Federal law requires sellers and landlords to "
+        "disclose known lead-based paint hazards in housing built before 1978. "
+        "Ensure Lead Paint Disclosure form is completed before listing goes live. "
+        "Cite: 40 C.F.R. § 745.107."
+    ),
+  },
+
+  # ── FHA LOAN ADVERTISING / REGULATION Z
+  # Source: CFPB Regulation Z, 12 C.F.R. § 1026; FHA Handbook 4000.1
+  "fha_advertising": {
+    "id": "fha_advertising",
+    "authority": "CFPB Regulation Z, 12 C.F.R. § 1026 / FHA Handbook 4000.1",
+    "severity": "warn",
+    "terms": [
+      "fha approved", "fha loans available", "3.5% down", "3.5 percent down",
+      "fha financing available", "fha eligible", "fha ready",
+      "fha loan option", "3.5% minimum down",
+    ],
+    "message": (
+        "Regulation Z (12 C.F.R. § 1026): referencing FHA loan terms or specific down "
+        "payment percentages in advertising may trigger Truth in Lending Act disclosure "
+        "requirements. Include the licensed lender's name and NMLS number, and confirm "
+        "whether full APR disclosure is required."
+    ),
+  },
+
+  # ── REGULATION Z — rate/payment triggers
+  # Source: CFPB Regulation Z, 12 C.F.R. § 1026.24
+  "regulation_z": {
+    "id": "regulation_z",
+    "authority": "CFPB Regulation Z, 12 C.F.R. § 1026.24",
+    "severity": "fail",
+    "terms": [
+      "rates as low as", "payment of only", "payments starting at",
+      "% interest rate", "% apr", "only $ per month", "monthly payment of",
+      "payment as low as",
+    ],
+    "message": (
+        "Regulation Z (12 C.F.R. § 1026.24): quoting specific interest rates, APRs, or "
+        "monthly payment amounts in advertising triggers mandatory full APR disclosure "
+        "requirements. Remove specific rate/payment figures or include full required disclosures. "
+        "Cite: 12 C.F.R. § 1026.24(c)."
+    ),
+  },
+
+  # ── ADA / FHA ACCESSIBILITY CLAIMS
+  # Source: FHA § 3604(f); ADA 42 U.S.C. § 12101
+  "ada_disability": {
+    "id": "ada_disability",
+    "authority": "Fair Housing Act § 3604(f) / ADA 42 U.S.C. § 12101",
+    "severity": "warn",
+    "terms": [
+      "wheelchair accessible", "handicap accessible", "ada compliant",
+      "fully accessible", "disability friendly", "mobility accessible",
+    ],
+    "message": (
+        "FHA § 3604(f) / ADA: accessibility claims should be verified against current "
+        "FHA accessibility standards (24 C.F.R. Part 100, Subpart D) or ADA requirements. "
+        "Unverified accessibility claims may create liability if the property does not "
+        "meet the stated standard."
+    ),
+  },
+
+  # ── FLOOD ZONE
+  # Source: FEMA NFIP 44 C.F.R.; FIRM map standards; state disclosure laws
+  "flood_zone": {
+    "id": "flood_zone",
+    "authority": "FEMA NFIP / 44 C.F.R. Part 59 / State Material Disclosure Laws",
+    "severity": "warn",
+    "terms": [
+      "no flood risk", "low flood zone", "never flooded",
+      "out of flood zone", "flood free", "not in a flood zone",
+      "minimal flood risk", "no flood concern", "flood zone x",
+      "outside the flood plain",
+    ],
+    "message": (
+        "FEMA / NFIP: flood zone statements require current FEMA FIRM map verification. "
+        "Flood zone designations change with map updates. Unverified flood zone claims "
+        "may constitute material misrepresentation. Verify current FIRM map status at "
+        "msc.fema.gov before publishing flood zone claims."
+    ),
+  },
+
+  # ── NAR ARTICLE 2 — No concealment of material facts
+  # Source: NAR Code of Ethics Article 2 (2026)
+  "nar_article2": {
+    "id": "nar_article2",
+    "authority": "NAR Code of Ethics Article 2 (2026)",
+    "severity": "warn",
+    "terms": [
+      "no issues", "nothing to disclose", "perfect condition",
+      "no problems whatsoever", "issue free", "problem free",
+      "no defects", "defect free", "nothing needs repair",
+      "zero issues",
+    ],
+    "message": (
+        "NAR Code of Ethics Article 2: language implying no material facts exist to "
+        "disclose may constitute concealment of pertinent facts. REALTORS must not "
+        "misrepresent or conceal pertinent facts relating to the property. "
+        "Avoid blanket 'no issues' statements."
+    ),
+  },
+
+  # ── NAR ARTICLE 11 — Competency
+  # Source: NAR Code of Ethics Article 11 (2026)
+  "nar_article11": {
+    "id": "nar_article11",
+    "authority": "NAR Code of Ethics Article 11 (2026)",
+    "severity": "warn",
+    "terms": [
+      "only expert", "leading expert", "foremost expert",
+      "certified expert in", "the expert on", "exclusive expert",
+    ],
+    "message": (
+        "NAR Code of Ethics Article 11: competency claims should be supported by verified "
+        "designations or documented experience in that property or service type. "
+        "Unsubstantiated 'expert' claims may violate Article 11."
+    ),
+  },
+
+  # ── NAR ARTICLE 15 — No false statements about other professionals
+  # Source: NAR Code of Ethics Article 15 (2026)
+  "nar_article15": {
+    "id": "nar_article15",
+    "authority": "NAR Code of Ethics Article 15 (2026)",
+    "severity": "warn",
+    "terms": [
+      "unlike other agents", "better than other agents",
+      "unlike my competitors", "other agents don't",
+      "agents won't tell you", "what agents hide",
+      "agents lie about", "agents never",
+    ],
+    "message": (
+        "NAR Code of Ethics Article 15: comparative claims that disparage other real estate "
+        "professionals may violate Article 15. REALTORS must not knowingly make false "
+        "or misleading statements about other real estate professionals. "
+        "Focus on your own value proposition."
+    ),
+  },
+
+  # ── ZONING / DEVELOPMENT CLAIMS
+  # Source: State Real Estate Commission rules; state tort law (misrepresentation)
+  "local_zoning": {
+    "id": "local_zoning",
+    "authority": "State Real Estate Commission / State Misrepresentation Law",
+    "severity": "warn",
+    "terms": [
+      "can be converted to", "commercial potential", "commercial conversion possible",
+      "adu possible", "adu potential", "zoning allows", "zoning permits",
+      "can build", "buildable lot", "development ready",
+      "convert to commercial", "zoned for commercial",
+    ],
+    "message": (
+        "State Commission / Misrepresentation: zoning and development claims require "
+        "verification against current municipal records. Unverified development or "
+        "conversion claims may constitute material misrepresentation under state law "
+        "and NAR Article 12. Verify current zoning with the municipality before publishing."
+    ),
+  },
+
+  # ── STATE COMMISSION — generic placeholder for states not yet built
+  # Colorado has dedicated logic below via STATE_RULES; this fires for all others
   "state_commission": {
     "id": "state_commission",
-    "authority": "State Real Estate Commission (varies by state)",
+    "authority": "State Real Estate Commission",
     "severity": "warn",
     "terms": [
       "as-is no inspection", "no inspection needed", "skip the inspection",
       "guaranteed to appreciate", "will increase in value", "guaranteed roi",
       "investment guaranteed", "never lose money", "risk free investment",
-      "perfect investment", "zero risk",
+      "zero risk", "perfect investment",
     ],
-    "message": "State Commission: language may conflict with state advertising standards.",
+    "message": (
+        "State Real Estate Commission: language may conflict with state advertising "
+        "standards requiring truthful and non-misleading representations."
+    ),
   },
 
-  # ── NEW RULES — Item #3 ──────────────────────────────────────────────────
-
-  "cfpb_udaap": {
-    "id": "cfpb_udaap",
-    "authority": "CFPB 12 U.S.C. § 5531 (UDAAP)",
-    "severity": "fail",
-    "terms": [
-      "easy to qualify", "anyone can get approved", "no credit check",
-      "instant pre-approval", "guaranteed financing", "guaranteed approval",
-      "anyone qualifies", "everyone qualifies", "no income verification",
-      "approval guaranteed",
-    ],
-    "message": "CFPB UDAAP: language implying guaranteed or easy financing approval is an unfair, deceptive, or abusive act. Legal review required.",
-  },
-  "hud_advertising": {
-    "id": "hud_advertising",
-    "authority": "HUD 24 C.F.R. Part 100 Subpart C",
-    "severity": "warn",
-    "terms": [
-      "no pets", "no animals", "no dogs", "no cats",
-      "perfect for single person", "ideal for single person",
-      "adults preferred", "mature community",
-    ],
-    "message": "HUD Advertising: 'no pets' language may violate assistance animal requirements under FHA. Equal Housing Opportunity statement recommended.",
-  },
-  "epa_lead_paint": {
-    "id": "epa_lead_paint",
-    "authority": "EPA 40 C.F.R. Part 745 / TSCA Title X",
-    "severity": "fail",
-    "terms": [
-      "original hardwood", "historic details", "original features",
-      "built in the 1960s", "built in the 1950s", "built in the 1940s",
-      "built in the 1930s", "1960s home", "1950s home", "1940s home",
-      "1930s home", "pre-war home", "original woodwork", "original windows",
-      "charming older", "vintage details", "classic older",
-    ],
-    "message": "EPA Lead Paint (TSCA Title X): pre-1978 property language detected without lead paint disclosure. Federal law requires disclosure for properties built before 1978.",
-  },
-  "fha_advertising": {
-    "id": "fha_advertising",
-    "authority": "HUD Handbook 4000.1 / CFPB Regulation Z",
-    "severity": "warn",
-    "terms": [
-      "fha approved", "fha loans available", "3.5% down", "3.5 percent down",
-      "fha financing available", "fha eligible", "fha ready",
-    ],
-    "message": "FHA Advertising: referencing FHA loan terms without lender attribution may trigger Regulation Z disclosure requirements. Include licensed lender name and NMLS number.",
-  },
-  "ada_disability": {
-    "id": "ada_disability",
-    "authority": "Fair Housing Act 42 U.S.C. § 3604(f) / ADA",
-    "severity": "warn",
-    "terms": [
-      "wheelchair accessible", "handicap accessible", "ada compliant",
-      "accessible home", "disability friendly", "mobility accessible",
-      "fully accessible",
-    ],
-    "message": "ADA / FHA § 3604(f): accessibility claims should be supported by documentation. Unverified accessibility claims may create liability.",
-  },
-  "doj_steering": {
-    "id": "doj_steering",
-    "authority": "DOJ 28 C.F.R. Part 42 / Fair Housing Act",
-    "severity": "warn",
-    "terms": [
-      "you'll love the neighbors", "great neighbors", "wonderful neighbors",
-      "this area is changing", "neighborhood is improving", "area is up and coming",
-      "perfect for your community", "community you'll fit in",
-      "you'll fit right in", "people like you",
-    ],
-    "message": "DOJ Steering: language referencing neighborhood demographics or suggesting buyer-community fit may constitute illegal steering under the Fair Housing Act.",
-  },
-  "flood_zone": {
-    "id": "flood_zone",
-    "authority": "FEMA NFIP 44 C.F.R. / FIRM Map Standards",
-    "severity": "warn",
-    "terms": [
-      "no flood risk", "low flood zone", "never flooded",
-      "out of flood zone", "flood free", "not in a flood zone",
-      "minimal flood risk", "no flood concern",
-    ],
-    "message": "FEMA / NFIP: flood zone statements require current FEMA FIRM map verification. Unverified flood zone claims create material misrepresentation liability.",
-  },
-  "nar_article2": {
-    "id": "nar_article2",
-    "authority": "NAR Code of Ethics Article 2",
-    "severity": "warn",
-    "terms": [
-      "no issues", "nothing to disclose", "perfect condition",
-      "no problems", "nothing wrong", "issue free", "problem free",
-      "no defects", "defect free", "nothing needs repair",
-    ],
-    "message": "NAR Article 2: language implying no material facts to disclose may constitute concealment. Avoid blanket 'no issues' statements.",
-  },
-  "nar_article11": {
-    "id": "nar_article11",
-    "authority": "NAR Code of Ethics Article 11",
-    "severity": "warn",
-    "terms": [
-      "expert in", "specialist in", "i specialize exclusively",
-      "only expert", "leading expert", "foremost expert",
-      "certified expert", "the expert on",
-    ],
-    "message": "NAR Article 11: competency claims should be supported by verified designations or documented experience. Unsubstantiated 'expert' claims may violate Article 11.",
-  },
-  "nar_article15": {
-    "id": "nar_article15",
-    "authority": "NAR Code of Ethics Article 15",
-    "severity": "warn",
-    "terms": [
-      "the only agent who", "unlike other agents", "better than other agents",
-      "unlike my competitors", "other agents don't", "no other agent",
-      "agents won't tell you", "what agents hide",
-    ],
-    "message": "NAR Article 15: comparative claims disparaging other agents or brokers may violate Article 15. Focus on your own value, not competitor criticism.",
-  },
-  "local_zoning": {
-    "id": "local_zoning",
-    "authority": "State Real Estate Commission / State Tort Law",
-    "severity": "warn",
-    "terms": [
-      "can be converted to", "commercial potential", "development opportunity",
-      "adu possible", "adu potential", "zoning allows", "zoning permits",
-      "can build", "buildable lot", "development ready",
-      "convert to commercial", "commercial conversion",
-    ],
-    "message": "Zoning / State Commission: zoning claims require verified municipal records. Unverified development or conversion claims may constitute material misrepresentation.",
-  },
-
-  # ── EXISTING RULES (unchanged) ───────────────────────────────────────────
-
+  # ── INVESTMENT / SECURITIES
   "sec_investment_disclosure": {
     "id": "sec_investment_disclosure",
-    "authority": "SEC Rule 10b-5 / Securities Act Section 17(b)",
+    "authority": "SEC Rule 10b-5 / Securities Act § 17(b)",
     "severity": "fail",
     "terms": [
-      "projected return", "expected return", "annual return of", "irr of",
+      "projected return of", "expected annual return", "irr of",
       "cap rate guarantee", "guaranteed cap rate", "regulation d offering",
-      "accredited investors only",
+      "accredited investors only", "annual return of",
     ],
-    "message": "SEC Rule 10b-5: securities-adjacent language detected. Legal review required.",
+    "message": (
+        "SEC Rule 10b-5: securities-adjacent language detected. Projecting specific "
+        "returns or referencing Regulation D in advertising may constitute an unlawful "
+        "securities offering. Legal review required before publishing."
+    ),
   },
+
   "sec_investment_risk": {
     "id": "sec_investment_risk",
     "authority": "SEC General Anti-Fraud / Rule 10b-5",
     "severity": "warn",
     "terms": [
       "safe investment", "guaranteed income", "passive income guaranteed",
-      "risk-free", "no risk", "certain returns", "will cash flow",
+      "risk-free", "risk free", "certain returns", "will cash flow",
       "guaranteed cash flow", "will appreciate",
     ],
-    "message": "SEC: language implying guaranteed investment outcomes may be a securities violation.",
+    "message": "SEC / State Securities: language implying guaranteed investment outcomes may violate securities anti-fraud rules.",
   },
-  "finra_communications": {
-    "id": "finra_communications",
-    "authority": "FINRA Rule 2210",
-    "severity": "warn",
-    "terms": ["financial advisor recommends", "broker recommends", "strong buy", "must buy investment"],
-    "message": "FINRA Rule 2210: content referencing financial recommendations may trigger broker-dealer standards.",
-  },
+
   "fincen_aml": {
     "id": "fincen_aml",
-    "authority": "FinCEN Geographic Targeting Orders / Bank Secrecy Act",
+    "authority": "FinCEN Geographic Targeting Orders / Bank Secrecy Act, 31 U.S.C. § 5311",
     "severity": "warn",
     "terms": [
       "cash only", "cash buyers preferred", "no financing required",
-      "anonymous buyer", "no questions asked", "offshore buyer", "wire transfer only",
+      "anonymous buyer", "no questions asked", "wire transfer only",
     ],
-    "message": "FinCEN / BSA: language may attract AML scrutiny.",
+    "message": "FinCEN / BSA: language may attract AML scrutiny. Cash-only and anonymous-buyer language in housing ads has been the subject of FinCEN Geographic Targeting Orders.",
   },
+
   "cercla_environmental": {
     "id": "cercla_environmental",
-    "authority": "CERCLA (42 U.S.C. § 9601) / ASTM Phase I Standards",
+    "authority": "CERCLA, 42 U.S.C. § 9601 / ASTM E1527 Phase I Standards",
     "severity": "fail",
     "terms": [
       "clean site", "no environmental issues", "environmentally clean",
-      "no contamination", "no phase i needed",
+      "no contamination", "no phase i needed", "environmentally clear",
     ],
-    "message": "CERCLA: representing a property as environmentally clean without Phase I ESA is a material misrepresentation.",
+    "message": (
+        "CERCLA (42 U.S.C. § 9601): representing a property as environmentally clean "
+        "without a Phase I ESA is a material misrepresentation. Remove environmental "
+        "clean claims or reference the Phase I ESA that supports them."
+    ),
   },
+
   "commercial_investment_disclaimer": {
     "id": "commercial_investment_disclaimer",
-    "authority": "State Real Estate Commission / NAR Article 12",
+    "authority": "State Real Estate Commission / NAR Code of Ethics Article 12",
     "severity": "warn",
     "terms": [
       "guaranteed noi", "noi will be", "income guaranteed",
-      "lease guaranteed", "tenant guaranteed", "guaranteed occupancy", "will produce income",
+      "lease guaranteed", "tenant guaranteed", "guaranteed occupancy",
+      "will produce income",
     ],
-    "message": "Commercial Investment: projecting guaranteed income may violate state advertising standards.",
+    "message": "Commercial / Investment: projecting guaranteed income in advertising may violate state advertising standards and NAR Article 12.",
   },
+
+  # ── MORTGAGE / LENDING
+  "nmls_disclosure": {
+    "id": "nmls_disclosure",
+    "authority": "SAFE Act, 12 U.S.C. § 5101 / CFPB Regulation Z",
+    "severity": "warn",
+    "terms": [
+      "loan officer", "mortgage advisor", "mortgage broker",
+      "i can get you a loan", "my lender can",
+    ],
+    "message": (
+        "SAFE Act: content referencing mortgage professional services must include "
+        "the NMLS license number of the individual and/or company. "
+        "Cite: 12 U.S.C. § 5101 et seq."
+    ),
+  },
+
+  # ── FTC
+  "ftc_endorsement": {
+    "id": "ftc_endorsement",
+    "authority": "FTC Endorsement Guides, 16 C.F.R. Part 255",
+    "severity": "warn",
+    "terms": [
+      "results not typical", "typical results", "customers report",
+      "studies show", "proven to", "clinically proven", "endorsed by",
+      "as seen in", "featured in",
+    ],
+    "message": "FTC Endorsement Guides (16 C.F.R. Part 255): performance claims and endorsements must be substantiated and reflect typical results.",
+  },
+
+  "ftc_claims": {
+    "id": "ftc_claims",
+    "authority": "FTC Act Section 5, 15 U.S.C. § 45",
+    "severity": "warn",
+    "terms": [
+      "100% guarantee", "never fails", "always works",
+      "the only platform", "the only tool", "no other platform",
+    ],
+    "message": "FTC Act Section 5: absolute claims must be substantiated. Remove or qualify.",
+  },
+
+  "can_spam": {
+    "id": "can_spam",
+    "authority": "CAN-SPAM Act, 15 U.S.C. § 7701",
+    "severity": "warn",
+    "terms": ["unsubscribe", "opt out", "remove me from", "stop emails"],
+    "message": "CAN-SPAM Act: email content must include a functioning opt-out mechanism and physical mailing address.",
+  },
+
+  # ── DATA CENTER / TECH (unchanged from v1 — not housing advertising rules)
   "tier_certification_claims": {
     "id": "tier_certification_claims",
     "authority": "Uptime Institute Tier Certification Standards",
     "severity": "fail",
-    "terms": [
-      "tier iv certified", "tier 4 certified", "tier iii certified", "tier 3 certified",
-      "uptime certified", "certified tier", "tier-certified",
-    ],
-    "message": "Uptime Institute: tier certification claims require active audited certification.",
+    "terms": ["tier iv certified", "tier 4 certified", "tier iii certified", "tier 3 certified",
+              "uptime certified", "certified tier", "tier-certified"],
+    "message": "Uptime Institute: tier certification claims require active audited certification. Do not claim certification without current audit.",
   },
+
   "soc2_claims": {
     "id": "soc2_claims",
     "authority": "AICPA SOC 2 Standards / FTC Act Section 5",
     "severity": "warn",
     "terms": ["soc 2 compliant", "soc2 compliant", "soc 2 certified", "fully soc compliant"],
-    "message": "SOC 2: use 'SOC 2 Type II audited' not 'SOC 2 compliant'.",
+    "message": "SOC 2: use 'SOC 2 Type II audited' not 'SOC 2 compliant' — 'compliant' is not a recognized SOC 2 designation.",
   },
+
   "ferc_power_claims": {
     "id": "ferc_power_claims",
     "authority": "FERC / Federal Power Act",
     "severity": "warn",
     "terms": ["guaranteed power", "power guaranteed", "100% uptime power", "unlimited power"],
-    "message": "FERC: absolute power guarantees require qualification.",
+    "message": "FERC: absolute power guarantees require qualification. No utility can guarantee 100% uptime.",
   },
+
   "cfius_awareness": {
     "id": "cfius_awareness",
-    "authority": "CFIUS (50 U.S.C. § 4565) / FIRRMA",
+    "authority": "CFIUS, 50 U.S.C. § 4565 / FIRRMA",
     "severity": "warn",
-    "terms": [
-      "foreign investor welcome", "international buyers welcome",
-      "open to foreign capital", "no restrictions on foreign", "foreign ownership available",
-    ],
-    "message": "CFIUS / FIRRMA: data center assets are subject to foreign investment review.",
+    "terms": ["foreign investor welcome", "open to foreign capital",
+              "no restrictions on foreign", "foreign ownership available"],
+    "message": "CFIUS / FIRRMA: data center and critical infrastructure assets are subject to foreign investment review.",
   },
+
   "critical_infrastructure_disclosure": {
     "id": "critical_infrastructure_disclosure",
     "authority": "DHS Critical Infrastructure Framework / FISMA",
     "severity": "warn",
-    "terms": [
-      "government tenant", "dod tenant", "federal government client",
-      "classified facility", "scif", "clearance required", "cleared facility",
-    ],
-    "message": "Critical Infrastructure: references to government tenants require additional security review.",
+    "terms": ["government tenant", "dod tenant", "federal government client",
+              "classified facility", "scif", "clearance required", "cleared facility"],
+    "message": "Critical Infrastructure: references to government or cleared tenants require additional security review before publication.",
   },
+
   "ppa_claims": {
     "id": "ppa_claims",
-    "authority": "FERC / State PUC Regulations / FTC Green Guides (16 C.F.R. Part 260)",
+    "authority": "FERC / State PUC Regulations / FTC Green Guides, 16 C.F.R. Part 260",
     "severity": "warn",
-    "terms": [
-      "100% renewable", "fully renewable", "carbon neutral facility",
-      "green powered", "net zero facility", "zero carbon data center",
-    ],
-    "message": "Renewable claims must be supported by verified PPAs or RECs. May violate FTC Green Guides.",
+    "terms": ["100% renewable", "fully renewable", "carbon neutral facility",
+              "net zero facility", "zero carbon data center"],
+    "message": "FTC Green Guides (16 C.F.R. Part 260): renewable and sustainability claims must be supported by verified PPAs or RECs.",
   },
-  "nmls_disclosure": {
-    "id": "nmls_disclosure",
-    "authority": "SAFE Act / CFPB Regulation Z",
+
+  "finra_communications": {
+    "id": "finra_communications",
+    "authority": "FINRA Rule 2210",
     "severity": "warn",
-    "terms": ["loan officer", "mortgage advisor", "lender", "mortgage broker"],
-    "message": "SAFE Act: Mortgage professional content must include NMLS license number.",
-  },
-  "regulation_z": {
-    "id": "regulation_z",
-    "authority": "CFPB Regulation Z (12 C.F.R. § 1026)",
-    "severity": "fail",
-    "terms": ["rates as low as", "payment of only", "only $", "payments starting at", "% interest rate"],
-    "message": "Regulation Z: quoting rates or payments triggers full APR disclosure requirements.",
-  },
-  "ftc_endorsement": {
-    "id": "ftc_endorsement",
-    "authority": "FTC Endorsement Guides (16 C.F.R. Part 255)",
-    "severity": "warn",
-    "terms": [
-      "results not typical", "typical results", "customers report",
-      "studies show", "proven to", "clinically proven", "endorsed by",
-    ],
-    "message": "FTC Endorsement Guides: performance claims must be substantiated.",
-  },
-  "ftc_claims": {
-    "id": "ftc_claims",
-    "authority": "FTC Act Section 5",
-    "severity": "warn",
-    "terms": [
-      "100% guarantee", "guaranteed results", "never fails", "always works",
-      "the only platform", "the only tool", "no other platform",
-    ],
-    "message": "FTC Act Section 5: absolute claims must be substantiated.",
-  },
-  "can_spam": {
-    "id": "can_spam",
-    "authority": "CAN-SPAM Act (15 U.S.C. § 7701)",
-    "severity": "warn",
-    "terms": ["unsubscribe", "opt out", "remove me", "stop emails"],
-    "message": "CAN-SPAM: email content must include opt-out mechanism and physical address.",
+    "terms": ["financial advisor recommends", "strong buy", "must buy investment"],
+    "message": "FINRA Rule 2210: content referencing specific financial recommendations may trigger broker-dealer communications standards.",
   },
 }
 
 
-COMPLIANCE_PROFILES = {
-  # ── residential: 5 → 16 rules (Item #3) ─────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# STATE-SPECIFIC RULE OVERLAYS
+# Built from state real estate commission research.
+# Structure: each state entry adds notes and/or additional phrase checks
+# that run on top of the federal floor when agent.state matches.
+#
+# Colorado is fully built from 4 CCR 725-1 research (Rule 6.10).
+# All other states use a "federal floor" stub with a reminder note.
+# States will be populated as research completes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+STATE_RULES: Dict[str, Dict] = {
+
+  # ── COLORADO — Source: 4 CCR 725-1, Colorado Real Estate Commission Rules
+  "CO": {
+    "label": "Colorado Real Estate Commission",
+    "authority": "4 CCR 725-1 (Colorado Real Estate Commission Rules Regarding Real Estate Brokers)",
+    "notes": [
+        # 4 CCR 725-1, Rule 6.10.4
+        "Colorado 4 CCR 725-1 Rule 6.10.4: All advertising must be done clearly and conspicuously "
+        "in the name of the Broker's Brokerage Firm. A Broker who advertises real property owned "
+        "by the Broker and not listed with the Firm is exempt.",
+        # 4 CCR 725-1, Rule 6.10.2
+        "Colorado 4 CCR 725-1 Rule 6.10.2: No Broker or Brokerage Firm may conduct or promote "
+        "Real Estate Brokerage Services except in the name under which they appear in the records "
+        "of the Colorado Real Estate Commission.",
+        # 4 CCR 725-1, Rule 6.10.3
+        "Colorado 4 CCR 725-1 Rule 6.10.3: Brokers will not advertise so as to mislead the public "
+        "concerning the identity of the Broker or the Broker's Brokerage Firm.",
+        # 4 CCR 725-1, Rule 6.23.B
+        "Colorado 4 CCR 725-1 Rule 6.23.B: A Fair Housing violation or aiding and abetting in a "
+        "violation of Colorado or federal fair housing laws must be reported to the Commission "
+        "in writing within 30 calendar days.",
+    ],
+    # Colorado-specific phrase checks (run in addition to federal rules)
+    "extra_rules": [
+      {
+        "id": "co_sq_ft_disclosure",
+        "authority": "4 CCR 725-1, Rule 6.x (Square Footage Measurement and Disclosure)",
+        "severity": "warn",
+        # Regex-style check handled separately in _run_compliance_check
+        "pattern_hint": "square_footage",
+        "message": (
+            "Colorado 4 CCR 725-1: When advertising square footage, you must disclose the "
+            "source and methodology of measurement. Verify source is disclosed in your full "
+            "listing or that the post does not make the square footage figure the primary claim."
+        ),
+      },
+      {
+        "id": "co_franchise_legend",
+        "authority": "4 CCR 725-1, Rule 6.10.5 (Franchise/Trade Name Legend Requirement)",
+        "severity": "warn",
+        "terms": [],   # No phrase trigger — this is a process reminder
+        "message": (
+            "Colorado 4 CCR 725-1 Rule 6.10.5: If your brokerage uses a trade name or trademark "
+            "owned by a third party (franchise), advertising must include the legend: "
+            "'Each [trade name] brokerage business is independently owned and operated.' "
+            "Verify this appears where required."
+        ),
+      },
+    ],
+  },
+
+  # ── STUB ENTRIES — federal floor + commission reminder
+  # These will be replaced with specific rules as state research completes.
+  "CA": {"label": "California Department of Real Estate", "authority": "10 CCR § 2770 et seq.", "notes": [
+    "California DRE: All advertising must include the DRE license number of the agent and/or broker. "
+    "Verify current requirements at dre.ca.gov (10 Cal. Code Regs. § 2770)."
+  ], "extra_rules": []},
+
+  "TX": {"label": "Texas Real Estate Commission", "authority": "22 TAC § 535.155", "notes": [
+    "Texas TREC 22 TAC § 535.155: All advertising must include the broker's name or the team name "
+    "and must include the phrase 'TREC #[license number]'. Individual agents may not advertise "
+    "independently of their sponsoring broker."
+  ], "extra_rules": []},
+
+  "FL": {"label": "Florida Real Estate Commission", "authority": "Fla. Admin. Code Rule 61J2-10.025", "notes": [
+    "Florida FREC Rule 61J2-10.025: The registered name of the brokerage must be prominently "
+    "displayed in all advertising. Point size of brokerage name must be equal to or larger than "
+    "the agent's name."
+  ], "extra_rules": []},
+
+  "NY": {"label": "New York Department of State — Division of Licensing Services", "authority": "19 NYCRR Part 175.25", "notes": [
+    "New York 19 NYCRR § 175.25: All advertising must include the name of the licensed real estate "
+    "broker. Salespersons may not advertise independently. New York also requires the Fair Housing "
+    "logo or statement in covered advertising."
+  ], "extra_rules": []},
+
+  "WA": {"label": "Washington Department of Licensing", "authority": "WAC 308-124H-820", "notes": [
+    "Washington WAC 308-124H-820: All advertising must be done in the name of the licensed broker. "
+    "Advertising that uses a team or group name must still clearly identify the licensed brokerage."
+  ], "extra_rules": []},
+
+  "AZ": {"label": "Arizona Department of Real Estate", "authority": "A.A.C. R4-28-502", "notes": [
+    "Arizona ADRE R4-28-502: All advertising must include the employing broker's name and must not "
+    "be misleading. Agents must obtain broker approval before publishing."
+  ], "extra_rules": []},
+
+  "NV": {"label": "Nevada Real Estate Division", "authority": "NAC 645.611", "notes": [
+    "Nevada NRS/NAC 645.611: Advertising must clearly display the name of the brokerage. "
+    "An individual licensee may not advertise independently of the employing broker."
+  ], "extra_rules": []},
+
+  "OR": {"label": "Oregon Real Estate Agency", "authority": "OAR 863-015-0130", "notes": [
+    "Oregon OAR 863-015-0130: All advertising must include the licensed name of the principal "
+    "broker or property manager. Team names must be registered with the Agency."
+  ], "extra_rules": []},
+
+  "GA": {"label": "Georgia Real Estate Commission", "authority": "Ga. Comp. R. & Regs. 520-1-.09", "notes": [
+    "Georgia GREC Rule 520-1-.09: All advertising must clearly identify the name of the broker "
+    "or real estate firm. Agents may not advertise independently."
+  ], "extra_rules": []},
+
+  "NC": {"label": "North Carolina Real Estate Commission", "authority": "21 NCAC 58A .0105", "notes": [
+    "North Carolina NCREC 21 NCAC 58A .0105: All advertising must include the firm name. "
+    "An individual provisional or full broker may not advertise independently of the firm."
+  ], "extra_rules": []},
+
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPLIANCE PROFILES — which rule IDs run for each content type
+# ─────────────────────────────────────────────────────────────────────────────
+
+COMPLIANCE_PROFILES: Dict[str, List[str]] = {
+  # Residential — full Fair Housing + NAR + state floor
   "residential": [
-    "fair_housing",
-    "nar_article12",
-    "respa_section8",
-    "clear_cooperation",
-    "state_commission",
-    "cfpb_udaap",
-    "hud_advertising",
-    "epa_lead_paint",
-    "fha_advertising",
-    "ada_disability",
-    "doj_steering",
-    "flood_zone",
-    "nar_article2",
-    "nar_article11",
-    "nar_article15",
-    "local_zoning",
+    "fair_housing", "doj_steering", "hud_advertising",
+    "nar_article12", "nar_article2", "nar_article11", "nar_article15",
+    "respa_section8", "clear_cooperation", "state_commission",
+    "cfpb_udaap", "epa_lead_paint", "fha_advertising", "ada_disability",
+    "flood_zone", "local_zoning",
   ],
-  # ── commercial: add cfpb_udaap, ada_disability, local_zoning, nar_article2
+  # Commercial — FH still applies; add investment/securities rules
   "commercial": [
-    "nar_article12",
-    "respa_section8",
-    "state_commission",
-    "sec_investment_disclosure",
-    "sec_investment_risk",
-    "finra_communications",
-    "fincen_aml",
-    "cercla_environmental",
-    "commercial_investment_disclaimer",
-    "cfpb_udaap",
-    "ada_disability",
-    "local_zoning",
-    "nar_article2",
+    "fair_housing", "doj_steering",
+    "nar_article12", "nar_article2", "nar_article11", "nar_article15",
+    "respa_section8", "state_commission",
+    "sec_investment_disclosure", "sec_investment_risk", "finra_communications",
+    "fincen_aml", "cercla_environmental", "commercial_investment_disclaimer",
+    "cfpb_udaap", "ada_disability", "local_zoning", "flood_zone",
   ],
-  "data_center": [
-    "nar_article12",
-    "state_commission",
-    "sec_investment_disclosure",
-    "sec_investment_risk",
-    "finra_communications",
-    "fincen_aml",
-    "tier_certification_claims",
-    "soc2_claims",
-    "ferc_power_claims",
-    "cfius_awareness",
-    "critical_infrastructure_disclosure",
-    "ppa_claims",
-    "commercial_investment_disclaimer",
-  ],
-  # ── investment: add cfpb_udaap, fha_advertising, local_zoning, nar_article2
+  # Investment
   "investment": [
-    "nar_article12",
-    "state_commission",
-    "sec_investment_disclosure",
-    "sec_investment_risk",
-    "fincen_aml",
-    "commercial_investment_disclaimer",
-    "cfpb_udaap",
-    "fha_advertising",
-    "local_zoning",
-    "nar_article2",
+    "fair_housing", "nar_article12", "nar_article2", "state_commission",
+    "sec_investment_disclosure", "sec_investment_risk",
+    "fincen_aml", "commercial_investment_disclaimer",
+    "cfpb_udaap", "fha_advertising", "local_zoning", "flood_zone",
   ],
-  # ── mortgage: add cfpb_udaap, fha_advertising, hud_advertising, ada_disability
+  # Mortgage / lending content
   "mortgage": [
-    "nmls_disclosure",
-    "regulation_z",
-    "respa_section8",
-    "fair_housing",
-    "state_commission",
-    "cfpb_udaap",
-    "fha_advertising",
-    "hud_advertising",
-    "ada_disability",
+    "fair_housing", "doj_steering", "nar_article12", "state_commission",
+    "cfpb_udaap", "fha_advertising", "regulation_z",
+    "hud_advertising", "ada_disability", "nmls_disclosure", "respa_section8",
   ],
+  # Data center — not housing; different regulatory universe
+  "data_center": [
+    "nar_article12", "state_commission",
+    "sec_investment_disclosure", "sec_investment_risk", "finra_communications",
+    "fincen_aml", "tier_certification_claims", "soc2_claims",
+    "ferc_power_claims", "cfius_awareness", "critical_infrastructure_disclosure",
+    "ppa_claims", "commercial_investment_disclaimer",
+  ],
+  # B2B SaaS — HomeBridge talking about itself
   "b2b_saas": [
-    "ftc_endorsement",
-    "ftc_claims",
-    "can_spam",
-    "nar_article12",
+    "ftc_endorsement", "ftc_claims", "can_spam", "nar_article12",
   ],
 }
 
@@ -951,26 +1295,43 @@ NICHE_COMPLIANCE_PROFILE = {
 }
 
 
-def _get_compliance_profile(niche):
+def _get_compliance_profile(niche: str) -> str:
     return NICHE_COMPLIANCE_PROFILE.get(niche, "residential")
 
 
-def _get_rules_for_profile(profile_name):
+def _get_rules_for_profile(profile_name: str) -> List[Dict]:
     rule_ids = COMPLIANCE_PROFILES.get(profile_name, COMPLIANCE_PROFILES["residential"])
     return [COMPLIANCE_RULES[rid] for rid in rule_ids if rid in COMPLIANCE_RULES]
 
 
-def _run_compliance_check(
-    content, agent_name, brokerage, mls_names=None,
-    niche="", custom_rule_ids=None, content_mode="agent",
-    state=""
-):
-    content_lower = content.lower()
-    notes         = []
-    statuses      = {}
-    # disclosureChecks carries per-rule results for the PDF sub-row (Item #2)
-    disclosure_checks = []
+# ─────────────────────────────────────────────────────────────────────────────
+# PASS 1 — Rule-Based Phrase Matching
+# Runs synchronously; no API call; catches explicit phrase violations only.
+# Context-dependent language is deferred to Pass 2 (semantic).
+# ─────────────────────────────────────────────────────────────────────────────
 
+def _run_compliance_check(
+    content: str,
+    agent_name: str,
+    brokerage: str,
+    mls_names: List[str] = None,
+    niche: str = "",
+    custom_rule_ids: List[str] = None,
+    content_mode: str = "agent",
+    state: str = "",
+) -> tuple:
+    """
+    Pass 1: phrase-match against law-grounded rule set.
+    Returns (ComplianceBadge, profile_name) — badge contains Pass 1 results only.
+    Pass 2 (semantic) results are merged by _build_final_badge().
+    """
+    import re
+    content_lower = content.lower()
+    notes: List[str] = []
+    statuses: Dict[str, str] = {}
+    disclosure_checks: List[str] = []
+
+    # ── Select rule profile ───────────────────────────────────────────────────
     if content_mode == "b2b":
         profile_name = "b2b_saas"
     else:
@@ -982,109 +1343,430 @@ def _run_compliance_check(
             if rid in COMPLIANCE_RULES:
                 rules.append(COMPLIANCE_RULES[rid])
 
-    for rule in rules:
-        triggered = [t for t in rule["terms"] if t in content_lower]
-        rule_authority = rule.get("authority", rule["id"])
+    # ── Deduplicate rules ─────────────────────────────────────────────────────
+    seen_ids: set = set()
+    deduped_rules = []
+    for r in rules:
+        if r["id"] not in seen_ids:
+            deduped_rules.append(r)
+            seen_ids.add(r["id"])
 
-        # Personalise state_commission message with the agent's state (Item #3)
+    # ── Apply each rule ───────────────────────────────────────────────────────
+    for rule in deduped_rules:
+        triggered = [t for t in rule.get("terms", []) if t in content_lower]
+
+        # Personalise state_commission label with agent state
+        rule_authority = rule.get("authority", rule["id"])
         if rule["id"] == "state_commission" and state:
-            rule_authority = f"{state} Real Estate Commission"
-            msg = f"{state} Real Estate Commission: language may conflict with {state} state advertising standards."
+            state_label = STATE_RULES.get(state.upper(), {}).get("label", f"{state} Real Estate Commission")
+            rule_authority = state_label
+            msg = (
+                f"{state_label}: language may conflict with {state} state advertising standards. "
+                f"Verify current {state_label} requirements before publishing."
+            )
         else:
             msg = rule["message"]
 
         if triggered:
             statuses[rule["id"]] = rule["severity"]
-            flag = "⚠ fail" if rule["severity"] == "fail" else "⚠ warn"
-            notes.append(f"[{rule_authority}] {msg} (triggered: '{triggered[0]}')")
-            disclosure_checks.append(f"{flag} | {rule_authority} | {msg}")
+            flag_prefix = "⚠ FAIL" if rule["severity"] == "fail" else "⚠ WARN"
+            notes.append(
+                f"[{rule_authority}] {msg} "
+                f"(triggered by: '{triggered[0]}')"
+            )
+            disclosure_checks.append(f"{flag_prefix} | {rule_authority} | {msg}")
         else:
             statuses[rule["id"]] = "pass"
             disclosure_checks.append(f"✓ pass | {rule_authority}")
 
+    # ── Brokerage name disclosure ─────────────────────────────────────────────
     if brokerage and content_mode == "agent":
         brokerage_words = [w.lower() for w in brokerage.split() if len(w) > 3]
         if not any(w in content_lower for w in brokerage_words):
             statuses["brokerage_disclosure"] = "warn"
-            notes.append(f"Brokerage disclosure: '{brokerage}' not detected. Verify brokerage name appears before publishing.")
-            disclosure_checks.append(f"⚠ warn | Brokerage Disclosure | '{brokerage}' not detected in content.")
+            notes.append(
+                f"Brokerage disclosure: '{brokerage}' not detected in content. "
+                f"State advertising rules generally require the licensed brokerage name "
+                f"to appear clearly in all advertising."
+            )
+            disclosure_checks.append(
+                f"⚠ WARN | Brokerage Disclosure | '{brokerage}' not detected. "
+                f"Licensed brokerage name is required in advertising by most state commissions."
+            )
         else:
             statuses["brokerage_disclosure"] = "pass"
             disclosure_checks.append(f"✓ pass | Brokerage Disclosure")
 
+    # ── Agent licensed name disclosure ───────────────────────────────────────
     if agent_name and content_mode == "agent":
         name_parts = [p.lower() for p in agent_name.split() if len(p) > 2]
         if not any(p in content_lower for p in name_parts):
             statuses["agent_disclosure"] = "warn"
-            notes.append(f"Licensee disclosure: '{agent_name}' not detected. State law requires licensee name on all advertising.")
-            disclosure_checks.append(f"⚠ warn | Licensee Disclosure | '{agent_name}' not detected.")
+            notes.append(
+                f"Licensee disclosure: '{agent_name}' not detected. "
+                f"State law requires the licensee's name on all advertising."
+            )
+            disclosure_checks.append(
+                f"⚠ WARN | Licensee Disclosure | '{agent_name}' not detected in content."
+            )
         else:
             statuses["agent_disclosure"] = "pass"
             disclosure_checks.append(f"✓ pass | Licensee Disclosure")
 
+    # ── B2B company disclosure ────────────────────────────────────────────────
     if content_mode == "b2b":
         company_name = agent_name or "HomeBridge"
         company_parts = [p.lower() for p in company_name.split() if len(p) > 3]
         if not any(p in content_lower for p in company_parts):
             statuses["company_disclosure"] = "warn"
             notes.append(f"Company disclosure: '{company_name}' not detected in content.")
-            disclosure_checks.append(f"⚠ warn | Company Disclosure | '{company_name}' not detected.")
+            disclosure_checks.append(f"⚠ WARN | Company Disclosure | '{company_name}' not detected.")
         else:
             statuses["company_disclosure"] = "pass"
             disclosure_checks.append(f"✓ pass | Company Disclosure")
 
+    # ── MLS reminder ──────────────────────────────────────────────────────────
     mls_list = [m.strip() for m in (mls_names or []) if m and m.strip()]
     if mls_list and content_mode == "agent":
         mls_str = ", ".join(mls_list)
-        notes.append(f"MLS reminder: Verify advertising standards for {mls_str} before publishing.")
-        disclosure_checks.append(f"ℹ info | MLS Standards | Verify {mls_str} advertising rules before publishing.")
+        notes.append(f"MLS reminder: Verify advertising rules for {mls_str} before publishing.")
+        disclosure_checks.append(
+            f"ℹ info | MLS Standards | Verify {mls_str} advertising rules before publishing."
+        )
 
-    # Jurisdiction / profile reminder note
+    # ── State-specific overlay (CO fully built; others return reminder) ───────
+    state_key = state.upper() if state else ""
+    if state_key and state_key in STATE_RULES and content_mode == "agent":
+        state_entry = STATE_RULES[state_key]
+        for note in state_entry.get("notes", []):
+            disclosure_checks.append(f"ℹ state | {state_entry['label']} | {note}")
+
+        for extra in state_entry.get("extra_rules", []):
+            # Square footage pattern check (CO-specific)
+            if extra.get("pattern_hint") == "square_footage":
+                sq_ft_pattern = re.compile(
+                    r"\b\d[\d,]*\s*(?:sq\.?\s*ft\.?|square\s+feet|sqft)\b", re.IGNORECASE
+                )
+                if sq_ft_pattern.search(content):
+                    statuses["co_sq_ft_disclosure"] = "warn"
+                    notes.append(f"[{extra['authority']}] {extra['message']}")
+                    disclosure_checks.append(
+                        f"⚠ WARN | {extra['authority']} | {extra['message']}"
+                    )
+                else:
+                    statuses["co_sq_ft_disclosure"] = "pass"
+                    disclosure_checks.append(f"✓ pass | {extra['authority']}")
+            # Franchise legend reminder (always fire for CO agents with brokerage)
+            elif extra["id"] == "co_franchise_legend" and brokerage:
+                notes.append(f"[{extra['authority']}] {extra['message']}")
+                disclosure_checks.append(f"ℹ state | {extra['authority']} | {extra['message']}")
+
+    # ── Profile-level contextual notes ───────────────────────────────────────
     if content_mode == "b2b":
-        notes.append("FTC reminder: B2B marketing content should avoid unsubstantiated performance claims. Testimonials require FTC-compliant disclosure.")
-        disclosure_checks.append("ℹ info | FTC Act | B2B content: substantiate all performance claims.")
+        notes.append(
+            "FTC reminder: B2B marketing content must substantiate all performance claims. "
+            "Testimonials require FTC-compliant disclosure (16 C.F.R. Part 255)."
+        )
+        disclosure_checks.append("ℹ info | FTC Act | Substantiate all performance claims.")
     elif profile_name == "data_center":
-        notes.append("Jurisdiction note: Data center transactions may involve additional federal and international regulatory review.")
+        notes.append(
+            "Jurisdiction note: Data center transactions may involve CFIUS review, "
+            "federal infrastructure regulations, and state securities laws."
+        )
         disclosure_checks.append("ℹ info | Federal / International | Data center transactions may require additional regulatory review.")
     elif profile_name == "commercial":
-        notes.append("Jurisdiction note: Commercial real estate advertising may be subject to state securities laws.")
-        disclosure_checks.append("ℹ info | State Securities | Commercial advertising may be subject to state securities laws.")
-    else:
-        state_label = f"{state} Real Estate Commission" if state else "State Real Estate Commission"
-        notes.append(f"State rules: Automated checks cover federal and NAR standards. Verify {state_label} advertising requirements.")
-        disclosure_checks.append(f"ℹ info | {state_label} | Verify state-specific advertising requirements.")
+        notes.append("Jurisdiction note: Commercial advertising may be subject to state securities laws. Consult counsel on investment-related language.")
+        disclosure_checks.append("ℹ info | State Securities | Verify commercial advertising against state securities laws.")
+    elif content_mode == "agent":
+        state_label = STATE_RULES.get(state_key, {}).get("label", f"{state} Real Estate Commission") if state_key else "State Real Estate Commission"
+        disclosure_checks.append(
+            f"ℹ info | {state_label} | Automated checks cover federal and NAR standards. "
+            f"Verify {state_label} requirements."
+        )
 
-    def _worst(ids):
+    # ── Roll up statuses ──────────────────────────────────────────────────────
+    def _worst(ids: List[str]) -> str:
         vals = [statuses.get(i, "pass") for i in ids]
-        if "fail" in vals: return "fail"
-        if "warn" in vals: return "warn"
+        if "fail" in vals:
+            return "fail"
+        if "warn" in vals:
+            return "warn"
         return "pass"
 
     fair_housing_status = _worst(["fair_housing", "doj_steering", "hud_advertising"])
     disclosure_status   = _worst(["brokerage_disclosure", "agent_disclosure", "company_disclosure"])
     nar_status          = _worst(["nar_article12", "nar_article2", "nar_article11", "nar_article15"])
-    state_status        = _worst(["state_commission", "local_zoning", "flood_zone"])
+    state_status        = _worst(["state_commission", "local_zoning", "flood_zone",
+                                   "co_sq_ft_disclosure"])
     mls_status          = _worst(["clear_cooperation"])
     all_vals            = list(statuses.values())
 
+    # Pass 1 overall — will be superseded by _build_final_badge after Pass 2
     if "fail" in all_vals:
-        overall = "attention"
+        p1_overall = "attention-required"
     elif "warn" in all_vals:
-        overall = "review"
+        p1_overall = "review-recommended"
     else:
-        overall = "compliant"
-        if not notes or all(any(k in n.lower() for k in ["reminder", "jurisdiction", "state rules", "ftc reminder"]) for n in notes):
-            notes = [f"Content passed all automated compliance checks for {profile_name} profile. Verify jurisdiction-specific rules before publishing."]
+        p1_overall = "reviewed"
 
-    return ComplianceBadge(
+    badge = ComplianceBadge(
         fairHousing=fair_housing_status,
         brokerageDisclosure=disclosure_status,
         narStandards=nar_status,
-        overallStatus=overall,
+        overallStatus=p1_overall,
+        statusLabel="AI-Reviewed",     # will be updated by _build_final_badge
+        disclaimer="",                  # will be set by _build_final_badge
         notes=notes,
         stateCompliance=state_status,
         mlsCompliance=mls_status,
         disclosureChecks=disclosure_checks,
+        semanticFlags=[],
+        semanticAssessment="",
+    )
+    return badge, profile_name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PASS 2 — Semantic Compliance Review
+# Calls Claude with the actual legal standard as the benchmark.
+# Catches implied violations that phrase-matching cannot detect:
+#   — steering by implication
+#   — protected class preference through context
+#   — "ordinary reader" standard violations (HUD FHEO Guidance, April 29, 2024)
+#
+# NOT called for b2b_saas or data_center content.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SEMANTIC_REVIEW_PROMPT = """You are a Fair Housing compliance reviewer for real estate social media content.
+
+LEGAL STANDARDS BEING ENFORCED:
+
+[1] Fair Housing Act § 3604(c) — 42 U.S.C. § 3604(c):
+"It shall be unlawful to make, print, or publish any notice, statement, or advertisement, with respect to the sale or rental of a dwelling that indicates any preference, limitation, or discrimination based on race, color, religion, sex, handicap, familial status, or national origin."
+
+[2] HUD Ordinary Reader Standard — 24 C.F.R. § 100.75; HUD FHEO Digital Advertising Guidance (April 29, 2024):
+A violation occurs if the advertisement indicates discrimination to an "ordinary reader" or "ordinary listener" — regardless of whether discrimination was intended. HUD's regulations prohibit "[u]sing words, phrases, photographs, illustrations, symbols or forms which convey that dwellings are available or not available to a particular group of persons because of [protected characteristics]."
+
+[3] HUD Steering — 24 C.F.R. § 100.75(c)(3):
+Selecting or describing neighborhoods in ways that steer homebuyers toward or away from areas based on the demographic composition of those areas is prohibited. This applies even when neighborhood descriptions are indirect or use proxy language.
+
+[4] NAR Code of Ethics Article 10, SOP 10-3 (2026 edition):
+"REALTORS shall not print, display or circulate any statement or advertisement with respect to selling or renting of a property that indicates any preference, limitations or discrimination based on race, color, religion, sex, disability, familial status, national origin, sexual orientation, or gender identity."
+
+[5] NAR Code of Ethics Article 12 (2026 edition):
+"REALTORS shall be honest and truthful in their real estate communications and shall present a true picture in their advertising, marketing, and other representations."
+
+EXPLICITLY CLEARED BY HUD — DO NOT FLAG THESE:
+— "master bedroom" / "master bath" (Achtenberg Memo, January 9, 1995: explicitly not a violation)
+— "desirable neighborhood" (HUD has not identified this as a violation)
+— "great neighborhood" / "beautiful area" (generic descriptors; HUD declined to prohibit)
+— Property features described objectively: "walk-in closets," "great view," "quiet street," "walk to bus stop," "open floor plan"
+— Discussing proximity to schools or school districts (permissible unless used to steer by race)
+— Market data discussions (days on market, price trends, inventory levels)
+— General investment advice about real estate as an asset class
+
+CONTENT TO REVIEW:
+{content}
+
+AGENT CONTEXT:
+State: {state}
+Content niche: {niche}
+
+REVIEW TASK:
+Read this content as an ordinary person encountering it for the first time. Evaluate whether:
+1. Any language indicates a preference for or against buyers/renters of a specific protected class
+2. Any language steers buyers toward or away from a neighborhood based on demographic composition (even indirectly)
+3. Any language contains unverifiable claims about property, market conditions, or agent performance (Article 12)
+4. Any language fails to present a truthful picture of what is being advertised
+
+Be precise. Flag actual concerns only — not remote theoretical possibilities. Real estate agents routinely and lawfully discuss neighborhoods, market conditions, property features, and buyer needs. The question is whether an ordinary person would interpret this content as signaling a discriminatory preference.
+
+Return ONLY valid JSON — no preamble, no explanation outside the JSON:
+{{
+  "flags": [
+    {{
+      "rule": "e.g. FHA § 3604(c)",
+      "severity": "fail or warn",
+      "triggered_text": "the exact phrase or sentence from the content",
+      "reason": "why an ordinary reader would interpret this as indicating a discriminatory preference or unverifiable claim",
+      "citation": "e.g. 42 U.S.C. § 3604(c); 24 C.F.R. § 100.75"
+    }}
+  ],
+  "overall": "pass, warn, or fail",
+  "ordinary_reader_assessment": "One sentence: how an ordinary reader would interpret this content from a Fair Housing perspective."
+}}
+
+severity: "fail" = clear violation; "warn" = ambiguous language that may be interpreted as discriminatory in context.
+overall: "pass" if no flags; "warn" if only warn flags; "fail" if any fail flag.
+
+If no concerns exist, return exactly:
+{{"flags": [], "overall": "pass", "ordinary_reader_assessment": "Content focuses on property features and market information without indicating any preference, limitation, or discrimination based on protected characteristics."}}"""
+
+# Profiles that require semantic review (Fair Housing in scope)
+_SEMANTIC_REVIEW_PROFILES = {"residential", "commercial", "investment", "mortgage"}
+
+
+def _run_semantic_compliance_check(
+    content: str,
+    profile_name: str,
+    state: str = "",
+    niche: str = "",
+) -> Optional[Dict[str, Any]]:
+    """
+    Pass 2: Claude semantic review against the actual legal standard.
+    Returns a dict {"flags": [...], "overall": "...", "ordinary_reader_assessment": "..."}
+    or None if semantic review is not applicable for this content type.
+
+    Cost: one additional Claude API call per generation for applicable profiles.
+    This is intentional — phrase matching cannot catch the 'ordinary reader' standard.
+    """
+    if profile_name not in _SEMANTIC_REVIEW_PROFILES:
+        return None
+
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError:
+        return None  # Never let compliance pass failures block content delivery
+
+    prompt = _SEMANTIC_REVIEW_PROMPT.format(
+        content=content[:4000],   # Clip to avoid token waste on very long content
+        state=state or "Not specified",
+        niche=niche or "Residential real estate",
+    )
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = "".join(
+            b.text for b in (response.content or [])
+            if getattr(b, "type", "") == "text"
+        ).strip()
+
+        import re as _re
+        raw = _re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = _re.sub(r'\s*```$', '', raw)
+
+        result = json.loads(raw.strip())
+        # Validate expected shape
+        if "flags" in result and "overall" in result:
+            return result
+        return None
+    except Exception:
+        return None  # Semantic pass failure is silent — Pass 1 still stands
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BADGE BUILDER — merges Pass 1 + Pass 2 into final ComplianceBadge
+# Sets the status label and disclaimer text.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DISCLAIMER_BASE = (
+    "HomeBridge checks content against federal Fair Housing law (42 U.S.C. § 3604), "
+    "NAR Code of Ethics standards, and state real estate commission advertising rules. "
+    "This is an automated review — not legal advice. "
+    "You are a licensed professional and carry final responsibility for all content you publish."
+)
+
+_STATUS_LABELS = {
+    "reviewed":            "AI-Reviewed",
+    "review-recommended":  "Review Recommended",
+    "attention-required":  "Attention Required",
+}
+
+_STATUS_ADDENDUM = {
+    "reviewed": (
+        " No issues were detected. Review the checklist below and publish when ready."
+    ),
+    "review-recommended": (
+        " One or more items were flagged. Review the notes below. "
+        "Consult your broker or a real estate attorney if you have questions."
+    ),
+    "attention-required": (
+        " One or more items require attention before publishing. "
+        "We recommend reviewing these flags with your broker or a real estate attorney."
+    ),
+}
+
+
+def _build_final_badge(
+    p1_badge: ComplianceBadge,
+    p1_profile: str,
+    semantic_result: Optional[Dict[str, Any]],
+    state: str = "",
+    agent_name: str = "",
+    brokerage: str = "",
+) -> ComplianceBadge:
+    """
+    Merges Pass 1 and Pass 2 results.
+    Determines final overallStatus, statusLabel, and disclaimer.
+    """
+    semantic_flags: List[Dict[str, Any]] = []
+    semantic_assessment: str = ""
+    semantic_overall: str = "pass"
+
+    if semantic_result:
+        semantic_flags    = semantic_result.get("flags", [])
+        semantic_assessment = semantic_result.get("ordinary_reader_assessment", "")
+        semantic_overall  = semantic_result.get("overall", "pass")
+
+    # Upgrade fair housing status if semantic found fair housing issues
+    fair_housing_final = p1_badge.fairHousing
+    if semantic_overall == "fail" and fair_housing_final != "fail":
+        fair_housing_final = "fail"
+    elif semantic_overall == "warn" and fair_housing_final == "pass":
+        fair_housing_final = "warn"
+
+    # Final overall — worst of Pass 1 and Pass 2
+    p1_overall = p1_badge.overallStatus   # "reviewed" | "review-recommended" | "attention-required"
+    if "fail" in (p1_overall, semantic_overall) or p1_overall == "attention-required":
+        final_overall = "attention-required"
+    elif "warn" in (p1_overall, semantic_overall) or p1_overall == "review-recommended":
+        final_overall = "review-recommended"
+    else:
+        final_overall = "reviewed"
+
+    # Build disclaimer
+    state_label = STATE_RULES.get(state.upper(), {}).get("label", f"{state} Real Estate Commission") if state else "state real estate commission"
+    disclaimer = _DISCLAIMER_BASE + _STATUS_ADDENDUM[final_overall]
+
+    # Add semantic flags to disclosure_checks for frontend rendering
+    updated_disclosure = list(p1_badge.disclosureChecks)
+    for sf in semantic_flags:
+        sev = sf.get("severity", "warn")
+        prefix = "⚠ FAIL (semantic)" if sev == "fail" else "⚠ WARN (semantic)"
+        rule   = sf.get("rule", "Fair Housing")
+        reason = sf.get("reason", "")
+        text   = sf.get("triggered_text", "")
+        updated_disclosure.append(f"{prefix} | {rule} | {reason} (text: '{text[:80]}')")
+
+    # Updated notes
+    updated_notes = list(p1_badge.notes)
+    for sf in semantic_flags:
+        sev    = sf.get("severity", "warn")
+        rule   = sf.get("rule", "Fair Housing")
+        reason = sf.get("reason", "")
+        cite   = sf.get("citation", "")
+        text   = sf.get("triggered_text", "")
+        updated_notes.append(
+            f"[{rule}] {reason} — Triggered by: '{text[:100]}'. Cite: {cite}."
+        )
+
+    return ComplianceBadge(
+        fairHousing=fair_housing_final,
+        brokerageDisclosure=p1_badge.brokerageDisclosure,
+        narStandards=p1_badge.narStandards,
+        overallStatus=final_overall,
+        statusLabel=_STATUS_LABELS[final_overall],
+        disclaimer=disclaimer,
+        notes=updated_notes,
+        stateCompliance=p1_badge.stateCompliance,
+        mlsCompliance=p1_badge.mlsCompliance,
+        disclosureChecks=updated_disclosure,
+        semanticFlags=semantic_flags,
+        semanticAssessment=semantic_assessment,
     )
 
 
@@ -1896,10 +2578,20 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
     state      = profile.state      or ""
     niche_for_check = ", ".join(payload.identity.primaryCategories) if payload.identity.primaryCategories else ""
 
-    compliance = _run_compliance_check(
+    # ── Pass 1: rule-based ────────────────────────────────────────────────────
+    p1_badge, profile_name = _run_compliance_check(
         raw_text, agent_name, brokerage, mls_names,
         niche=niche_for_check, content_mode=content_mode,
         state=state,
+    )
+    # ── Pass 2: semantic ──────────────────────────────────────────────────────
+    semantic = _run_semantic_compliance_check(
+        raw_text, profile_name=profile_name, state=state, niche=niche_for_check
+    )
+    # ── Merge ──────────────────────────────────────────────────────────────────
+    compliance = _build_final_badge(
+        p1_badge, profile_name, semantic, state=state,
+        agent_name=agent_name, brokerage=brokerage,
     )
     try:
         return _parse_claude_output(raw_text, compliance)
@@ -1953,9 +2645,20 @@ def generate_content_core(
     raw_text    = "\n\n".join(text_chunks).strip()
     if not raw_text:
         raise ValueError("Claude returned empty content")
-    compliance = _run_compliance_check(
+
+    # Pass 1
+    p1_badge, profile_name = _run_compliance_check(
         raw_text, agent_name, brokerage, mls_names or [],
         niche=niche, content_mode=mode, state=state,
+    )
+    # Pass 2
+    semantic = _run_semantic_compliance_check(
+        raw_text, profile_name=profile_name, state=state, niche=niche
+    )
+    # Merge
+    compliance = _build_final_badge(
+        p1_badge, profile_name, semantic, state=state,
+        agent_name=agent_name, brokerage=brokerage,
     )
     content_response = _parse_claude_output(raw_text, compliance)
     return {"content": content_response.dict(), "compliance": compliance.dict()}
@@ -2115,9 +2818,20 @@ HARD RULES:
     # Run compliance check
     mls_names = profile.mlsNames or []
     state     = profile.state or ""
-    compliance = _run_compliance_check(
+
+    # Pass 1
+    p1_badge, profile_name = _run_compliance_check(
         raw_text, agent_name, brokerage, mls_names,
         niche=niche, content_mode="agent", state=state,
+    )
+    # Pass 2
+    semantic = _run_semantic_compliance_check(
+        raw_text, profile_name=profile_name, state=state, niche=niche
+    )
+    # Merge
+    compliance = _build_final_badge(
+        p1_badge, profile_name, semantic, state=state,
+        agent_name=agent_name, brokerage=brokerage,
     )
 
     try:
