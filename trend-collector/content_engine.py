@@ -79,6 +79,12 @@ class ComplianceBadge(BaseModel):
     semanticFlags: List[Dict[str, Any]] = Field(default_factory=list)
     semanticAssessment: str = Field(default="")
 
+    # Rule provenance — version stamp and verification dates
+    # rules_version: the quarter in which the active rule set was last fully verified
+    # rules_verified_dates: per-source last-verified month {"federal": "2026-04", "CO": "2026-04"}
+    rules_version: str = Field(default="2026-Q2")
+    rules_verified_dates: Dict[str, str] = Field(default_factory=dict)
+
 
 class ContentResponse(BaseModel):
     headline: str
@@ -1113,58 +1119,628 @@ STATE_RULES: Dict[str, Dict] = {
 
   # ── STUB ENTRIES — federal floor + commission reminder
   # These will be replaced with specific rules as state research completes.
-  "CA": {"label": "California Department of Real Estate", "authority": "10 CCR § 2770 et seq.", "notes": [
-    "California DRE: All advertising must include the DRE license number of the agent and/or broker. "
-    "Verify current requirements at dre.ca.gov (10 Cal. Code Regs. § 2770)."
-  ], "extra_rules": []},
 
-  "TX": {"label": "Texas Real Estate Commission", "authority": "22 TAC § 535.155", "notes": [
-    "Texas TREC 22 TAC § 535.155: All advertising must include the broker's name or the team name "
-    "and must include the phrase 'TREC #[license number]'. Individual agents may not advertise "
-    "independently of their sponsoring broker."
-  ], "extra_rules": []},
+  # ── WYOMING — Source: W.S. § 33-28-119 (Wyoming Real Estate License Act)
+  "WY": {
+    "label": "Wyoming Real Estate Commission",
+    "authority": "W.S. § 33-28-119 (Wyoming Statutes Title 33, Chapter 28)",
+    "notes": [
+        # W.S. § 33-28-119(a)
+        "Wyoming W.S. § 33-28-119(a): Every real estate licensee, when promoting or advertising "
+        "real estate activities, shall use the real estate company name under which they are licensed "
+        "by the Commission. No slogans may imply real estate is being offered by an unlicensed private party.",
+        # W.S. § 33-28-119(g)
+        "Wyoming W.S. § 33-28-119(g): A licensed associate broker or salesperson shall not advertise "
+        "the sale, purchase, exchange, or lease of real estate without including in the advertisement "
+        "the real estate company name under which they are licensed.",
+        # W.S. § 33-28-119(h)
+        "Wyoming W.S. § 33-28-119(h): A licensee advertising real estate owned by the licensee must "
+        "include in the advertisement the fact that an owner of the real estate is a licensee.",
+        # W.S. § 33-28-119(j)
+        "Wyoming W.S. § 33-28-119(j): If a licensee uses their individual name in advertising, "
+        "both the first and last name must be included. Common shortened spellings or license-reflected "
+        "nicknames are permitted.",
+    ],
+    "extra_rules": [],
+  },
 
-  "FL": {"label": "Florida Real Estate Commission", "authority": "Fla. Admin. Code Rule 61J2-10.025", "notes": [
-    "Florida FREC Rule 61J2-10.025: The registered name of the brokerage must be prominently "
-    "displayed in all advertising. Point size of brokerage name must be equal to or larger than "
-    "the agent's name."
-  ], "extra_rules": []},
+  # ── MONTANA — Source: ARM 24.210.641(dd)–(ee); MCA § 37-51-321(1)(a), (2)
+  "MT": {
+    "label": "Montana Board of Realty Regulation",
+    "authority": "ARM 24.210.641 / MCA § 37-51-321 (Montana Code Annotated Title 37, Chapter 51)",
+    "notes": [
+        # ARM 24.210.641(dd)
+        "Montana ARM 24.210.641(dd): It is unprofessional conduct to fail to disclose in advertising "
+        "the licensee's name and to fail to identify that the advertisement is made by a real estate "
+        "licensee or by a brokerage company.",
+        # ARM 24.210.641(ee)
+        "Montana ARM 24.210.641(ee): All licensees must comply with internet advertising rules "
+        "under ARM 24.210.430.",
+        # MCA § 37-51-321(1)(a)
+        "Montana MCA § 37-51-321(1)(a): Intentionally misleading, untruthful, or inaccurate "
+        "advertising is unprofessional conduct. A broker operating under a franchise name must incorporate "
+        "the broker's own name or trade name into the franchise name or logotype — failure to do so "
+        "is misleading advertising.",
+        # MCA § 37-51-321(2)(a)
+        "Montana MCA § 37-51-321(2)(a): It is unlawful to openly advertise property belonging to others "
+        "unless the broker or salesperson has a signed listing agreement from the owner valid as of the "
+        "date of advertisement.",
+    ],
+    "extra_rules": [],
+  },
 
-  "NY": {"label": "New York Department of State — Division of Licensing Services", "authority": "19 NYCRR Part 175.25", "notes": [
-    "New York 19 NYCRR § 175.25: All advertising must include the name of the licensed real estate "
-    "broker. Salespersons may not advertise independently. New York also requires the Fair Housing "
-    "logo or statement in covered advertising."
-  ], "extra_rules": []},
+  # ── IDAHO — Source: Idaho Code § 54-2038; IDAPA 24.37.01 (formerly 33.01.01); IREC Guideline 13
+  "ID": {
+    "label": "Idaho Real Estate Commission",
+    "authority": "Idaho Code § 54-2038 / IDAPA 24.37.01 / IREC Guideline 13",
+    "notes": [
+        # IREC Guideline 13 / Idaho Code § 54-2038(4)
+        "Idaho IREC Guideline 13: All advertising shall clearly and conspicuously contain the broker's "
+        "licensed business name in all media advertising including social media, Facebook, newspaper, "
+        "and brochures. The licensed brokerage name must appear on all ads, emails, and internet advertising.",
+        # IREC Guideline 13 — branch offices
+        "Idaho IREC Guideline 13: All advertising by branch offices shall clearly state the name of "
+        "the main licensed real estate office that the branch is part of.",
+        # IREC Guideline 13 — franchise
+        "Idaho IREC Guideline 13: Designated brokers must ensure franchise advertising does not imply "
+        "that agents affiliated with another office under the same franchise are associated with the "
+        "designated broker's office. Franchise advertising must not mingle licensees across offices.",
+        # Idaho Code § 54-2038(4)
+        "Idaho Code § 54-2038(4): A broker may not allow any person who is not properly licensed to "
+        "represent that broker or be advertised as a sales associate before they are officially licensed "
+        "at the brokerage.",
+    ],
+    "extra_rules": [],
+  },
 
-  "WA": {"label": "Washington Department of Licensing", "authority": "WAC 308-124H-820", "notes": [
-    "Washington WAC 308-124H-820: All advertising must be done in the name of the licensed broker. "
-    "Advertising that uses a team or group name must still clearly identify the licensed brokerage."
-  ], "extra_rules": []},
+  # ── UTAH — Source: Utah Admin. Code R162-2f-401h (current through Bulletin 2024-24)
+  "UT": {
+    "label": "Utah Division of Real Estate",
+    "authority": "Utah Admin. Code R162-2f-401h (Real Estate Licensing and Practices Rules)",
+    "notes": [
+        # R162-2f-401h(1)
+        "Utah R162-2f-401h(1): A licensee shall not advertise or permit any person affiliated with "
+        "the licensee to advertise real estate services or property in any medium without clearly and "
+        "conspicuously identifying the name of the brokerage with which the licensee is affiliated.",
+        # R162-2f-401h(2)
+        "Utah R162-2f-401h(2): When it is not reasonable to identify the brokerage name in an "
+        "electronic advertisement (e.g., character-limited platforms), the advertisement must directly "
+        "link to a display that clearly and conspicuously identifies the brokerage name.",
+        # R162-2f-401h(4)
+        "Utah R162-2f-401h(4): The brokerage name in advertising must be the name as shown on "
+        "division records — not a team name or assumed name unless registered.",
+        # R162-2f-401h(5)
+        "Utah R162-2f-401h(5): A team, group, or other marketing entity that includes one or more "
+        "licensees is subject to the same advertising requirements as an individual licensee.",
+        # R162-2f-401h(6)(a)
+        "Utah R162-2f-401h(6)(a): If a licensee advertises a guaranteed sales plan, the advertisement "
+        "must clearly and conspicuously include: (i) a statement that costs and conditions may apply; "
+        "and (ii) contact information so consumers can obtain full disclosures.",
+    ],
+    "extra_rules": [],
+  },
 
-  "AZ": {"label": "Arizona Department of Real Estate", "authority": "A.A.C. R4-28-502", "notes": [
-    "Arizona ADRE R4-28-502: All advertising must include the employing broker's name and must not "
-    "be misleading. Agents must obtain broker approval before publishing."
-  ], "extra_rules": []},
+  # ── NEW MEXICO — Source: NMAC 16.61.32.8 (New Mexico Real Estate Commission)
+  "NM": {
+    "label": "New Mexico Real Estate Commission",
+    "authority": "NMAC 16.61.32.8 (New Mexico Administrative Code Title 16, Chapter 61, Part 32)",
+    "notes": [
+        # 16.61.32.8(B)
+        "New Mexico NMAC 16.61.32.8(B): Every qualifying broker advertising real property for others "
+        "(including short-term or vacation rentals) or advertising real estate services must at minimum "
+        "use the trade name and current brokerage office telephone number as registered with the Commission.",
+        # 16.61.32.8(C)
+        "New Mexico NMAC 16.61.32.8(C): Associate brokers must include the trade name and telephone "
+        "number of the brokerage with which they are affiliated. Effective January 1, 2017, the "
+        "brokerage trade name and telephone number shall be in a type size not less than 33% of the "
+        "type size of the associate broker's name or team name.",
+        # 16.61.32.8(D)
+        "New Mexico NMAC 16.61.32.8(D): A broker advertising real property that the broker owns or "
+        "partially owns must indicate within the advertising — including signs — that the broker owns "
+        "the real property.",
+        # 16.61.32.8(G) — electronic exemption
+        "New Mexico NMAC 16.61.32.8(G): All advertising requirements apply to print, audio, video, "
+        "computer, online, and electronic media. For electronic displays of limited information (thumbnails, "
+        "text messages, links, tweets of 200 characters or less), brokerage name and phone number "
+        "disclosure is exempt ONLY if such displays link to a page that includes all required disclosures.",
+        # 16.61.17.9(R)
+        "New Mexico NMAC 16.61.17.9(R): Associate brokers must submit all advertising not prepared "
+        "by the brokerage to the qualifying broker for review and approval prior to public release.",
+    ],
+    "extra_rules": [],
+  },
 
-  "NV": {"label": "Nevada Real Estate Division", "authority": "NAC 645.611", "notes": [
-    "Nevada NRS/NAC 645.611: Advertising must clearly display the name of the brokerage. "
-    "An individual licensee may not advertise independently of the employing broker."
-  ], "extra_rules": []},
+  # ── TEXAS — Source: TREC Rules 22 TAC §535.155 and §535.154 (effective May 15, 2018)
+  "TX": {
+    "label": "Texas Real Estate Commission (TREC)",
+    "authority": "22 TAC §535.155 and §535.154 (Texas Administrative Code Title 22, Part 23, Chapter 535)",
+    "notes": [
+        # §535.155(a)
+        "Texas TREC Rule §535.155(a): Each advertisement must include in a readily noticeable location: "
+        "(1) the name of the license holder or team placing the advertisement; and (2) the broker's "
+        "name in at least half the size of the largest contact information for any sales agent, "
+        "associated broker, or team name in the advertisement.",
+        # TRELA §1101.652(b)(23)
+        "Texas TRELA §1101.652(b)(23): Advertising is misleading if it fails to include the broker's "
+        "name or implies that a sales agent is responsible for the operation of a brokerage. "
+        "A sales agent cannot use a title suggesting they are in charge of a brokerage (e.g., 'president,' "
+        "'CEO,' 'owner').",
+        # §535.155(b)
+        "Texas TREC Rule §535.155(b): 'Advertisement' includes any form of communication designed to "
+        "attract the public to use real estate brokerage services — including all publications, brochures, "
+        "radio, television, email, text messages, social media, internet, business stationery, business "
+        "cards, displays, signs, and billboards.",
+        # SB 2212 (2017)
+        "Texas (SB 2212, 2017): TREC may NOT require a license number, the terms 'broker' or 'agent,' "
+        "or reference to the Commission in advertisements. However, broker's name must still appear. "
+        "License holders may voluntarily include these if they choose.",
+        # §535.155(d)(4)/(6)
+        "Texas TREC Rule §535.155(d): Advertising is misleading if it: implies the property value "
+        "without a supporting appraisal; advertises a listed property without listing broker permission; "
+        "fails to remove closed or expired listings within 10 days; or causes a member of the public "
+        "to believe a person not licensed is engaged in real estate brokerage.",
+        # Social media exception
+        "Texas TREC §535.155(c): For social media or text advertising, the required information may be "
+        "located on the license holder's account user profile page if readily accessible by direct link.",
+    ],
+    "extra_rules": [],
+  },
 
-  "OR": {"label": "Oregon Real Estate Agency", "authority": "OAR 863-015-0130", "notes": [
-    "Oregon OAR 863-015-0130: All advertising must include the licensed name of the principal "
-    "broker or property manager. Team names must be registered with the Agency."
-  ], "extra_rules": []},
+  # ── ARIZONA — Source: A.A.C. R4-28-502 (updated December 13, 2025)
+  "AZ": {
+    "label": "Arizona Department of Real Estate",
+    "authority": "A.A.C. R4-28-502 (Arizona Administrative Code Title 4, Chapter 28, Article 5 — as amended Dec. 13, 2025)",
+    "notes": [
+        # R4-28-502(A) — no blind ads
+        "Arizona A.A.C. R4-28-502(A): A salesperson or broker acting as an agent shall not advertise "
+        "property in a manner that implies no salesperson or broker is taking part in the offer — "
+        "'blind ads' are prohibited.",
+        # R4-28-502(B) — owner/agent (expanded Dec 2025)
+        "Arizona A.A.C. R4-28-502(B) (eff. Dec. 13, 2025): Any licensee advertising their own or "
+        "another licensee's property for sale, lease, or exchange in Arizona must disclose they are "
+        "licensed and include the words 'owner/agent' in the advertisement.",
+        # R4-28-502(C)
+        "Arizona A.A.C. R4-28-502(C): All advertising must contain accurate claims and representations "
+        "and fully state factual material. A licensee shall not misrepresent facts or create "
+        "misleading or ambiguous impressions.",
+        # R4-28-502(E) — broker name required
+        "Arizona A.A.C. R4-28-502(E): A salesperson or broker shall ensure that all advertising "
+        "identifies in a clear and prominent manner the employing broker's legal name or the DBA name "
+        "contained on the employing broker's license certificate. This applies to print, TV, email, "
+        "social media, and all other advertising.",
+        # R4-28-502(F) — third-party listing
+        "Arizona A.A.C. R4-28-502(F): A licensee who advertises property that is the subject of "
+        "another person's real estate employment agreement shall display the name of the listing broker "
+        "in a clear and prominent manner.",
+        # R4-28-502(G) — designated broker responsible
+        "Arizona A.A.C. R4-28-502(G) (eff. Dec. 13, 2025): The designated broker is responsible for "
+        "the advertising of all real estate activity — the term 'responsible' implies liability even "
+        "if the designated broker took reasonable steps toward compliance.",
+        # R4-28-502(I) — written consent for signs
+        "Arizona A.A.C. R4-28-502(I): Before placing or publishing any notice that specific property "
+        "is offered for sale, lease, rent, or exchange, the licensee must secure the written consent "
+        "of the property owner; the advertisement must be promptly removed upon request.",
+        # R4-28-502(K) — franchise legend
+        "Arizona A.A.C. R4-28-502(K): Brokers using a trade name owned by another person must place "
+        "their own licensed name on signs and include the following legend in advertising: "
+        "'Each [TRADE NAME or FRANCHISE] office is independently owned and operated.'",
+        # R4-28-502(L) — internet
+        "Arizona A.A.C. R4-28-502(L): The use of an electronic medium (internet, website) that targets "
+        "Arizona residents with the offering of a property interest or real estate brokerage services "
+        "constitutes the dissemination of advertising under A.R.S. § 32-2101(2).",
+    ],
+    "extra_rules": [],
+  },
 
-  "GA": {"label": "Georgia Real Estate Commission", "authority": "Ga. Comp. R. & Regs. 520-1-.09", "notes": [
-    "Georgia GREC Rule 520-1-.09: All advertising must clearly identify the name of the broker "
-    "or real estate firm. Agents may not advertise independently."
-  ], "extra_rules": []},
+  # ── NEVADA — Source: NAC 645.610; NRS 645.315
+  "NV": {
+    "label": "Nevada Real Estate Division",
+    "authority": "NAC 645.610 / NRS 645.315 (Nevada Administrative Code / Nevada Revised Statutes Chapter 645)",
+    "notes": [
+        # NAC 645.610(1)(a)
+        "Nevada NAC 645.610(1)(a): All advertising of services for which a license is required must "
+        "not be false or misleading.",
+        # NAC 645.610(1)(c)
+        "Nevada NAC 645.610(1)(c): The name of the brokerage firm under which a real estate broker "
+        "does business or with which a broker-salesperson or salesperson is associated must be clearly "
+        "identified with prominence in all advertising. The Division considers style, size, color, and "
+        "location of the brokerage name when evaluating prominence.",
+        # NAC 645.610(1)(e) — license number
+        "Nevada NAC 645.610(1)(e): Except as provided, a licensee shall conspicuously include their "
+        "license number in any advertisement. (Preceding zeros may be omitted.)",
+        # NAC 645.610(2) — franchise
+        "Nevada NAC 645.610(2): If advertising under a franchise name, a broker must incorporate in a "
+        "conspicuous way in the advertisement the real, fictitious, or corporate name under which the "
+        "broker is licensed AND include an acknowledgment that each office is independently owned "
+        "and operated.",
+        # NRS 645.315
+        "Nevada NRS 645.315: A licensee shall not advertise solely under their own name when acting "
+        "as a broker-salesperson or salesperson — the brokerage firm's name must be identified.",
+        # No FSBO
+        "Nevada NAC 645.610(1)(b): A licensee shall not use their name or telephone number in any "
+        "advertisement that contains the words 'for sale by owner,' 'for lease by owner,' or similar "
+        "words — unless the licensee has an ownership interest and includes 'owner-broker' or "
+        "'owner-agent' disclosure.",
+    ],
+    "extra_rules": [],
+  },
 
-  "NC": {"label": "North Carolina Real Estate Commission", "authority": "21 NCAC 58A .0105", "notes": [
-    "North Carolina NCREC 21 NCAC 58A .0105: All advertising must include the firm name. "
-    "An individual provisional or full broker may not advertise independently of the firm."
-  ], "extra_rules": []},
+  # ── OREGON — Source: OAR 863-015-0125 (updated 2022 and 2025)
+  "OR": {
+    "label": "Oregon Real Estate Agency",
+    "authority": "OAR 863-015-0125 (Oregon Administrative Rules, Chapter 863, Division 15 — updated 2022, 2025)",
+    "notes": [
+        # OAR 863-015-0125(2)
+        "Oregon OAR 863-015-0125(2): All real estate advertising must: (a) be identifiable as that of "
+        "a real estate licensee; (b) be truthful and not deceptive or misleading; (c) not state or imply "
+        "a broker is in charge of the business when they are not the authorized principal broker; "
+        "(d) not state or imply a level of expertise not currently maintained; and (e) be done only with "
+        "the property owner's written permission when offering property for sale, exchange, or lease.",
+        # OAR 863-015-0125(4)
+        "Oregon OAR 863-015-0125(4): The registered business name, as registered with the Agency, "
+        "shall be immediately noticeable in all advertising.",
+        # Individual broker responsibility (2022 change)
+        "Oregon OAR 863-015-0125 (2022 amendment): Individual real estate brokers are now legally "
+        "responsible for their own advertising — principal broker pre-approval is no longer required "
+        "by rule (though firm office policies may still require it).",
+        # OAR 863-015-0125(5)(b) — electronic
+        "Oregon OAR 863-015-0125(5)(b): Advertising in electronic media must include on its first page: "
+        "the licensee's licensed name; the registered business name; and a statement that the licensee "
+        "is licensed in Oregon. Sponsored search links are exempt if the destination page complies. "
+        "Social media is exempt if the advertising links to the account profile page that complies.",
+        # OAR 863-015-0125(6) — no guaranteed profits
+        "Oregon OAR 863-015-0125(6): No advertising may guarantee future profits from any real estate activity.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── WASHINGTON — Source: WAC 308-124B-210; DOL Real Estate Advertising Guidelines
+  "WA": {
+    "label": "Washington Department of Licensing — Real Estate",
+    "authority": "WAC 308-124B-210 / RCW 18.85 (Washington Administrative Code / Washington Real Estate Licensing Law)",
+    "notes": [
+        # WAC 308-124B-210
+        "Washington WAC 308-124B-210: Advertising in any manner must include the firm's name, or "
+        "assumed name as licensed, in a clear and conspicuous manner. Advertising cannot be false, "
+        "deceptive, or misleading.",
+        # Online advertising requirement
+        "Washington DOL Advertising Guidelines: When advertising online, each standalone unit of "
+        "content — individual webpage, email, social media post, or banner ad — must display the "
+        "firm's licensed name and the broker's or managing broker's licensed name. This requirement "
+        "applies until an agency relationship is established with a buyer or seller.",
+        # Specialty claim substantiation
+        "Washington DOL Advertising Guidelines: Specialty claims such as 'VA Loan Specialist' or "
+        "'Condo Specialist' must be supported by relevant training, expertise, or substantial experience. "
+        "Stating that a commission rate is 'established by law' is a material misrepresentation.",
+        # RCW 18.85 — unbranded websites
+        "Washington RCW 18.85: A licensee who uses an unbranded or misleading website subjects "
+        "not only their own license to disciplinary action, but also the licenses of their delegated "
+        "managing broker, designated broker, and the firm.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── CALIFORNIA — Source: Cal. B&P Code §10140.6 (AB 1650, eff. Jan. 1, 2018); 10 CCR §2770.1; DRE RE 559
+  "CA": {
+    "label": "California Department of Real Estate (DRE)",
+    "authority": "Cal. Bus. & Prof. Code §10140.6 / 10 CCR §2770.1 / DRE Commissioner's Regulations §2773",
+    "notes": [
+        # B&P §10140.6 — first point of contact (AB 1650)
+        "California B&P Code §10140.6 (AB 1650, eff. Jan. 1, 2018): All 'first point of contact' "
+        "solicitation materials must disclose the licensee's name, their 8-digit DRE license number, "
+        "and the responsible broker's identity. This applies to business cards, stationery, websites, "
+        "flyers, advertisements on TV, print, and electronic media. The license number exception "
+        "for print ads was eliminated effective January 1, 2018.",
+        # Broker's identity definition
+        "California DRE: The responsible broker's identity means the broker's name or name and license "
+        "number — NOT merely a team name or fictitious business name filed by the sales agent. "
+        "The broker's name must be as prominent and conspicuous as any team name included.",
+        # Team name rules
+        "California DRE RE 559: When advertising includes a team name, the advertisement must include: "
+        "team name; salesperson's name; broker's name with license number for both agent and broker "
+        "(optional); and the license numbers must be conspicuous and prominent.",
+        # Social media
+        "California DRE: For social media compliance, add the broker name and DRE license number to "
+        "the bio/intro section of social media profiles. Every real estate-related post must include "
+        "these disclosures.",
+        # Sign exception
+        "California DRE: 'For sale,' 'for rent,' 'for lease,' 'open house,' and directional signs are "
+        "exempt from agent/licensee information disclosure ONLY if they display the responsible broker's "
+        "name (or name + license number) and contain no information identifying a licensee.",
+        # 10 CCR §2770 — internet
+        "California 10 CCR §2770: Licensees who advertise on the Internet must indicate their license "
+        "status in compliance with B&P §§10235.5 and 10140.6. False or misleading advertising can "
+        "result in administrative, civil, and/or criminal penalties.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── ALASKA — Source: AS 08.88 / 12 AAC 64; Alaska REC Best Practice Advertising
+  "AK": {
+    "label": "Alaska Real Estate Commission",
+    "authority": "AS 08.88 / 12 AAC 64.110, 64.112, 64.120, 64.127, 64.128, 64.130 (Alaska Real Estate Commission)",
+    "notes": [
+        # 12 AAC 64 / Best Practice
+        "Alaska Real Estate Commission Best Practice — Advertising: The brokerage's principal office "
+        "name must be identifiable to the public in any advertising for all licensees, whether working "
+        "as a single licensee or as part of a team.",
+        # Best Practice — brokerage name in all media
+        "Alaska 12 AAC 64: All advertising must include the brokerage name as registered with the "
+        "Commission regardless of whether the licensee is a member of a real estate team. This "
+        "requirement includes internet marketing, all social media platforms, classified ads, signs, "
+        "business cards, and the recruitment of licensees.",
+        # AS 08.88.311(b) — branch offices
+        "Alaska AS 08.88.311(b): A branch office shall be advertised only in the name of the principal "
+        "office, though it may also indicate the branch location.",
+        # Written consent
+        "Alaska 12 AAC 64: Licensees cannot advertise a property for sale, lease, or rent without "
+        "first obtaining the owner's written permission. A licensee cannot advertise another licensee's "
+        "listings unless expressly permitted to do so by the owner in writing.",
+        # AS 08.88.071(a)(3)(D) — false advertising
+        "Alaska AS 08.88.071(a)(3)(D): Grounds for license discipline include knowingly authorizing, "
+        "directing, or aiding in publishing any material false statement or misrepresentation concerning "
+        "the licensee's business or real estate offered for sale, rent, lease, or management.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── HAWAII — Source: HAR 16-99-11 (Hawaii Administrative Rules, Chapter 99)
+  "HI": {
+    "label": "Hawaii Real Estate Commission",
+    "authority": "HAR § 16-99-11 (Hawaii Administrative Rules, Title 16, Chapter 99 — Real Estate Brokers and Salespersons)",
+    "notes": [
+        # HAR 16-99-11(a)
+        "Hawaii HAR § 16-99-11(a): All real estate advertising and promotional materials shall include "
+        "the legal name of the brokerage firm or a trade name previously registered by the brokerage "
+        "firm with the business registration division and with the real estate commission.",
+        # HAR 16-99-11(b) — no FSBO
+        "Hawaii HAR § 16-99-11(b): No licensee shall advertise 'For Sale by Owner,' 'For Rent by Owner,' "
+        "'For Lease by Owner,' or 'For Exchange by Owner.'",
+        # HAR 16-99-11(c) — licensee status disclosure
+        "Hawaii HAR § 16-99-11(c): Current individual real estate licensees — whether active or "
+        "inactive — shall disclose their status as a real estate licensee in all advertising and "
+        "promotional material.",
+        # HAR 16-99-11(d) — leasehold disclosure (Hawaii-specific)
+        "Hawaii HAR § 16-99-11(d): A leasehold property advertised for sale in any medium must be "
+        "identified by the word 'leasehold.' This is a Hawaii-specific requirement reflecting the "
+        "prevalence of leasehold interests in the state.",
+        # HAR 16-99-11(e)
+        "Hawaii HAR § 16-99-11(e): All advertising and promotional materials that reference the "
+        "individual licensee's name must: (1) include the licensee's legal name or Commission-registered "
+        "name; (2) identify the licensee with their associating or employing brokerage firm; and "
+        "(3) specify license type: Broker (B), Salesperson (S), Realtor (R), or Realtor-Associate (RA).",
+        # Fair Housing logo
+        "Hawaii HAR § 16-99-11 / Federal FHA: All advertising must include the HUD Equal Housing "
+        "Opportunity logotype, statement, or slogan as required under the Fair Housing Act. Hawaii "
+        "specifically lists this requirement in its advertising guidelines.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── FLORIDA — Source: Fla. Admin. Code R. 61J2-10.025 / 61J2-10.026
+  "FL": {
+    "label": "Florida Real Estate Commission (FREC)",
+    "authority": "Fla. Admin. Code R. 61J2-10.025 and 61J2-10.026 (Ch. 475, Florida Statutes)",
+    "notes": [
+        # 61J2-10.025(1)
+        "Florida 61J2-10.025(1): All real estate advertisements must include the licensed name of the "
+        "brokerage firm as registered with FREC/DBPR. No advertisement placed or caused to be placed "
+        "by a licensee shall be fraudulent, false, deceptive, or misleading.",
+        # 61J2-10.025(2)
+        "Florida 61J2-10.025(2): When a licensee's personal name appears in an advertisement, at "
+        "minimum the licensee's last name must be used as registered with the Commission. The broker "
+        "associate's or sales associate's name shall be no larger than the name of the registered brokerage.",
+        # 61J2-10.025(3)(a)
+        "Florida 61J2-10.025(3)(a): When advertising on the internet (including Google, Facebook, "
+        "Instagram, etc.), the brokerage firm name must be placed adjacent to or immediately above or "
+        "below the 'point of contact information' — any means by which to contact the licensee including "
+        "mailing address, email, telephone, or fax.",
+        # 61J2-10.026 — team advertising (eff. July 1, 2019)
+        "Florida 61J2-10.026 (Team/Group Advertising): Team or group names may not be in larger print "
+        "than the name of the registered brokerage. Team names may include 'team' or 'group' but may NOT "
+        "include: 'realty,' 'real estate,' 'company,' 'associates,' 'brokerage,' 'properties,' or other "
+        "words that imply the team is an independent brokerage. Penalty for violations: up to $5,000 "
+        "fine, license suspension, or revocation.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── GEORGIA — Source: Ga. Comp. R. & Regs. Rule 520-1-.09
+  "GA": {
+    "label": "Georgia Real Estate Commission (GREC)",
+    "authority": "Ga. Comp. R. & Regs. Rule 520-1-.09 (Georgia Real Estate Commission Advertising Rules)",
+    "notes": [
+        # 520-1-.09(2.1)
+        "Georgia Rule 520-1-.09(2.1): All advertising by associate brokers, salespersons, and community "
+        "association managers must be under the direct supervision of their broker and in the name of "
+        "their firm. No independent advertising by associate licensees.",
+        # 520-1-.09(b)(c)(d)
+        "Georgia Rule 520-1-.09(b): The name of the firm advertising real estate for sale, rent, or "
+        "exchange shall appear in equal or greater size, prominence, and frequency than the name of any "
+        "affiliated licensees or groups of licensees. The firm's telephone number must also appear in "
+        "equal or greater size, prominence, and frequency than any affiliated licensee's phone number.",
+        # 520-1-.09(3)
+        "Georgia Rule 520-1-.09(3): A licensee shall not advertise any real estate for sale, rent, "
+        "lease, or exchange unless the licensee has first secured the written permission of the owner, "
+        "the owner's authorized agent, or the owner of a leasehold estate.",
+        # 520-1-.09(8)
+        "Georgia Rule 520-1-.09(8): A licensee shall not advertise to sell, buy, exchange, rent, or "
+        "lease real estate in a manner indicating the offer is being made by a private party not licensed "
+        "by the Commission. When advertising licensee-owned property (not under brokerage engagement), "
+        "the advertisement must include the legend 'seller/buyer holds a real estate license' or "
+        "'Georgia Real Estate License # [6-digit number].'",
+        # Website requirement
+        "Georgia O.C.G.A. § 43-40-25: Licensees advertising on websites for sale, rent, or exchange "
+        "shall disclose the name and telephone number of the licensee's firm on every viewable web page.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── NORTH CAROLINA — Source: 21 NCAC 58A .0105 (eff. July 1, 2015)
+  "NC": {
+    "label": "North Carolina Real Estate Commission (NCREC)",
+    "authority": "21 NCAC 58A .0105 (North Carolina Administrative Code — Real Estate Commission Advertising)",
+    "notes": [
+        # 21 NCAC 58A .0105(a)(1)
+        "North Carolina 21 NCAC 58A .0105(a)(1): A broker shall not advertise any brokerage service "
+        "or the sale, purchase, exchange, rent, or lease of real estate for another or others without "
+        "the consent of the broker-in-charge and without including in the advertisement the name of "
+        "the firm or sole proprietorship with which the broker is affiliated.",
+        # 21 NCAC 58A .0105(a)(2)
+        "North Carolina 21 NCAC 58A .0105(a)(2): A broker shall not advertise or display a 'for sale' "
+        "or 'for rent' sign on any real estate without the written consent of the owner or the owner's "
+        "authorized agent.",
+        # 21 NCAC 58A .0105(b)
+        "North Carolina 21 NCAC 58A .0105(b): Blind ads are prohibited. A broker shall not advertise "
+        "real estate for others in a manner indicating the offer is being made by the broker's principal "
+        "only. Every advertisement shall conspicuously indicate that it is the advertisement of a broker "
+        "or brokerage firm and shall not be confined to publication of only a phone number, email address, "
+        "or web address.",
+        # NAR SOP 12-5 parallel
+        "North Carolina / NAR SOP 12-5 (parallel): REALTORS® must disclose the firm name in all "
+        "advertising per both NCREC Rule .0105 and NAR Standard of Practice 12-5, which requires "
+        "disclosure of the REALTOR®'s firm 'in a reasonable and readily apparent manner' in all media.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── SOUTH CAROLINA — Source: S.C. Code § 40-57-135(E)(2) / 2024 Act No. 204 (H.4754, eff. May 21, 2024)
+  "SC": {
+    "label": "South Carolina Real Estate Commission",
+    "authority": "S.C. Code § 40-57-135 (as amended by 2024 Act No. 204, H.4754, eff. May 21, 2024)",
+    "notes": [
+        # § 40-57-135(E)(1)
+        "South Carolina § 40-57-135(E)(1): A licensee may not advertise, market, or offer to conduct "
+        "a real estate transaction involving real estate owned by another person without first obtaining "
+        "a written listing agreement between the property owner and the real estate brokerage firm.",
+        # § 40-57-135(E)(2) — full firm name required
+        "South Carolina § 40-57-135(E)(2): When advertising or marketing real estate owned by another "
+        "person in any medium — including site signage — a licensee must clearly identify the full name "
+        "of the real estate brokerage firm. For internet/electronic advertising, this requirement is met "
+        "by including a link to the homepage of the brokerage firm.",
+        # § 40-57-135(F)(1) — license status disclosure
+        "South Carolina § 40-57-135(F)(1): A licensee must clearly reveal their licensed status in "
+        "advertising or marketing in any media. When advertising another brokerage's listings on social "
+        "media, the licensee must have written authorization from the listing brokerage firm, acknowledge "
+        "the listing brokerage conspicuously, and have authorization from the seller.",
+        # Franchise / trade name
+        "South Carolina § 40-57-135(E)(3): If a real estate brokerage firm operates under a trade or "
+        "franchise name, the identity of the franchisee or holder of the trade name must be clearly revealed.",
+        # Team advertising (2024, 36-month implementation delay)
+        "South Carolina 2024 Act No. 204 (H.4754): The brokerage name must appear on any communication "
+        "at least half as many times as the team name (e.g., if the team name appears twice, the brokerage "
+        "name must appear at least once). NOTE: This provision has a 36-month implementation delay — "
+        "brokerages have until approximately May 2027 to achieve full compliance.",
+        # AI language (2024)
+        "South Carolina 2024 Act No. 204: AI language added — licensees are responsible for any work "
+        "product they use that was produced by AI means, including ChatGPT. The use of AI in work "
+        "product is not by itself prohibited.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── TENNESSEE — Source: Tenn. Comp. R. & Regs. 1260-02-.12
+  "TN": {
+    "label": "Tennessee Real Estate Commission (TREC)",
+    "authority": "Tenn. Comp. R. & Regs. 1260-02-.12 (Rules of the Tennessee Real Estate Commission — Advertising)",
+    "notes": [
+        # 1260-02-.12(1)(a)
+        "Tennessee 1260-02-.12(1)(a): No licensee shall advertise to sell, purchase, exchange, rent, "
+        "or lease property in a manner indicating that the licensee is not engaged in the real estate "
+        "business (no blind ads).",
+        # 1260-02-.12(1)(b) — firm name SAME SIZE OR LARGER
+        "Tennessee 1260-02-.12(1)(b): All advertising shall be under the direct supervision of the "
+        "principal broker and shall list the firm name and firm telephone number as listed on file with "
+        "the Commission. The firm name must appear in letters the SAME SIZE OR LARGER than those spelling "
+        "out the name of a licensee or the name of any team, group, or similar entity. (This is stricter "
+        "than most states, which require 'equal or greater' — Tennessee mandates the firm name be at "
+        "least equal, never smaller.)",
+        # 1260-02-.12(1)(c)
+        "Tennessee 1260-02-.12(1)(c): Any advertising that refers to an individual licensee must list "
+        "that individual licensee's name as licensed with the Commission.",
+        # 1260-02-.12(5)(a) — internet
+        "Tennessee 1260-02-.12(5)(a): For internet advertising, the firm name and firm telephone number "
+        "listed on file with the Commission must conspicuously appear on the website. For social media, "
+        "the firm name and phone number must be no more than one click away from the viewable page.",
+        # 1260-02-.12(4) — franchise/cooperative
+        "Tennessee 1260-02-.12(4): Licensees using a franchise trade name or advertising as a member of "
+        "a cooperative group shall clearly and unmistakably indicate in the advertisement their name, "
+        "firm name, and firm telephone number (all as registered with TREC) adjacent to any specific "
+        "properties advertised for sale or lease.",
+        # Prohibited team terms
+        "Tennessee 1260-02-.12(3): Team or group names may not include terms such as 'Real Estate,' "
+        "'Real Estate Brokerage,' 'Realty,' 'Company,' 'Corporation,' 'LLC,' 'Corp.,' 'Inc.,' "
+        "'Associates,' or other similar terms that would lead the public to believe that those licensees "
+        "are offering real estate brokerage services independent of the firm and principal broker.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── VIRGINIA — Source: 18 VAC 135-20-190 (UPDATED April 1, 2026)
+  "VA": {
+    "label": "Virginia Real Estate Board (VREB)",
+    "authority": "18 VAC 135-20-190 (Virginia Administrative Code — Real Estate Board Licensing Regulations, eff. April 1, 2026)",
+    "notes": [
+        # April 1, 2026 updated definition
+        "Virginia 18 VAC 135-20-190 (eff. April 1, 2026): Advertising is now defined as 'any marketing "
+        "or promotion of real estate and real estate-related services, regardless of the media.' The "
+        "prior categories distinguishing between online and print advertising have been eliminated. "
+        "One universal standard now applies to all advertising formats.",
+        # Universal disclosure requirement (April 2026)
+        "Virginia 18 VAC 135-20-190 (eff. April 1, 2026): All advertising by a firm or affiliated "
+        "licensee must contain a clear, legible, and conspicuous disclosure of BOTH the firm's name "
+        "AND office contact information (telephone number, email address, or web address of the firm, "
+        "or a digital link thereto). The prior 'one-click-away' rule for electronic advertising has "
+        "been REMOVED — the firm name and contact info must appear in every advertisement.",
+        # Pre-2026 requirement (still operative until April 1, 2026)
+        "Virginia 18 VAC 135-20-190(B) (prior to April 1, 2026): All advertising must be under the "
+        "direct supervision of the principal broker or supervising broker, in the name of the firm, "
+        "and the firm's licensed name must be clearly and legibly displayed on all advertising.",
+        # Written consent / seller verification
+        "Virginia 18 VAC 135-20-190 (eff. April 1, 2026): Licensees must obtain the written consent "
+        "of the seller, landlord, optionor, or licensor prior to advertising a specific identifiable "
+        "property. Licensees must also take reasonable steps to verify the identity of the property "
+        "owner or landlord before listing — a new requirement added to combat deed fraud scams.",
+        # Team name caution
+        "Virginia VREB Practice Guidance: Brokers and firms should be cautious with team names. "
+        "Avoid terms that could cause consumer confusion such as 'realty,' 'real estate,' 'associates,' "
+        "'partners,' 'company,' 'sales,' 'limited,' and 'properties.' Use of 'team' or 'group' is "
+        "less risky. The firm name must always be clearly and legibly displayed in advertising.",
+    ],
+    "extra_rules": [],
+  },
+
+  # ── MARYLAND — Source: COMAR 09.11.01.16; COMAR 09.11.02.01; Md. Code Ann., Bus. Occ. & Prof. § 17-322; § 17-547(c)
+  "MD": {
+    "label": "Maryland Real Estate Commission (MREC)",
+    "authority": "COMAR 09.11.01.16 / Md. Code Ann., Bus. Occ. & Prof. § 17-322 / § 17-547(c)",
+    "notes": [
+        # COMAR 09.11.01.16(C)(1)
+        "Maryland COMAR 09.11.01.16(C)(1): A licensee using a trade name shall clearly and unmistakably "
+        "include in all advertising the licensee's name or trade name as registered with the Commission, "
+        "to ensure the licensee's identity is meaningfully and conspicuously displayed to members of the "
+        "general public.",
+        # COMAR 09.11.01.16(C)(2)
+        "Maryland COMAR 09.11.01.16(C)(2): For sale signs, business cards, contracts, listing contracts, "
+        "and other documents relating to real estate activities must clearly and unmistakably include the "
+        "licensee's name or trade name as registered with the Commission.",
+        # § 17-322(b)(18)–(20)
+        "Maryland § 17-322(b)(18)–(20): Grounds for discipline include misleading or untruthful "
+        "advertising. Where advertising is published over the name of a licensed salesperson, the "
+        "advertisement must disclose the name of the broker whom the salesperson is licensed to represent.",
+        # § 17-547(c) — team name rule
+        "Maryland § 17-547(c) / COMAR 09.11.02.01: A team name is 'directly connected' to a brokerage "
+        "name only if: (a) the ONLY word between the team name and brokerage name is 'of,' 'from,' 'with,' "
+        "or 'at'; AND (b) no other word, symbol, or image is between the team name and brokerage name. "
+        "Any other construction is not compliant.",
+        # Internet / online chat guidance
+        "Maryland MREC Online Advertising Guidance: For internet advertising, disclosure of the broker's "
+        "name or company name must be made on the chat session page or on the same viewable web page as "
+        "any chat session. Online consumers must be able to know when they are dealing with a licensee "
+        "and identify the brokerage where the licensee can be found.",
+    ],
+    "extra_rules": [],
+  },
 
 }
 
@@ -1628,11 +2204,22 @@ def _run_semantic_compliance_check(
     except RuntimeError:
         return None  # Never let compliance pass failures block content delivery
 
+    _, verified_dates = _get_rules_version_and_dates(state)
+    federal_verified = verified_dates.get("federal", "unknown")
+    verification_context = (
+        f"Rules verified against primary sources as of: {federal_verified}. "
+        f"If you are reviewing content published after this date, note that regulations "
+        f"may have been updated and flag any areas where you believe recent rule changes "
+        f"could affect your assessment."
+    )
+
     prompt = _SEMANTIC_REVIEW_PROMPT.format(
         content=content[:4000],   # Clip to avoid token waste on very long content
         state=state or "Not specified",
         niche=niche or "Residential real estate",
     )
+    # Inject verification context after the AGENT CONTEXT section
+    prompt = prompt + f"\n\nVERIFICATION CONTEXT:\n{verification_context}"
 
     try:
         response = client.messages.create(
@@ -1662,6 +2249,86 @@ def _run_semantic_compliance_check(
 # BADGE BUILDER — merges Pass 1 + Pass 2 into final ComplianceBadge
 # Sets the status label and disclaimer text.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RULES VERSION METADATA
+# Single source of truth for the active rule set.
+# Updated by the compliance partner via POST /admin/compliance/verify-state.
+# Loaded from compliance_rules_meta.json when available; these are the hardcoded
+# fallback defaults that match the initial 2026-Q2 research round.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RULES_VERSION = "2026-Q2"
+
+# Federal sources — verified April 2026
+_FEDERAL_VERIFIED_DATES: Dict[str, str] = {
+    "federal":      "2026-04",   # Fair Housing Act, HUD regs, FHEO guidance
+    "nar":          "2026-04",   # NAR Code of Ethics 2026 edition
+}
+
+# Mountain/Western states — all verified April 2026 (initial research round)
+_STATE_VERIFIED_DATES: Dict[str, str] = {
+    "CO": "2026-04",  # 4 CCR 725-1, Rule 6.10 — Colorado Real Estate Commission
+    "WY": "2026-04",  # W.S. § 33-28-119
+    "MT": "2026-04",  # ARM 24.210.641 / MCA § 37-51-321
+    "ID": "2026-04",  # Idaho Code § 54-2038 / IREC Guideline 13
+    "UT": "2026-04",  # Utah Admin. Code R162-2f-401h
+    "NM": "2026-04",  # NMAC 16.61.32.8
+    "TX": "2026-04",  # 22 TAC §535.155 / §535.154 (TREC)
+    "AZ": "2026-04",  # A.A.C. R4-28-502 (updated Dec. 13, 2025)
+    "NV": "2026-04",  # NAC 645.610 / NRS 645.315
+    "OR": "2026-04",  # OAR 863-015-0125
+    "WA": "2026-04",  # WAC 308-124B-210
+    "CA": "2026-04",  # Cal. B&P Code §10140.6 / 10 CCR §2770.1
+    "AK": "2026-04",  # AS 08.88 / 12 AAC 64
+    "HI": "2026-04",  # HAR § 16-99-11
+}
+
+
+def _load_rules_meta() -> Dict[str, Any]:
+    """
+    Load compliance_rules_meta.json from the same directory as this file.
+    Returns an empty dict if the file does not exist or cannot be parsed.
+    This is called once per compliance check and is intentionally lightweight.
+    """
+    from pathlib import Path
+    meta_path = Path(__file__).parent / "compliance_rules_meta.json"
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _get_rules_version_and_dates(state: str = "") -> tuple:
+    """
+    Returns (rules_version: str, verified_dates: dict).
+    Tries compliance_rules_meta.json first; falls back to hardcoded defaults.
+    verified_dates always includes "federal", "nar", and the agent's state (if known).
+    """
+    meta = _load_rules_meta()
+
+    if meta:
+        version = meta.get("version", _RULES_VERSION)
+        fed_dates = {
+            "federal": meta.get("federal", {}).get("fair_housing_act", {}).get("verified_date", _FEDERAL_VERIFIED_DATES["federal"]),
+            "nar":     meta.get("federal", {}).get("nar_code_of_ethics", {}).get("verified_date", _FEDERAL_VERIFIED_DATES["nar"]),
+        }
+        state_dates = {}
+        for st, entry in meta.get("states", {}).items():
+            state_dates[st] = entry.get("verified_date", _STATE_VERIFIED_DATES.get(st, "unknown"))
+    else:
+        version    = _RULES_VERSION
+        fed_dates  = dict(_FEDERAL_VERIFIED_DATES)
+        state_dates = dict(_STATE_VERIFIED_DATES)
+
+    verified_dates = dict(fed_dates)
+    state_key = state.upper() if state else ""
+    if state_key:
+        verified_dates[state_key] = state_dates.get(state_key, "unverified")
+
+    return version, verified_dates
+
 
 _DISCLAIMER_BASE = (
     "HomeBridge checks content against federal Fair Housing law (42 U.S.C. § 3604), "
@@ -1701,7 +2368,7 @@ def _build_final_badge(
 ) -> ComplianceBadge:
     """
     Merges Pass 1 and Pass 2 results.
-    Determines final overallStatus, statusLabel, and disclaimer.
+    Determines final overallStatus, statusLabel, disclaimer, and version stamp.
     """
     semantic_flags: List[Dict[str, Any]] = []
     semantic_assessment: str = ""
@@ -1728,9 +2395,20 @@ def _build_final_badge(
     else:
         final_overall = "reviewed"
 
-    # Build disclaimer
-    state_label = STATE_RULES.get(state.upper(), {}).get("label", f"{state} Real Estate Commission") if state else "state real estate commission"
-    disclaimer = _DISCLAIMER_BASE + _STATUS_ADDENDUM[final_overall]
+    # Build disclaimer with specific verification dates
+    rules_version, verified_dates = _get_rules_version_and_dates(state)
+    federal_date = verified_dates.get("federal", "unknown")
+    state_key = state.upper() if state else ""
+    state_date = verified_dates.get(state_key, "unverified") if state_key else None
+
+    date_line = f"Federal rules verified: {federal_date}."
+    if state_date and state_date not in ("unverified", "unknown"):
+        state_label_short = STATE_RULES.get(state_key, {}).get("label", f"{state_key} Real Estate Commission") if state_key else ""
+        date_line += f" {state_label_short} rules verified: {state_date}."
+    elif state_key:
+        date_line += f" {state_key} state rules: verification date unavailable — consult your broker."
+
+    disclaimer = _DISCLAIMER_BASE + _STATUS_ADDENDUM[final_overall] + f" {date_line}"
 
     # Add semantic flags to disclosure_checks for frontend rendering
     updated_disclosure = list(p1_badge.disclosureChecks)
@@ -1767,6 +2445,8 @@ def _build_final_badge(
         disclosureChecks=updated_disclosure,
         semanticFlags=semantic_flags,
         semanticAssessment=semantic_assessment,
+        rules_version=rules_version,
+        rules_verified_dates=verified_dates,
     )
 
 
@@ -2838,3 +3518,360 @@ HARD RULES:
         return _parse_claude_output(raw_text, compliance)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error structuring response: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADMIN COMPLIANCE PANEL
+# Routes: POST /admin/compliance/verify-state
+#         GET  /admin/compliance/status
+#
+# Authentication: JWT, admin or super_admin role only.
+# These endpoints are the compliance partner's interface for running quarterly
+# reviews and recording verification results against primary sources.
+#
+# The JSON file (compliance_rules_meta.json) is the persistent store.
+# No new packages required — uses json, datetime, pathlib (stdlib).
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import APIRouter as _APIRouter
+
+admin_router = _APIRouter(prefix="/admin/compliance", tags=["admin-compliance"])
+
+# Mountain/Western states in scope for Phase 2
+_MW_STATES = {"CO", "WY", "MT", "ID", "UT", "NM", "TX", "AZ", "NV", "OR", "WA", "CA", "AK", "HI"}
+
+# Review cadence thresholds (days) — used for overdue detection
+_REVIEW_THRESHOLDS = {
+    "CO": 90,    # quarterly — live state
+    "default_state": 90,   # quarterly for all Mountain/Western states
+    "federal": 365,        # annual
+    "nar": 365,            # annual (January)
+    "hud_advertising_guidance": 180,  # semi-annual
+}
+
+
+def _get_meta_path():
+    from pathlib import Path
+    return Path(__file__).parent / "compliance_rules_meta.json"
+
+
+def _read_meta() -> Dict[str, Any]:
+    """Read compliance_rules_meta.json. Returns default skeleton if missing."""
+    try:
+        with open(_get_meta_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"version": _RULES_VERSION, "federal": {}, "states": {}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not read compliance_rules_meta.json: {e}")
+
+
+def _write_meta(meta: Dict[str, Any]) -> None:
+    """Write compliance_rules_meta.json atomically."""
+    import tempfile, os
+    path = _get_meta_path()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8"
+        ) as tmp:
+            json.dump(meta, tmp, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not write compliance_rules_meta.json: {e}")
+
+
+def _bump_version_if_needed(current_version: str) -> str:
+    """
+    Returns a new version string if the current calendar quarter has changed.
+    Format: YYYY-QN  (e.g. 2026-Q2)
+    Only bumps forward — never rolls back.
+    """
+    now = datetime.utcnow()
+    quarter = (now.month - 1) // 3 + 1
+    new_version = f"{now.year}-Q{quarter}"
+    # Compare as strings — YYYY-QN sorts lexicographically when year is the same
+    if new_version > current_version:
+        return new_version
+    return current_version
+
+
+def _require_admin(request: Request) -> Dict[str, Any]:
+    """
+    Decode JWT and verify admin or super_admin role.
+    Returns the decoded token payload.
+    Raises 401/403 on failure.
+    """
+    import os as _os
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization header required.")
+    try:
+        import jwt as _jwt
+        SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
+        decoded = _jwt.decode(token, SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    role = decoded.get("role", "")
+    if role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="admin or super_admin role required.")
+    return decoded
+
+
+def _days_since(date_str: str) -> Optional[int]:
+    """
+    Parse a YYYY-MM date string and return days elapsed since the first of that month.
+    Returns None if date_str is not parseable.
+    """
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m")
+        return (datetime.utcnow() - dt).days
+    except Exception:
+        return None
+
+
+def _is_overdue(date_str: str, threshold_days: int) -> bool:
+    days = _days_since(date_str)
+    return days is not None and days > threshold_days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /admin/compliance/verify-state
+# ─────────────────────────────────────────────────────────────────────────────
+
+class VerifyStateRequest(BaseModel):
+    state: str = Field(..., description="Two-letter state code, e.g. 'CO'")
+    verified_by: str = Field(..., description="Full name of the reviewer")
+    notes: str = Field(..., description="What was reviewed and what was found")
+    verified_date: Optional[str] = Field(
+        None,
+        description="Override verification date as YYYY-MM. Defaults to current month."
+    )
+
+
+@admin_router.post("/verify-state")
+async def verify_state(payload: VerifyStateRequest, request: Request):
+    """
+    Record that a compliance partner has reviewed the advertising rules for a given state
+    against primary sources and found them current (or noted changes).
+
+    Updates compliance_rules_meta.json with the new verified_date, reviewer name,
+    and review notes. Bumps rules_version if the current quarter has changed.
+
+    Required role: admin or super_admin.
+    """
+    _require_admin(request)
+
+    state_key = payload.state.strip().upper()
+    if state_key not in _MW_STATES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{state_key}' is not in the Mountain/Western scope. "
+                   f"Supported states: {', '.join(sorted(_MW_STATES))}"
+        )
+
+    now = datetime.utcnow()
+    verified_date = payload.verified_date or now.strftime("%Y-%m")
+
+    # Validate date format if supplied
+    if payload.verified_date:
+        try:
+            datetime.strptime(payload.verified_date, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="verified_date must be in YYYY-MM format.")
+
+    # Calculate next_review date (add 90 days, convert to YYYY-MM)
+    from datetime import timedelta
+    threshold = _REVIEW_THRESHOLDS.get(state_key, _REVIEW_THRESHOLDS["default_state"])
+    next_dt = now + timedelta(days=threshold)
+    next_review = next_dt.strftime("%Y-%m")
+
+    meta = _read_meta()
+
+    # Bump version if quarter has changed
+    old_version = meta.get("version", _RULES_VERSION)
+    new_version = _bump_version_if_needed(old_version)
+    version_bumped = new_version != old_version
+    meta["version"] = new_version
+
+    # Update the state entry
+    if "states" not in meta:
+        meta["states"] = {}
+    if state_key not in meta["states"]:
+        meta["states"][state_key] = {}
+
+    entry = meta["states"][state_key]
+    entry["verified_date"]    = verified_date
+    entry["last_reviewed_by"] = payload.verified_by
+    entry["review_notes"]     = payload.notes
+    entry["next_review"]      = next_review
+    entry["last_reviewed_at"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Preserve existing label/citation/source_url if already present
+    # (a verify call should not wipe out citation metadata set at init)
+
+    _write_meta(meta)
+
+    state_label = STATE_RULES.get(state_key, {}).get("label", f"{state_key} Real Estate Commission")
+
+    return {
+        "success": True,
+        "state": state_key,
+        "state_label": state_label,
+        "updated": {
+            "verified_date":    verified_date,
+            "last_reviewed_by": payload.verified_by,
+            "next_review":      next_review,
+        },
+        "rules_version": {
+            "previous": old_version,
+            "current":  new_version,
+            "bumped":   version_bumped,
+        },
+        "message": (
+            f"{state_label} rules marked as verified for {verified_date}. "
+            f"Next review due by {next_review}."
+            + (" rules_version bumped to " + new_version + "." if version_bumped else "")
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /admin/compliance/status
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_router.get("/status")
+async def compliance_status(request: Request):
+    """
+    Returns the current verification status of all states and federal sources
+    in the Mountain/Western scope.
+
+    Readable by the compliance partner to determine what needs review this quarter.
+    Flags overdue items and items coming due within 30 days.
+
+    Required role: admin or super_admin.
+    """
+    _require_admin(request)
+
+    meta = _read_meta()
+    now = datetime.utcnow()
+    today_str = now.strftime("%Y-%m-%d")
+
+    # ── Federal sources ───────────────────────────────────────────────────────
+    federal_section = meta.get("federal", {})
+    federal_summary = []
+
+    federal_sources = [
+        ("fair_housing_act",        "Fair Housing Act (42 U.S.C. § 3604)",         "federal"),
+        ("hud_advertising_guidance","HUD FHEO Digital Advertising Guidance",        "hud_advertising_guidance"),
+        ("hud_regulations_part109", "HUD 24 C.F.R. Part 109",                      "federal"),
+        ("achtenberg_memo",         "Achtenberg Memo (1995) — Master Bedroom Rule", "federal"),
+        ("nar_code_of_ethics",      "NAR Code of Ethics (2026 edition)",            "nar"),
+        ("doj_steering",            "DOJ Steering Enforcement",                     "federal"),
+        ("respa_section8",          "RESPA § 8",                                   "federal"),
+        ("regulation_z",            "Regulation Z / TILA",                         "federal"),
+        ("cfpb_udaap",              "CFPB UDAAP",                                  "federal"),
+    ]
+
+    for key, display_name, cadence_key in federal_sources:
+        entry = federal_section.get(key, {})
+        verified_date = entry.get("verified_date", "never")
+        next_review   = entry.get("next_review", "unknown")
+        days_since    = _days_since(verified_date) if verified_date != "never" else None
+        threshold     = _REVIEW_THRESHOLDS.get(cadence_key, _REVIEW_THRESHOLDS["federal"])
+        overdue       = _is_overdue(verified_date, threshold) if verified_date != "never" else True
+        due_soon      = False
+        if next_review != "unknown":
+            try:
+                next_dt = datetime.strptime(next_review, "%Y-%m")
+                days_to_next = (next_dt - now).days
+                due_soon = 0 < days_to_next <= 30
+            except Exception:
+                pass
+
+        federal_summary.append({
+            "source":        display_name,
+            "key":           key,
+            "verified_date": verified_date,
+            "next_review":   next_review,
+            "days_since_verification": days_since,
+            "overdue":       overdue,
+            "due_soon":      due_soon,
+            "citation":      entry.get("citation", ""),
+            "source_url":    entry.get("source_url", ""),
+            "verified_by":   entry.get("verified_by", "unknown"),
+        })
+
+    # ── States ────────────────────────────────────────────────────────────────
+    states_section = meta.get("states", {})
+    state_summary = []
+
+    for state_key in sorted(_MW_STATES):
+        entry = states_section.get(state_key, {})
+        verified_date = entry.get("verified_date", "never")
+        next_review   = entry.get("next_review", "unknown")
+        days_since    = _days_since(verified_date) if verified_date != "never" else None
+        threshold     = _REVIEW_THRESHOLDS.get(state_key, _REVIEW_THRESHOLDS["default_state"])
+        overdue       = _is_overdue(verified_date, threshold) if verified_date != "never" else True
+        due_soon      = False
+        if next_review != "unknown":
+            try:
+                next_dt = datetime.strptime(next_review, "%Y-%m")
+                days_to_next = (next_dt - now).days
+                due_soon = 0 < days_to_next <= 30
+            except Exception:
+                pass
+
+        state_label = (
+            entry.get("label")
+            or STATE_RULES.get(state_key, {}).get("label", f"{state_key} Real Estate Commission")
+        )
+        status_tag = entry.get("status", "staged")
+
+        state_summary.append({
+            "state":          state_key,
+            "label":          state_label,
+            "status":         status_tag,         # "live" | "staged"
+            "verified_date":  verified_date,
+            "next_review":    next_review,
+            "days_since_verification": days_since,
+            "overdue":        overdue,
+            "due_soon":       due_soon,
+            "last_reviewed_by": entry.get("last_reviewed_by", "unknown"),
+            "citation":       entry.get("citation", ""),
+            "source_url":     entry.get("source_url", ""),
+        })
+
+    # ── Summary counts ────────────────────────────────────────────────────────
+    states_overdue  = [s for s in state_summary  if s["overdue"]]
+    federal_overdue = [f for f in federal_summary if f["overdue"]]
+    states_due_soon = [s for s in state_summary  if s["due_soon"] and not s["overdue"]]
+
+    return {
+        "rules_version":       meta.get("version", _RULES_VERSION),
+        "report_generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scope":               "Mountain/Western Region (14 states)",
+        "summary": {
+            "total_states_in_scope": len(_MW_STATES),
+            "states_overdue":        len(states_overdue),
+            "states_due_within_30d": len(states_due_soon),
+            "federal_sources_overdue": len(federal_overdue),
+            "attention_required":    len(states_overdue) > 0 or len(federal_overdue) > 0,
+        },
+        "action_required": {
+            "overdue_states":   [{"state": s["state"], "label": s["label"], "last_verified": s["verified_date"], "days_elapsed": s["days_since_verification"]} for s in states_overdue],
+            "overdue_federal":  [{"source": f["source"], "last_verified": f["verified_date"], "days_elapsed": f["days_since_verification"]} for f in federal_overdue],
+            "due_soon_states":  [{"state": s["state"], "label": s["label"], "next_review": s["next_review"]} for s in states_due_soon],
+        },
+        "states":  state_summary,
+        "federal": federal_summary,
+        "note": (
+            "HomeBridge is not a legal authority. These verification dates reflect "
+            "the last time a compliance partner checked each source against its primary regulatory text. "
+            "Rule changes between review cycles may not be reflected. "
+            "When in doubt, agents should consult their broker or a real estate attorney."
+        ),
+    }
+
