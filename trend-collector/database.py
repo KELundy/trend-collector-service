@@ -122,6 +122,10 @@ def init_db():
         # Partner Program — added Session 12
         ("partner_tier",           "TEXT DEFAULT NULL"),
         ("partner_code",           "TEXT DEFAULT NULL"),
+        # Organizational identity — added Session 18 (ADD v6 §2.6)
+        # solo | member | lead | broker — professional configuration type
+        # Does NOT replace the role field. Drives organizational feature activation only.
+        ("org_config",             "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -391,6 +395,59 @@ def init_db():
             created_at         TEXT    DEFAULT (datetime('now')),
             paid_at            TEXT    DEFAULT NULL,
             FOREIGN KEY (partner_id) REFERENCES partners(id)
+        )
+    """)
+
+    # ── ACCOUNT IDENTITY & ORGANIZATIONAL AFFILIATION — Session 18 (ADD v6 §2.5–2.6) ──────────
+
+    # user_contact_methods — multiple verified contact methods per user.
+    # Email is a contact address, not an identity key. user_id is the permanent anchor.
+    # Any verified email or phone can be used for account recovery.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_contact_methods (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            type        TEXT    NOT NULL,           -- email | phone
+            value       TEXT    NOT NULL,           -- the address or number
+            is_primary  INTEGER NOT NULL DEFAULT 0, -- 1 = receives notifications
+            is_verified INTEGER NOT NULL DEFAULT 0, -- 1 = confirmed via verification flow
+            added_at    TEXT    DEFAULT (datetime('now')),
+            verified_at TEXT    DEFAULT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
+    # organizations — teams, offices, and brokerages as first-class entities.
+    # Created by explicit declaration during onboarding or claimed later in Settings.
+    # Not inherited from signup order.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS organizations (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            type          TEXT    NOT NULL,           -- team | office | brokerage
+            name          TEXT    NOT NULL,
+            owner_user_id INTEGER NOT NULL,           -- declaring authority (FK → users.id)
+            billing_plan  TEXT    NOT NULL DEFAULT 'individual', -- individual | sponsored | organizational
+            created_at    TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (owner_user_id) REFERENCES users(id)
+        )
+    """)
+
+    # user_organizations — affiliation relationship records.
+    # Joining creates a record. Leaving sets left_at. Content never transfers.
+    # Visibility into an agent's content ends the moment left_at is set.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_organizations (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,           -- FK → users.id
+            organization_id INTEGER NOT NULL,           -- FK → organizations.id
+            role_within_org TEXT    NOT NULL DEFAULT 'member', -- member | lead | owner | broker
+            joined_at       TEXT    DEFAULT (datetime('now')),
+            left_at         TEXT    DEFAULT NULL,       -- NULL = currently affiliated
+            billing_model   TEXT    NOT NULL DEFAULT 'individual', -- individual | sponsored | organizational
+            invited_by      INTEGER DEFAULT NULL,       -- FK → users.id (who invited them)
+            FOREIGN KEY (user_id)         REFERENCES users(id),
+            FOREIGN KEY (organization_id) REFERENCES organizations(id),
+            FOREIGN KEY (invited_by)      REFERENCES users(id)
         )
     """)
 
