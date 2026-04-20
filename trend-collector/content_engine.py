@@ -3712,6 +3712,20 @@ async def verify_state(payload: VerifyStateRequest, request: Request):
     # Preserve existing label/citation/source_url if already present
     # (a verify call should not wipe out citation metadata set at init)
 
+    # Append to review_history (newest first, capped at 20 entries)
+    history_entry = {
+        "reviewed_at":  now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "verified_date": verified_date,
+        "reviewed_by":  payload.verified_by,
+        "notes":        payload.notes,
+        "source_type":  "state",
+        "source_key":   state_key,
+        "source_label": STATE_RULES.get(state_key, {}).get("label", f"{state_key} Real Estate Commission"),
+        "layer":        entry.get("layer", "4"),
+    }
+    existing_history = entry.get("review_history", [])
+    entry["review_history"] = ([history_entry] + existing_history)[:20]
+
     _write_meta(meta)
 
     state_label = STATE_RULES.get(state_key, {}).get("label", f"{state_key} Real Estate Commission")
@@ -3794,6 +3808,7 @@ async def compliance_status(request: Request):
         federal_summary.append({
             "source":        display_name,
             "key":           key,
+            "layer":         entry.get("layer", ""),
             "verified_date": verified_date,
             "next_review":   next_review,
             "days_since_verification": days_since,
@@ -3833,6 +3848,7 @@ async def compliance_status(request: Request):
         state_summary.append({
             "state":          state_key,
             "label":          state_label,
+            "layer":          entry.get("layer", "4"),
             "status":         status_tag,         # "live" | "staged"
             "verified_date":  verified_date,
             "next_review":    next_review,
@@ -3849,10 +3865,19 @@ async def compliance_status(request: Request):
     federal_overdue = [f for f in federal_summary if f["overdue"]]
     states_due_soon = [s for s in state_summary  if s["due_soon"] and not s["overdue"]]
 
+    # ── Collect review_history across all states and federal sources ──────────
+    all_history = []
+    for _se in meta.get("states", {}).values():
+        all_history.extend(_se.get("review_history", []))
+    for _fe in meta.get("federal", {}).values():
+        all_history.extend(_fe.get("review_history", []))
+    all_history.sort(key=lambda x: x.get("reviewed_at", ""), reverse=True)
+
     return {
         "rules_version":       meta.get("version", _RULES_VERSION),
         "report_generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "scope":               "Mountain/Western Region (14 states)",
+        "layers":              meta.get("layers", {}),
         "summary": {
             "total_states_in_scope": len(_MW_STATES),
             "states_overdue":        len(states_overdue),
@@ -3865,8 +3890,9 @@ async def compliance_status(request: Request):
             "overdue_federal":  [{"source": f["source"], "last_verified": f["verified_date"], "days_elapsed": f["days_since_verification"]} for f in federal_overdue],
             "due_soon_states":  [{"state": s["state"], "label": s["label"], "next_review": s["next_review"]} for s in states_due_soon],
         },
-        "states":  state_summary,
-        "federal": federal_summary,
+        "states":         state_summary,
+        "federal":        federal_summary,
+        "review_history": all_history,
         "note": (
             "HomeBridge is not a legal authority. These verification dates reflect "
             "the last time a compliance partner checked each source against its primary regulatory text. "
