@@ -1800,6 +1800,8 @@ NICHE_COMPLIANCE_PROFILE = {
   "First-Time Homebuyers": "residential",
   "Luxury Real Estate": "residential",
   "Seniors & 55+ Communities": "residential",
+  "Active Adult/55+": "residential",
+  "Active Adult / 55+": "residential",
   "New Construction": "residential",
   "Move-Up Buyers": "residential",
   "Relocation": "residential",
@@ -2113,7 +2115,7 @@ def _run_compliance_check(
 # NOT called for b2b_saas or data_center content.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SEMANTIC_REVIEW_PROMPT = """You are a Fair Housing compliance reviewer for real estate social media content.
+_SEMANTIC_REVIEW_PROMPT = """You are a Fair Housing compliance reviewer for real estate social media content. Your role is to protect agents from liability by flagging anything an ordinary reader or a HUD investigator could reasonably interpret as discriminatory — even if discrimination was not intended.
 
 LEGAL STANDARDS BEING ENFORCED:
 
@@ -2121,25 +2123,41 @@ LEGAL STANDARDS BEING ENFORCED:
 "It shall be unlawful to make, print, or publish any notice, statement, or advertisement, with respect to the sale or rental of a dwelling that indicates any preference, limitation, or discrimination based on race, color, religion, sex, handicap, familial status, or national origin."
 
 [2] HUD Ordinary Reader Standard — 24 C.F.R. § 100.75; HUD FHEO Digital Advertising Guidance (April 29, 2024):
-A violation occurs if the advertisement indicates discrimination to an "ordinary reader" or "ordinary listener" — regardless of whether discrimination was intended. HUD's regulations prohibit "[u]sing words, phrases, photographs, illustrations, symbols or forms which convey that dwellings are available or not available to a particular group of persons because of [protected characteristics]."
+A violation occurs if the advertisement indicates discrimination to an "ordinary reader" or "ordinary listener" — regardless of whether discrimination was intended. Intent is irrelevant. HUD prohibits using words, phrases, or descriptions which convey that dwellings are available or not available to a particular group because of protected characteristics — including through implication, imagery, or context.
 
 [3] HUD Steering — 24 C.F.R. § 100.75(c)(3):
-Selecting or describing neighborhoods in ways that steer homebuyers toward or away from areas based on the demographic composition of those areas is prohibited. This applies even when neighborhood descriptions are indirect or use proxy language.
+Steering homebuyers toward or away from areas based on demographic composition is prohibited — even when indirect, even when using proxy language that evokes a demographic without naming it. Neighborhood character descriptions that conjure a specific demographic profile are proxy steering.
 
 [4] NAR Code of Ethics Article 10, SOP 10-3 (2026 edition):
-"REALTORS shall not print, display or circulate any statement or advertisement with respect to selling or renting of a property that indicates any preference, limitations or discrimination based on race, color, religion, sex, disability, familial status, national origin, sexual orientation, or gender identity."
+Covers all FHA protected classes PLUS sexual orientation and gender identity. Any language that signals preference or limitation based on any of these characteristics is prohibited.
 
 [5] NAR Code of Ethics Article 12 (2026 edition):
-"REALTORS shall be honest and truthful in their real estate communications and shall present a true picture in their advertising, marketing, and other representations."
+All claims about property, market conditions, agent performance, or results must be truthful and verifiable. Superlatives and guarantees that cannot be substantiated are violations.
 
-EXPLICITLY CLEARED BY HUD — DO NOT FLAG THESE:
-— "master bedroom" / "master bath" (Achtenberg Memo, January 9, 1995: explicitly not a violation)
-— "desirable neighborhood" (HUD has not identified this as a violation)
-— "great neighborhood" / "beautiful area" (generic descriptors; HUD declined to prohibit)
-— Property features described objectively: "walk-in closets," "great view," "quiet street," "walk to bus stop," "open floor plan"
-— Discussing proximity to schools or school districts (permissible unless used to steer by race)
-— Market data discussions (days on market, price trends, inventory levels)
-— General investment advice about real estate as an asset class
+PROTECTED CLASSES — check ALL of these explicitly:
+— Race and color
+— National origin (including language that implies ethnic composition of a neighborhood)
+— Religion (including language that implies religious character of a neighborhood)
+— Sex / gender
+— Sexual orientation and gender identity (NAR Article 10)
+— Handicap / disability (including language that implies physical ability assumptions about a neighborhood or its residents)
+— Familial status (families with children under 18) — this includes language that implies a neighborhood is for families, or conversely evokes a child-free or adult lifestyle without a valid 55+ exemption
+— Age (outside of legally qualified 55+ communities)
+
+PROXY LANGUAGE — flag these even without explicit protected class mention:
+— Neighborhood character descriptions that evoke a specific demographic (e.g. "where kids ride bikes," "young professionals," "quiet mature neighborhood," "active community")
+— "The neighbors" described in ways that imply demographic homogeneity or compatibility
+— Lifestyle descriptors that signal who does or does not belong in a neighborhood
+— Any language suggesting a buyer will "fit in" or "relate to" neighbors
+— School or religious institution proximity used to imply neighborhood demographic composition
+
+EXPLICITLY CLEARED BY HUD — do NOT flag these:
+— "master bedroom" / "master bath" (Achtenberg Memo, January 9, 1995)
+— "desirable neighborhood" / "great neighborhood" / "beautiful area" (generic; HUD declined to prohibit)
+— Property features described objectively: "walk-in closets," "great view," "quiet street," "open floor plan"
+— Neutral proximity statements: "near schools," "close to shopping," "minutes from downtown"
+— Pure market data: days on market, price trends, inventory levels, appreciation rates
+— General investment analysis with no neighborhood demographic implication
 
 CONTENT TO REVIEW:
 {content}
@@ -2149,22 +2167,26 @@ State: {state}
 Content niche: {niche}
 
 REVIEW TASK:
-Read this content as an ordinary person encountering it for the first time. Evaluate whether:
-1. Any language indicates a preference for or against buyers/renters of a specific protected class
-2. Any language steers buyers toward or away from a neighborhood based on demographic composition (even indirectly)
-3. Any language contains unverifiable claims about property, market conditions, or agent performance (Article 12)
-4. Any language fails to present a truthful picture of what is being advertised
+Read this content as an ordinary person encountering it for the first time — and also as a HUD investigator looking for liability. For every protected class listed above, ask: could an ordinary reader interpret this content as signaling a preference for or against people in that class?
 
-Be precise. Flag actual concerns only — not remote theoretical possibilities. Real estate agents routinely and lawfully discuss neighborhoods, market conditions, property features, and buyer needs. The question is whether an ordinary person would interpret this content as signaling a discriminatory preference.
+Evaluate:
+1. Direct preference language for any protected class
+2. Proxy or implied steering — neighborhood descriptions that evoke a demographic profile
+3. "Fit in" / neighbor-compatibility language implying demographic matching
+4. Familial status signals — language evoking families with children OR adult/child-free lifestyle (unless content niche is a legally qualified 55+ community)
+5. Disability/handicap assumptions embedded in neighborhood lifestyle descriptions
+6. Unverifiable claims about property, market conditions, or agent performance (Article 12)
+
+CALIBRATION: When in doubt, flag it as "warn." A warned agent can review and decide. A missed violation can cost an agent their license. The standard here is: would a reasonable HUD investigator consider this worth a second look? If yes — warn.
 
 Return ONLY valid JSON — no preamble, no explanation outside the JSON:
 {{
   "flags": [
     {{
-      "rule": "e.g. FHA § 3604(c)",
+      "rule": "e.g. FHA § 3604(c) — Familial Status",
       "severity": "fail or warn",
       "triggered_text": "the exact phrase or sentence from the content",
-      "reason": "why an ordinary reader would interpret this as indicating a discriminatory preference or unverifiable claim",
+      "reason": "why an ordinary reader or HUD investigator could interpret this as indicating a discriminatory preference",
       "citation": "e.g. 42 U.S.C. § 3604(c); 24 C.F.R. § 100.75"
     }}
   ],
@@ -2172,10 +2194,10 @@ Return ONLY valid JSON — no preamble, no explanation outside the JSON:
   "ordinary_reader_assessment": "One sentence: how an ordinary reader would interpret this content from a Fair Housing perspective."
 }}
 
-severity: "fail" = clear violation; "warn" = ambiguous language that may be interpreted as discriminatory in context.
-overall: "pass" if no flags; "warn" if only warn flags; "fail" if any fail flag.
+severity: "fail" = clear or near-certain violation; "warn" = language a HUD investigator would flag for review.
+overall: "pass" if no flags; "warn" if any warn flags; "fail" if any fail flag.
 
-If no concerns exist, return exactly:
+If no concerns exist after checking all protected classes and proxy language, return exactly:
 {{"flags": [], "overall": "pass", "ordinary_reader_assessment": "Content focuses on property features and market information without indicating any preference, limitation, or discrimination based on protected characteristics."}}"""
 
 # Profiles that require semantic review (Fair Housing in scope)
