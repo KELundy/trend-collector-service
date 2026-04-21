@@ -112,18 +112,32 @@ def _search_signals(client, prompt: str, user_id: int) -> list:
             raw_text += block.text
 
     if not raw_text.strip():
+        print(f"[Signals] Empty response from Claude for user {user_id} — skipping tier.")
         return []
 
     try:
         clean = raw_text.strip()
+
+        # Strip markdown code fences if present
         if clean.startswith("```"):
             clean = clean.split("```")[1]
             if clean.startswith("json"):
                 clean = clean[4:]
-        signals = json.loads(clean.strip())
+        clean = clean.strip()
+
+        # If the response doesn't look like a JSON array, Claude returned
+        # conversational text (e.g. "I couldn't find anything specific").
+        # Log it cleanly and return [] — do not attempt to parse.
+        if not clean.startswith("["):
+            print(f"[Signals] Non-JSON response from Claude for user {user_id} — escalating tier.")
+            return []
+
+        signals = json.loads(clean)
         if not isinstance(signals, list):
+            print(f"[Signals] Unexpected JSON structure for user {user_id} — expected list, got {type(signals).__name__}.")
             return []
         return signals
+
     except Exception as e:
         print(f"[Signals] JSON parse error for user {user_id}: {e}")
         return []
@@ -203,21 +217,24 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     if service_areas:
         tier1_prompt = f"""You are a hyper-local real estate market intelligence researcher.
 
-Search the web for recent news and developments specifically in these neighborhoods: {areas_str} in {market_str}.
+Search the web for recent news and developments in these neighborhoods: {areas_str} in {market_str}.
 
 Look for:
 - New development projects, building permits, zoning approvals
 - Neighborhood changes, new businesses opening or closing
 - Local infrastructure or transit changes
-- Recent sales trends or inventory shifts specific to these exact areas
+- Recent sales trends or inventory shifts in these areas
 - City council or planning commission decisions affecting these neighborhoods
 
-Be strict: only include signals that are SPECIFIC to the named neighborhoods — not the whole city.
+Prioritize signals specific to the named neighborhoods. If a specific neighborhood
+has no recent news, include the nearest relevant signal within the surrounding
+{market_str} area — clearly noting the actual area in the "area" field.
 Recency matters: last 30 days ideal, last 90 days acceptable.
 
-Return ONLY a valid JSON array of up to 5 signals:
+Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
+If you truly cannot find anything relevant within 90 days, return an empty array [].
 [{{
-  "area": "exact neighborhood name",
+  "area": "neighborhood or area name",
   "headline": "one specific factual headline",
   "summary": "2-3 sentences on what happened and what it means for buyers/sellers",
   "source_url": "URL if found",
@@ -259,7 +276,8 @@ Look for:
 Include signals from any part of {market_str} — not just specific neighborhoods.
 Recency: last 60 days preferred.
 
-Return ONLY a valid JSON array of up to 5 signals:
+Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
+If you truly cannot find anything relevant, return an empty array [].
 [{{
   "area": "{market_str} metro",
   "headline": "one specific factual headline",
@@ -299,7 +317,8 @@ Look for:
 These should be trends that a real estate professional in {market_str} specializing
 in {niche_str} could write a local-angle post about.
 
-Return ONLY a valid JSON array of up to 5 signals:
+Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
+If you truly cannot find anything relevant, return an empty array [].
 [{{
   "area": "National — {niche_str}",
   "headline": "one specific factual headline about the national trend",
