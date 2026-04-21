@@ -143,15 +143,54 @@ def _search_signals(client, prompt: str, user_id: int) -> list:
         return []
 
 
+def _validate_published_date(raw_date: str, user_id: int, headline: str) -> tuple:
+    """
+    Validate a published_date string from Claude.
+    Returns (date_str_or_None, should_reject).
+    should_reject=True means the signal is too old and must not be saved.
+    """
+    if not raw_date or not str(raw_date).strip():
+        # No date provided — allow through with a warning, log it
+        print(f"[Signals] No published_date for signal '{headline[:60]}' (user {user_id}) — saving without date.")
+        return None, False
+
+    try:
+        from datetime import timedelta
+        date_str = str(raw_date).strip()[:10]  # Take YYYY-MM-DD portion only
+        parsed   = datetime.strptime(date_str, "%Y-%m-%d")
+        age_days = (datetime.utcnow() - parsed).days
+        if age_days > 90:
+            print(f"[Signals] REJECTED stale signal ({age_days}d old): '{headline[:60]}' (user {user_id})")
+            return None, True
+        return date_str, False
+    except Exception:
+        # Unparseable date — allow through without date, don't reject
+        print(f"[Signals] Unparseable published_date '{raw_date}' for '{headline[:60]}' (user {user_id}) — saving without date.")
+        return None, False
+
+
 def _save_signals(signals: list, user_id: int, tier: str, areas_str: str) -> int:
-    """Save signals to DB, tagging with tier. Returns count saved."""
+    """Save signals to DB, tagging with tier. Returns count saved.
+    Rejects any signal with a published_date older than 90 days.
+    Signals with no date are allowed through with a log warning.
+    """
     from database import signals_save
-    saved = 0
+    saved    = 0
+    rejected = 0
     for sig in signals[:5]:
         try:
             headline = str(sig.get("headline", "")).strip()
             if not headline or len(headline) < 10:
                 continue
+
+            # Validate recency — hard reject if published_date is present and >90 days old
+            pub_date, should_reject = _validate_published_date(
+                sig.get("published_date", ""), user_id, headline
+            )
+            if should_reject:
+                rejected += 1
+                continue
+
             signals_save(
                 user_id        = user_id,
                 area           = str(sig.get("area", areas_str))[:200],
@@ -160,10 +199,13 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str) -> int
                 source_url     = str(sig.get("source_url", ""))[:500],
                 signal_type    = f"{tier}:{sig.get('signal_type', 'general')}"[:50],
                 relevance_score= float(sig.get("relevance_score", 0.5)),
+                published_date = pub_date,
             )
             saved += 1
         except Exception as e:
             print(f"[Signals] Save error: {e}")
+    if rejected:
+        print(f"[Signals] {rejected} stale signal(s) rejected (>90 days) for user {user_id}.")
     return saved
 
 
@@ -232,12 +274,13 @@ has no recent news, include the nearest relevant signal within the surrounding
 Recency matters: last 30 days ideal, last 90 days acceptable.
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-If you truly cannot find anything relevant within 90 days, return an empty array [].
+Only include signals from the last 90 days. If you cannot find anything within 90 days, return an empty array [].
 [{{
   "area": "neighborhood or area name",
   "headline": "one specific factual headline",
   "summary": "2-3 sentences on what happened and what it means for buyers/sellers",
-  "source_url": "URL if found",
+  "source_url": "URL if found, otherwise empty string",
+  "published_date": "YYYY-MM-DD date the story was published, or empty string if unknown",
   "signal_type": "development|permit|market|infrastructure|zoning|news",
   "relevance_score": 0.0 to 1.0
 }}]
@@ -277,12 +320,13 @@ Include signals from any part of {market_str} — not just specific neighborhood
 Recency: last 60 days preferred.
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-If you truly cannot find anything relevant, return an empty array [].
+Only include signals from the last 90 days. If you cannot find anything within 90 days, return an empty array [].
 [{{
   "area": "{market_str} metro",
   "headline": "one specific factual headline",
   "summary": "2-3 sentences on what happened and what it means for real estate",
-  "source_url": "URL if found",
+  "source_url": "URL if found, otherwise empty string",
+  "published_date": "YYYY-MM-DD date the story was published, or empty string if unknown",
   "signal_type": "development|permit|market|infrastructure|zoning|news|policy",
   "relevance_score": 0.0 to 1.0
 }}]
@@ -318,12 +362,13 @@ These should be trends that a real estate professional in {market_str} specializ
 in {niche_str} could write a local-angle post about.
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-If you truly cannot find anything relevant, return an empty array [].
+Only include signals from the last 90 days. If you cannot find anything within 90 days, return an empty array [].
 [{{
   "area": "National — {niche_str}",
   "headline": "one specific factual headline about the national trend",
   "summary": "2-3 sentences on what the trend is and what it means for agents and clients",
-  "source_url": "URL if found",
+  "source_url": "URL if found, otherwise empty string",
+  "published_date": "YYYY-MM-DD date the story was published, or empty string if unknown",
   "signal_type": "policy|market|regulatory|technology|demographic|industry",
   "relevance_score": 0.0 to 1.0
 }}]
