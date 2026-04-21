@@ -207,6 +207,12 @@ def init_db():
         c.execute("ALTER TABLE local_signals ADD COLUMN used_at TEXT DEFAULT NULL")
     except Exception:
         pass  # Column already exists
+    # Non-destructive: Signal recency — stores the article/story publish date (Session 20)
+    # Used to reject stale signals (>90 days) at collection time and display date on signal card
+    try:
+        c.execute("ALTER TABLE local_signals ADD COLUMN published_date TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
 
     # Agent setup — stores identity/profile data server-side
     c.execute("""
@@ -1981,16 +1987,19 @@ def update_password(user_id: int, new_password_hash: str):
 
 def signals_save(user_id: int, area: str, headline: str, summary: str,
                  source_url: str, signal_type: str = "general",
-                 relevance_score: float = 0.5):
-    """Save a hyper-local signal for an agent."""
+                 relevance_score: float = 0.5, published_date: str = None):
+    """Save a hyper-local signal for an agent.
+    published_date — ISO date string of when the story was published (e.g. '2026-04-15').
+    Signals older than 90 days are rejected in signal_collector.py before this is called.
+    """
     from datetime import timedelta
     conn = get_conn()
     expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
     conn.execute("""
         INSERT INTO local_signals
-            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at))
+            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date))
     conn.commit()
     conn.close()
 
