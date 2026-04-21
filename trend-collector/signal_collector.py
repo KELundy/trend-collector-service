@@ -98,7 +98,7 @@ def _search_signals(client, prompt: str, user_id: int) -> list:
     try:
         response = client.messages.create(
             model      = "claude-sonnet-4-6",
-            max_tokens = 1500,
+            max_tokens = 2500,
             tools      = [{"type": "web_search_20250305", "name": "web_search"}],
             messages   = [{"role": "user", "content": prompt}],
         )
