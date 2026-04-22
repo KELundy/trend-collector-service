@@ -2474,33 +2474,73 @@ def _build_final_badge(
 
 def _parse_claude_output(raw_text, compliance):
     import re
+
+    def _try_parse(text):
+        """Attempt json.loads, then retry with literal newlines collapsed."""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Claude sometimes writes literal newlines inside JSON string values.
+            # Replace any newline that is NOT preceded by a backslash with a space.
+            fixed = re.sub(r'(?<!\\)\n', ' ', text)
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                return None
+
     cleaned = raw_text.strip()
 
-    # Step 1: If Claude wrapped JSON in a ```json fence anywhere in the response
-    # (e.g. after a preamble sentence), extract just the fence contents first.
-    fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', cleaned)
+    # Step 1: Extract JSON from inside a ```json fence anywhere in the response.
+    # Claude often writes a preamble sentence then wraps JSON in a code fence.
+    fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*\})\s*```', cleaned)
     if fence_match:
-        cleaned = fence_match.group(1).strip()
-    else:
-        # Step 2: Strip fences only if they wrap the entire response
-        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
-        cleaned = re.sub(r'\s*```$', '', cleaned)
-        cleaned = cleaned.strip()
+        data = _try_parse(fence_match.group(1).strip())
+        if data is not None:
+            return ContentResponse(
+                headline      = data.get("headline",      "Content generation error — please try again."),
+                thumbnailIdea = data.get("thumbnailIdea", ""),
+                hashtags      = data.get("hashtags",      ""),
+                post          = data.get("post",          ""),
+                cta           = data.get("cta",           ""),
+                script        = data.get("script",        ""),
+                compliance    = compliance,
+                generated_at  = datetime.utcnow(),
+            )
 
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # Step 3: Last resort — find any {...} block in the text
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if match:
-            try:
-                data = json.loads(match.group())
-            except json.JSONDecodeError:
-                print(f"[PARSE FAIL] All extraction attempts failed. First 500: {repr(raw_text[:500])}", flush=True)
-                data = {}
-        else:
-            print(f"[PARSE FAIL] No JSON object found anywhere. First 500: {repr(raw_text[:500])}", flush=True)
-            data = {}
+    # Step 2: Strip fences if they wrap the whole response, try direct parse.
+    stripped = re.sub(r'^```(?:json)?\s*', '', cleaned)
+    stripped = re.sub(r'\s*```$', '', stripped).strip()
+    data = _try_parse(stripped)
+    if data is not None:
+        return ContentResponse(
+            headline      = data.get("headline",      "Content generation error — please try again."),
+            thumbnailIdea = data.get("thumbnailIdea", ""),
+            hashtags      = data.get("hashtags",      ""),
+            post          = data.get("post",          ""),
+            cta           = data.get("cta",           ""),
+            script        = data.get("script",        ""),
+            compliance    = compliance,
+            generated_at  = datetime.utcnow(),
+        )
+
+    # Step 3: Last resort — find any {...} block in the cleaned text.
+    match = re.search(r'\{[\s\S]*\}', stripped)
+    if match:
+        data = _try_parse(match.group())
+        if data is not None:
+            return ContentResponse(
+                headline      = data.get("headline",      "Content generation error — please try again."),
+                thumbnailIdea = data.get("thumbnailIdea", ""),
+                hashtags      = data.get("hashtags",      ""),
+                post          = data.get("post",          ""),
+                cta           = data.get("cta",           ""),
+                script        = data.get("script",        ""),
+                compliance    = compliance,
+                generated_at  = datetime.utcnow(),
+            )
+
+    print(f"[PARSE FAIL] All extraction attempts failed. First 500: {repr(raw_text[:500])}", flush=True)
+    data = {}
     return ContentResponse(
         headline      = data.get("headline",      "Content generation error — please try again."),
         thumbnailIdea = data.get("thumbnailIdea", ""),
