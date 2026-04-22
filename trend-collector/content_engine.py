@@ -2475,22 +2475,31 @@ def _build_final_badge(
 def _parse_claude_output(raw_text, compliance):
     import re
     cleaned = raw_text.strip()
-    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
-    cleaned = re.sub(r'\s*```$', '', cleaned)
-    cleaned = cleaned.strip()
+
+    # Step 1: If Claude wrapped JSON in a ```json fence anywhere in the response
+    # (e.g. after a preamble sentence), extract just the fence contents first.
+    fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    else:
+        # Step 2: Strip fences only if they wrap the entire response
+        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+        cleaned = cleaned.strip()
+
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        print(f"[PARSE FAIL] First 500 chars of raw_text: {repr(raw_text[:500])}", flush=True)
+        # Step 3: Last resort — find any {...} block in the text
         match = re.search(r'\{[\s\S]*\}', cleaned)
         if match:
             try:
                 data = json.loads(match.group())
             except json.JSONDecodeError:
-                print(f"[PARSE FAIL] Regex match also failed. Match first 300: {repr(match.group()[:300])}", flush=True)
+                print(f"[PARSE FAIL] All extraction attempts failed. First 500: {repr(raw_text[:500])}", flush=True)
                 data = {}
         else:
-            print(f"[PARSE FAIL] No JSON object found in response at all.", flush=True)
+            print(f"[PARSE FAIL] No JSON object found anywhere. First 500: {repr(raw_text[:500])}", flush=True)
             data = {}
     return ContentResponse(
         headline      = data.get("headline",      "Content generation error — please try again."),
