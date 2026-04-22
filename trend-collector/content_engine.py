@@ -3461,7 +3461,18 @@ Write a social media post in {agent_name}'s voice that:
 
 VOICE: {brand_voice}
 MARKET: {market_display}
-NICHE AUDIENCE: {niche}
+
+NICHE FRAMING LENS — NON-NEGOTIABLE:
+This agent's primary niche is: {niche}
+After you finish researching, you MUST frame the story through this specific lens.
+Generic market commentary is not acceptable. Ask: what does this development, trend, or market shift mean specifically for {niche} buyers or sellers in {market_str}?
+For example:
+- If the niche is Active Adult / 55+: How does this affect where 55+ buyers want to live, their downsizing options, or the equity position of long-term homeowners in this area?
+- If the niche is First-Time Homebuyers: Does this open or close doors for buyers trying to get into the market right now?
+- If the niche is Relocation: What does an incoming buyer from out of state need to know about this?
+- If the niche is Investment: How does this change the numbers for someone looking at this market as an investor?
+Apply the same principle for any other niche — always filter the research through what it means for THIS agent's specific client type.
+The post must read like it was written by a {niche} specialist, not a generalist. A reader in that niche should immediately recognize this agent as someone who understands their world.
 
 {cta_instruction}
 
