@@ -3606,6 +3606,156 @@ HARD RULES:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MARKET REPORT PDF EXTRACTION — Session 22
+# Accepts a base64-encoded PDF (MLS, RPR, Altos, title co., etc.)
+# Sends it to Claude as a native document block — no extra libraries needed.
+# Returns a structured dict of extracted market stats for the frontend
+# preview card and for subsequent post generation.
+#
+# Called by: POST /market-reports/upload in app.py
+# PDF bytes are NOT stored after extraction — only the returned dict is saved.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def extract_market_report_data(
+    pdf_b64: str,
+    source_label: str = "MLS",
+    report_month: str = None,
+    report_area: str = None,
+) -> dict:
+    """
+    Extract key market statistics from an uploaded PDF report.
+
+    Uses Claude's native document block — Claude reads the PDF directly,
+    no OCR or parsing libraries required.
+
+    Returns a dict with extracted stats. All fields are optional strings
+    so partial extraction never crashes the caller. Unknown or missing
+    values are returned as None rather than invented.
+
+    Raises HTTPException on Claude API failure so app.py can handle
+    the error and still save the record without extracted data.
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    month_context = f" for {report_month}" if report_month else ""
+    area_context  = f" in {report_area}"   if report_area  else ""
+
+    extraction_prompt = f"""You are a real estate data analyst. You have been given a market report PDF{month_context}{area_context} from {source_label}.
+
+Your task is to extract the key market statistics from this report so a real estate agent can use them to write a data-driven social media post.
+
+READ THE ENTIRE DOCUMENT carefully. Extract every useful market metric you can find. 
+
+Return ONLY valid JSON — no preamble, no explanation outside the JSON.
+
+Return exactly this structure. Use null for any field not found in the document. Never invent numbers:
+
+{{
+  "report_title": "The report title or document name if shown",
+  "report_period": "The time period this data covers, e.g. 'March 2026' or 'Q1 2026'",
+  "geographic_area": "The geographic area covered, e.g. 'Denver Metro' or 'Southmoor Park'",
+  "source": "{source_label}",
+  "median_sale_price": "e.g. '$612,000' — include $ and commas",
+  "median_price_change": "e.g. '+4.2% year-over-year' or '-$18,000 from last month'",
+  "average_sale_price": "e.g. '$654,000' if shown",
+  "list_price_to_sale_ratio": "e.g. '98.7%' — what sellers are getting vs asking",
+  "days_on_market": "e.g. '28 days' — median or average, note which",
+  "days_on_market_change": "e.g. 'down 6 days from last month'",
+  "active_listings": "e.g. '412 homes' — current inventory count",
+  "new_listings": "e.g. '287 homes added this month'",
+  "closed_sales": "e.g. '318 homes sold'",
+  "months_of_supply": "e.g. '1.4 months' — key supply/demand indicator",
+  "months_of_supply_change": "e.g. 'up from 0.9 months last year'",
+  "absorption_rate": "e.g. '78%' if shown",
+  "price_per_sq_ft": "e.g. '$287/sq ft' if shown",
+  "foreclosure_rate": "e.g. '0.8%' if shown — include null if not present",
+  "cash_sales_pct": "e.g. '24% of sales were cash' if shown",
+  "notable_stats": ["Any other notable statistics or trends from the report — list as strings"],
+  "key_takeaway": "In one sentence, what is the single most important insight from this data for a real estate agent to share?"
+}}
+
+IMPORTANT:
+- Extract the EXACT numbers shown — do not round or estimate
+- If a field shows conflicting numbers (e.g. two different median prices), use the most prominent one and note the discrepancy in notable_stats
+- If the document is a multi-area report, extract stats for the most prominent or first area listed
+- Return null for fields genuinely not present — never fabricate data
+- Return ONLY the JSON object"""
+
+    try:
+        response = client.messages.create(
+            model      = "claude-sonnet-4-6",
+            max_tokens = 1500,
+            messages   = [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type":       "base64",
+                            "media_type": "application/pdf",
+                            "data":       pdf_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": extraction_prompt,
+                    },
+                ],
+            }],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude PDF extraction failed: {str(e)}")
+
+    # Extract text from response
+    try:
+        text_blocks = [
+            b.text for b in (response.content or [])
+            if getattr(b, "type", "") == "text"
+        ]
+        raw = text_blocks[-1].strip() if text_blocks else ""
+        if not raw:
+            raise ValueError("Claude returned empty extraction response.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Extraction response parse error: {str(e)}")
+
+    # Parse JSON — strip any accidental fence
+    import re as _re
+    fence_match = _re.search(r'```(?:json)?\s*(\{[\s\S]*\})\s*```', raw)
+    if fence_match:
+        raw = fence_match.group(1).strip()
+    else:
+        raw = _re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = _re.sub(r'\s*```$', '', raw).strip()
+
+    try:
+        extracted = json.loads(raw)
+    except json.JSONDecodeError:
+        # Collapse literal newlines inside string values and retry
+        fixed = _re.sub(r'(?<!\\)\n', ' ', raw)
+        try:
+            extracted = json.loads(fixed)
+        except json.JSONDecodeError:
+            print(f"[MarketReport] JSON parse failed. First 300: {repr(raw[:300])}", flush=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Could not parse extraction response as JSON. The PDF may not be readable."
+            )
+
+    # Inject source and month context in case Claude left them null
+    if not extracted.get("source"):
+        extracted["source"] = source_label
+    if not extracted.get("report_period") and report_month:
+        extracted["report_period"] = report_month
+    if not extracted.get("geographic_area") and report_area:
+        extracted["geographic_area"] = report_area
+
+    return extracted
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ADMIN COMPLIANCE PANEL
 # Routes: POST /admin/compliance/verify-state
 #         GET  /admin/compliance/status
