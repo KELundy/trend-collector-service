@@ -457,6 +457,26 @@ def init_db():
         )
     """)
 
+    # ── MARKET REPORTS — Session 22 ──────────────────────────────────────────
+    # Stores extracted data from agent-uploaded market PDFs (MLS, RPR, Altos, etc.)
+    # PDF bytes are NOT stored — agent retains the source file, we store only the
+    # extracted stats JSON. This avoids MLS data licensing liability and disk bloat.
+    # extracted_data stores structured JSON for content generation + future intelligence layer.
+    # source_label is agent-supplied (e.g. "MLS", "RPR", "Altos Research").
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS market_reports (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id        INTEGER NOT NULL,
+            filename       TEXT    NOT NULL,
+            source_label   TEXT    DEFAULT 'MLS',
+            report_month   TEXT    DEFAULT NULL,
+            report_area    TEXT    DEFAULT NULL,
+            extracted_data TEXT    DEFAULT NULL,
+            uploaded_at    TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -2370,6 +2390,141 @@ def partner_payout_list_all_pending() -> list:
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
+
+
+# ─────────────────────────────────────────────
+# MARKET REPORTS — Session 22
+# Agent-uploaded PDFs (MLS, RPR, Altos, title co., etc.)
+# user_id is enforced on every query — agent-only, never cross-user.
+# ─────────────────────────────────────────────
+
+def market_report_save(
+    user_id: int,
+    filename: str,
+    source_label: str = "MLS",
+    report_month: str = None,
+    report_area: str = None,
+    extracted_data: dict = None,
+) -> dict:
+    """
+    Save a new market report record for an agent.
+    PDF bytes are NOT stored — only the filename, metadata, and extracted stats.
+    extracted_data: structured dict from Claude extraction — stored as JSON.
+    Returns the saved record as a dict.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        INSERT INTO market_reports
+            (user_id, filename, source_label, report_month, report_area,
+             extracted_data, uploaded_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    """, (
+        user_id,
+        filename,
+        source_label or "MLS",
+        report_month,
+        report_area,
+        json.dumps(extracted_data) if extracted_data else None,
+    ))
+    conn.commit()
+    report_id = c.lastrowid
+    conn.close()
+    return market_report_get(report_id, user_id)
+
+
+def market_report_get(report_id: int, user_id: int) -> Optional[dict]:
+    """
+    Fetch a single market report by id.
+    user_id is always enforced — agents can only fetch their own reports.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, filename, source_label, report_month,
+               report_area, extracted_data, uploaded_at
+        FROM market_reports
+        WHERE id = ? AND user_id = ?
+    """, (report_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return _market_report_row(row)
+
+
+def market_report_list(user_id: int) -> list:
+    """
+    Return all market reports for an agent, newest first.
+    PDF bytes are never stored — only extracted stats and metadata.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, filename, source_label, report_month,
+               report_area, extracted_data, uploaded_at
+        FROM market_reports
+        WHERE user_id = ?
+        ORDER BY uploaded_at DESC
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [_market_report_row(r) for r in rows]
+
+
+def market_report_update_extracted(report_id: int, user_id: int, extracted_data: dict) -> Optional[dict]:
+    """
+    Update the extracted_data JSON for a report after Claude processes it.
+    Called after a successful extraction so the data is available for re-generation.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        UPDATE market_reports
+        SET extracted_data = ?
+        WHERE id = ? AND user_id = ?
+    """, (json.dumps(extracted_data), report_id, user_id))
+    conn.commit()
+    conn.close()
+    return market_report_get(report_id, user_id)
+
+
+def market_report_delete(report_id: int, user_id: int) -> bool:
+    """
+    Delete a market report. user_id enforced — agents can only delete their own.
+    Returns True if a row was deleted.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute(
+        "DELETE FROM market_reports WHERE id = ? AND user_id = ?",
+        (report_id, user_id)
+    )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def _market_report_row(row) -> dict:
+    """Serialize a market_reports DB row to a dict for API responses."""
+    extracted = None
+    try:
+        raw = row["extracted_data"]
+        if raw:
+            extracted = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        pass
+    return {
+        "id":            row["id"],
+        "userId":        row["user_id"],
+        "filename":      row["filename"],
+        "sourceLabel":   row["source_label"] or "MLS",
+        "reportMonth":   row["report_month"],
+        "reportArea":    row["report_area"],
+        "extractedData": extracted,
+        "uploadedAt":    row["uploaded_at"],
+    }
 
 
 # ─────────────────────────────────────────────
