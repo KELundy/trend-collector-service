@@ -3535,15 +3535,20 @@ COMPLIANCE RULES:
 - No specific financial predictions or guaranteed investment returns
 - post MUST end with a genuine local question
 
-Include a sources line at the end of the post body.
-Format: "📍 Sources: [list what you found and at what tier — e.g. 'Denver Planning Dept permit record' or 'NAR Q1 2026 report']"
+Include a sources line at the end of the post body, before the closing question and sign-off.
+Format each source on its own line starting with 📍, and ALWAYS include the actual URL from your search results:
+"📍 Sources: [Source Name] — [full URL]"
+Example: "📍 Sources: Denver Planning Commission — https://denvergov.org/permits/12345"
+If you found multiple sources, list each on its own line.
+If a source has no public URL (e.g. a paywalled article or internal record), write the source name and tier only: "📍 Sources: NAR Q1 2026 Report (national data)"
+HARD RULE: Never invent URLs. Only include URLs that appeared in your actual search results.
 
 OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE:
 {{
   "headline": "A specific headline reflecting the most local data you found. One sentence, no period.",
   "thumbnailIdea": "A realistic visual concept tied to the research. 1-2 sentences.",
   "hashtags": "#hashtag1 #hashtag2 (8-10 tags — include {market_str.split()[0]}-specific tags)",
-  "post": "Full social post in {agent_name}'s voice. Uses real data from research. Takes a position. Includes 📍 Sources line. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
+  "post": "Full social post in {agent_name}'s voice. Uses real data from research. Takes a position. Includes 📍 Sources line with real URLs from search results. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
   "cta": "The CTA as specified — include booking URL if provided.",
   "script": "News-anchor teleprompter script covering the research findings. Include [B-ROLL: local footage suggestion] and [GREEN SCREEN: background suggestion]."
 }}
