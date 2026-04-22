@@ -2481,13 +2481,16 @@ def _parse_claude_output(raw_text, compliance):
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
+        print(f"[PARSE FAIL] First 500 chars of raw_text: {repr(raw_text[:500])}", flush=True)
         match = re.search(r'\{[\s\S]*\}', cleaned)
         if match:
             try:
                 data = json.loads(match.group())
             except json.JSONDecodeError:
+                print(f"[PARSE FAIL] Regex match also failed. Match first 300: {repr(match.group()[:300])}", flush=True)
                 data = {}
         else:
+            print(f"[PARSE FAIL] No JSON object found in response at all.", flush=True)
             data = {}
     return ContentResponse(
         headline      = data.get("headline",      "Content generation error — please try again."),
