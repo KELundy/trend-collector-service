@@ -69,6 +69,9 @@ from database import (
     get_team_stats,
     save_agent_setup, get_agent_setup,
     get_user_results,
+    market_report_save, market_report_list,
+    market_report_get, market_report_update_extracted,
+    market_report_delete,
     DB_NAME,
 )
 
@@ -3566,6 +3569,110 @@ async def approval_resend(token: str = ""):
             print(f"[Resend] SMS failed: {e}")
 
     return {"ok": sent_email or sent_sms, "email_sent": sent_email, "sms_sent": sent_sms}
+
+# ─────────────────────────────────────────────────────────
+# MARKET REPORTS — Session 22
+# Agent uploads MLS, RPR, Altos, or any market data PDF.
+# Claude extracts key stats. Agent reviews, then taps Generate
+# to produce a niche-framed post from real local data.
+#
+# POST /market-reports/upload    — upload PDF, extract stats, save record
+# GET  /market-reports           — list all saved reports for the agent
+# DELETE /market-reports/{id}    — delete a saved report
+#
+# Agent-only: user_id enforced on every operation.
+# Never returns pdf_data to the frontend — bytes stay server-side.
+# ─────────────────────────────────────────────────────────
+
+class MarketReportUploadRequest(BaseModel):
+    filename:     str
+    pdf_data:     str               # base64-encoded PDF bytes — processed then discarded, not stored
+    source_label: Optional[str] = "MLS"   # e.g. "MLS", "RPR", "Altos Research"
+    report_month: Optional[str] = None    # e.g. "March 2026"
+    report_area:  Optional[str] = None    # e.g. "Southmoor Park"
+
+
+@app.post("/market-reports/upload")
+async def upload_market_report(
+    body: MarketReportUploadRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Upload and process a market data PDF.
+    Step 1: Send PDF to Claude for extraction — returns structured stats preview.
+    Step 2: Save the record with extracted stats only. PDF bytes are discarded.
+    Returns the report record + extracted stats for the frontend preview card.
+    """
+    import base64 as _b64
+    from content_engine import extract_market_report_data
+
+    if not body.pdf_data:
+        raise HTTPException(400, "pdf_data is required.")
+    if not body.filename:
+        raise HTTPException(400, "filename is required.")
+
+    # Validate it looks like base64
+    try:
+        _b64.b64decode(body.pdf_data[:100])
+    except Exception:
+        raise HTTPException(400, "pdf_data must be base64-encoded.")
+
+    # Run Claude extraction first — save record only after we have stats
+    # If extraction fails entirely, still save the record so agent sees it
+    # in their saved list and can retry
+    extracted = None
+    extraction_error = None
+    try:
+        setup = get_agent_setup(current_user["id"])
+        extracted = await extract_market_report_data(
+            pdf_b64      = body.pdf_data,
+            source_label = body.source_label or "MLS",
+            report_month = body.report_month,
+            report_area  = body.report_area or setup.get("market", ""),
+        )
+    except Exception as e:
+        extraction_error = str(e)
+        print(f"[MarketReport] Extraction failed for {body.filename}: {e}")
+
+    # Save record — PDF bytes are NOT stored, only extracted stats + metadata
+    record = market_report_save(
+        user_id      = current_user["id"],
+        filename     = body.filename[:255],
+        source_label = body.source_label or "MLS",
+        report_month = body.report_month,
+        report_area  = body.report_area,
+        extracted_data = extracted,
+    )
+
+    return {
+        "ok":               True,
+        "report":           record,
+        "extracted":        extracted,
+        "extraction_error": extraction_error,
+    }
+
+
+@app.get("/market-reports")
+async def list_market_reports(current_user: dict = Depends(get_current_user)):
+    """
+    Return all saved market reports for the current agent, newest first.
+    PDF bytes are never stored — only extracted stats and metadata are returned.
+    """
+    reports = market_report_list(current_user["id"])
+    return {"reports": reports, "count": len(reports)}
+
+
+@app.delete("/market-reports/{report_id}")
+async def delete_market_report(
+    report_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a market report. Agent can only delete their own reports."""
+    success = market_report_delete(report_id, current_user["id"])
+    if not success:
+        raise HTTPException(404, "Report not found.")
+    return {"ok": True, "deleted": report_id}
+
 
 # ─────────────────────────────────────────────
 # DIAGNOSTIC + MIGRATION — super_admin only
