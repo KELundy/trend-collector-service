@@ -1728,7 +1728,7 @@ async def set_user_role(request: Request, current_user: dict = Depends(get_curre
     new_role   = str(body.get("role", "")).strip()
 
     valid_roles = ("super_admin", "admin", "support",
-                   "broker", "team", "agent", "assistant")
+                   "broker", "team", "agent", "assistant", "hb_marketer")
     if new_role not in valid_roles:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
 
@@ -1940,7 +1940,7 @@ async def admin_set_role(user_id: int, request: Request,
     _require_super_admin(current_user)
     body = await request.json()
     new_role = str(body.get("role", "")).strip()
-    valid_roles = ("super_admin", "admin", "support", "broker", "team", "agent", "assistant")
+    valid_roles = ("super_admin", "admin", "support", "broker", "team", "agent", "assistant", "hb_marketer")
     if new_role not in valid_roles:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
     # Cannot demote yourself
@@ -2077,7 +2077,7 @@ async def admin_create_user(request: Request,
 
     if not email or not password or not agent_name:
         raise HTTPException(400, "email, password, and agent_name are required.")
-    valid_roles = ("super_admin","admin","support","broker","team","agent","assistant")
+    valid_roles = ("super_admin","admin","support","broker","team","agent","assistant","hb_marketer")
     if role not in valid_roles:
         raise HTTPException(400, f"Invalid role.")
 
