@@ -72,6 +72,7 @@ from database import (
     market_report_save, market_report_list,
     market_report_get, market_report_update_extracted,
     market_report_delete,
+    contact_save, contact_list_all,
     DB_NAME,
 )
 
@@ -2538,6 +2539,153 @@ async def submit_waitlist(request: Request):
     return {"ok": True, "message": "Request received. We'll be in touch shortly."}
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONTACT FORM — Session 24
+# POST /contact  — public, saves to DB + sends notification to Kevin
+# GET  /admin/contacts — admin only, list all submissions
+# Rate-limited: reuses _waitlist_rate limiter (3 per hour per IP)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ContactRequest(BaseModel):
+    name:    str
+    email:   str
+    type:    str = "other"   # agent | team | broker | partner | other
+    message: str = ""
+
+
+@app.post("/contact")
+async def submit_contact(body: ContactRequest, request: Request):
+    """
+    Public contact form endpoint — no auth required.
+    Saves to contacts table and sends notification email to Kevin.
+    Rate-limited: 3 submissions per IP per hour.
+    type values: agent | team | broker | partner | other
+    """
+    # IP extraction — Cloudflare passes real IP in x-forwarded-for
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    if not _waitlist_check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many submissions from this address. Please try again later."
+        )
+
+    name    = (body.name    or "").strip()[:120]
+    email   = (body.email   or "").strip()[:200]
+    message = (body.message or "").strip()[:2000]
+    contact_type = (body.type or "other").strip()[:50]
+
+    if not name or not email:
+        raise HTTPException(400, "Name and email are required.")
+
+    valid_types = ("agent", "team", "broker", "partner", "other")
+    if contact_type not in valid_types:
+        contact_type = "other"
+
+    # Save to DB
+    try:
+        contact_save(
+            name         = name,
+            email        = email,
+            contact_type = contact_type,
+            message      = message,
+            source       = "contact_form",
+            ip_address   = client_ip,
+        )
+    except Exception as e:
+        print(f"[Contact] DB save failed: {e}")
+        # Don't fail the request — still send the email
+
+    # Send notification email to Kevin via SendGrid
+    try:
+        import httpx as _httpx_c
+        sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
+        sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "support@homebridgegroup.co")
+        notify_email  = "kevin@kevinlundy.net"
+
+        if sendgrid_key:
+            type_labels = {
+                "agent":   "Solo Agent",
+                "team":    "Team Lead",
+                "broker":  "Broker / Office Owner",
+                "partner": "Partner Program Interest",
+                "other":   "Other",
+            }
+            type_label = type_labels.get(contact_type, contact_type)
+            subject    = f"[HomeBridge Contact] {type_label} — {name}"
+
+            html_body = f"""
+<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#fff;">
+  <div style="font-size:13px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+              color:#1B4FD8;margin-bottom:20px;">HomeBridge · New Contact Submission</div>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
+    <tr>
+      <td style="padding:10px 0;border-bottom:1px solid #eee;font-size:13px;
+                 color:#64748B;width:140px;font-weight:600;">Name</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eee;font-size:14px;color:#0F172A;">{name}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px 0;border-bottom:1px solid #eee;font-size:13px;
+                 color:#64748B;font-weight:600;">Email</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eee;font-size:14px;color:#0F172A;">
+        <a href="mailto:{email}" style="color:#1B4FD8;">{email}</a></td>
+    </tr>
+    <tr>
+      <td style="padding:10px 0;border-bottom:1px solid #eee;font-size:13px;
+                 color:#64748B;font-weight:600;">Type</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eee;font-size:14px;color:#0F172A;">{type_label}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px 0;font-size:13px;color:#64748B;font-weight:600;vertical-align:top;">Message</td>
+      <td style="padding:10px 0;font-size:14px;color:#0F172A;line-height:1.6;">{message or "—"}</td>
+    </tr>
+  </table>
+  <div style="font-size:12px;color:#94A3B8;border-top:1px solid #eee;padding-top:16px;">
+    Submitted via homebridgegroup.co · IP: {client_ip}
+  </div>
+</div>"""
+
+            await _httpx_c.AsyncClient().post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={
+                    "Authorization": f"Bearer {sendgrid_key}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "personalizations": [{"to": [{"email": notify_email, "name": "Kevin Lundy"}]}],
+                    "from":    {"email": sendgrid_from, "name": "HomeBridge"},
+                    "subject": subject,
+                    "content": [{"type": "text/html", "value": html_body}],
+                },
+                timeout=10,
+            )
+            print(f"[Contact] Notification sent for {name} ({email}) type={contact_type}")
+    except Exception as e:
+        print(f"[Contact] SendGrid notification failed: {e}")
+
+    return {"ok": True, "message": "Message received. We'll be in touch within 1 business day."}
+
+
+@app.get("/admin/contacts")
+async def admin_list_contacts(
+    limit:  int = 100,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Admin only — list all contact form submissions newest first.
+    Supports pagination via limit/offset.
+    """
+    if not _is_staff_or_above(current_user):
+        raise HTTPException(403, "Admin access required.")
+
+    contacts = contact_list_all(limit=min(limit, 500), offset=offset)
+    return {"contacts": contacts, "count": len(contacts)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # APPROVAL FLOW — Item #1
 # POST /library/{id}/send-approval  — creates token, sends SMS + email to agent
 # GET  /library/{id}/quick-approve  — validates token, approves, returns HTML page
@@ -3198,24 +3346,26 @@ async def enroll_in_partner_program(
     from database import partner_enroll as _pe, partner_get as _pg
 
     tier = (body.tier or "referral").lower().strip()
-    valid_tiers = ("referral", "broker")
+    valid_tiers = ("referral", "starter", "growth", "elite")
     if tier not in valid_tiers:
         raise HTTPException(
             400,
-            "Elite tier is invitation-only. Referral and Broker tiers are available."
-            if tier == "elite"
-            else f"Invalid tier. Choose 'referral' or 'broker'."
+            "Invalid tier. All tiers are earned automatically by active referral volume. "
+            "Start with 'referral' (Starter tier) and advance quarterly based on results."
         )
 
-    # Broker tier only available to licensed roles
-    if tier == "broker" and current_user.get("role") not in (
-        "agent", "broker", "admin", "super_admin"
-    ):
+    # Elite tier is invitation-only — cannot be self-enrolled
+    if tier == "elite":
         raise HTTPException(
-            403, "Broker Partner tier requires a licensed real estate role."
+            400,
+            "Elite tier is by invitation only — it is earned automatically when you reach 15+ active referrals."
         )
 
-    # If already enrolled and active, just return the existing record
+    # All tiers start as 'referral' (Starter) — tier advances quarterly by volume
+    # Per Session 24 locked design: tiers are earned, not assigned by role
+    tier = "referral"
+
+    # If already enrolled and active, return the existing record
     existing = _pg(current_user["id"])
     if existing and existing.get("status") == "active":
         return {
@@ -3227,12 +3377,11 @@ async def enroll_in_partner_program(
     if not partner:
         raise HTTPException(500, "Enrollment failed — please try again.")
 
-    msg = (
-        "Welcome to the Partner Program! Your referral code is ready."
-        if tier == "referral"
-        else "Application submitted — we'll review within 1–2 business days."
-    )
-    return {"partner": partner, "message": msg}
+    return {
+        "partner": partner,
+        "message": "Welcome to the Partner Program! Your referral link and code are ready. "
+                   "Your tier advances automatically each quarter based on active paying referrals.",
+    }
 
 
 @app.get("/partner/payouts")
@@ -3312,6 +3461,95 @@ async def admin_list_all_partners(current_user: dict = Depends(get_current_user)
     from database import partner_list_all as _pla
     partners = _pla()
     return {"partners": partners, "count": len(partners)}
+
+
+@app.post("/admin/partners/{partner_id}/suspend")
+async def admin_suspend_partner(
+    partner_id: int,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Admin: suspend a partner — disables their referral link and code.
+    Earnings stop accruing. Existing payouts are not affected.
+    """
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    body   = await request.json()
+    reason = (body.get("reason") or "").strip()[:500]
+
+    from database import get_conn as _gc_sp
+    conn = _gc_sp()
+    c    = conn.cursor()
+    c.execute("SELECT id, status FROM partners WHERE id = ?", (partner_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Partner not found.")
+    if row["status"] == "suspended":
+        conn.close()
+        return {"ok": True, "partner_id": partner_id, "status": "suspended", "message": "Already suspended."}
+
+    from datetime import datetime as _dt_sp
+    c.execute("""
+        UPDATE partners
+        SET status = 'suspended',
+            suspended_at = ?,
+            suspended_by = ?,
+            suspension_reason = ?
+        WHERE id = ?
+    """, (_dt_sp.utcnow().isoformat(), current_user["id"], reason or None, partner_id))
+    conn.commit()
+    conn.close()
+
+    from database import log_audit_event as _lae_sp
+    _lae_sp(
+        actor_id  = current_user["id"],
+        action    = "partner_suspended",
+        target_id = partner_id,
+        detail    = reason or "No reason provided",
+    )
+    return {"ok": True, "partner_id": partner_id, "status": "suspended"}
+
+
+@app.post("/admin/partners/{partner_id}/reinstate")
+async def admin_reinstate_partner(
+    partner_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Admin: reinstate a suspended partner — re-enables their referral link and code."""
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    from database import get_conn as _gc_rp
+    conn = _gc_rp()
+    c    = conn.cursor()
+    c.execute("SELECT id, status FROM partners WHERE id = ?", (partner_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Partner not found.")
+
+    c.execute("""
+        UPDATE partners
+        SET status = 'active',
+            suspended_at = NULL,
+            suspended_by = NULL,
+            suspension_reason = NULL
+        WHERE id = ?
+    """, (partner_id,))
+    conn.commit()
+    conn.close()
+
+    from database import log_audit_event as _lae_rp
+    _lae_rp(
+        actor_id  = current_user["id"],
+        action    = "partner_reinstated",
+        target_id = partner_id,
+        detail    = f"Reinstated by {current_user.get('email','')}",
+    )
+    return {"ok": True, "partner_id": partner_id, "status": "active"}
 
 
 @app.post("/auth/profile/notification-email")
