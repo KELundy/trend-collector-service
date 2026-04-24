@@ -73,6 +73,7 @@ from database import (
     market_report_get, market_report_update_extracted,
     market_report_delete,
     contact_save, contact_list_all,
+    partner_get_by_code,
     DB_NAME,
 )
 
@@ -3910,6 +3911,377 @@ async def delete_market_report(
     if not success:
         raise HTTPException(404, "Report not found.")
     return {"ok": True, "deleted": report_id}
+
+
+# ─────────────────────────────────────────────
+# PARTNER PROGRAM — PUBLIC ENDPOINTS (no auth required)
+#
+# GET  /partner/public/{code}   — returns partner display name for referral
+#                                 landing page. Public, no auth. Used by
+#                                 partner-landing.html to personalize header.
+#
+# POST /partner/public-enroll   — public partner signup. Creates a HomeBridge
+#                                 account + enrolls as partner atomically.
+#                                 Sends welcome email with code and link via
+#                                 SendGrid. No auth required — this is the
+#                                 entry point for non-agent partners who will
+#                                 never use the content engine.
+#
+# POST /partner/quarterly-evaluate — admin/cron trigger. Runs quarter-end
+#                                    snapshot: counts active paying referrals
+#                                    per partner, updates tier accordingly.
+#                                    Starter: 1–4, Growth: 5–14, Elite: 15+
+# ─────────────────────────────────────────────
+
+@app.get("/partner/public/{code}")
+async def partner_public_lookup(code: str):
+    """
+    Returns the display name of an active partner by referral code.
+    Public endpoint — no auth required.
+    Used by partner-landing.html to personalize: "You were referred by [Name]"
+    Returns 404 if code is invalid or partner is not active.
+    """
+    partner = partner_get_by_code(code.upper().strip())
+    if not partner:
+        raise HTTPException(404, "Referral code not found or inactive.")
+    return {
+        "ok":          True,
+        "agent_name":  partner.get("agent_name") or partner.get("email", "").split("@")[0],
+        "referral_code": partner.get("referral_code"),
+    }
+
+
+class PublicPartnerEnrollRequest(BaseModel):
+    name:         str
+    email:        str
+    password:     str
+    partner_type: Optional[str] = "other"   # agent | broker | coach | lender | other
+    message:      Optional[str] = ""
+    referral_code: Optional[str] = ""       # if they arrived via someone else's link
+
+
+@app.post("/partner/public-enroll")
+async def partner_public_enroll(body: PublicPartnerEnrollRequest, request: Request):
+    """
+    Public partner signup — no HomeBridge account required to call this.
+    Steps:
+      1. Validate inputs (password rules match /auth/register)
+      2. Create HomeBridge user account (role='agent', is_licensed=0 for non-agents)
+      3. Enroll as partner (Starter tier, auto-approved, code generated)
+      4. Record referral attribution if they arrived via a referral code
+      5. Send welcome email with their code and referral link via SendGrid
+      6. Return partner record + JWT token so frontend can show code immediately
+
+    Non-agent partners will see only the Partner tab when they log in.
+    Their is_licensed=0 flag suppresses content engine access in renderViewSwitcher.
+    """
+    import re as _re
+    from auth import create_user as _create_user, create_token as _create_token
+    from database import set_trial as _set_trial, partner_enroll as _partner_enroll, referral_attribute as _ref_attr
+
+    # ── Validate required fields ──────────────────────────────────────────────
+    name  = (body.name or "").strip()
+    email = (body.email or "").strip().lower()
+    pw    = body.password or ""
+
+    if not name:
+        raise HTTPException(400, "Name is required.")
+    if not email or "@" not in email:
+        raise HTTPException(400, "A valid email address is required.")
+
+    # Password rules — match /auth/register exactly
+    if len(pw) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters.")
+    if not _re.search(r"[A-Z]", pw):
+        raise HTTPException(400, "Password must include at least one uppercase letter.")
+    if not _re.search(r"[a-z]", pw):
+        raise HTTPException(400, "Password must include at least one lowercase letter.")
+    if not _re.search(r"[0-9]", pw):
+        raise HTTPException(400, "Password must include at least one number.")
+
+    # ── Create user account ───────────────────────────────────────────────────
+    # is_licensed=0 means renderViewSwitcher hides My Work pill for non-agents.
+    # partner_type='agent' gets is_licensed=1 — they may also use the content engine.
+    is_agent = (body.partner_type or "").lower() == "agent"
+
+    user = _create_user(
+        email      = email,
+        password   = pw,
+        agent_name = name,
+        brokerage  = "",
+        role       = "agent",
+        broker_id  = None,
+    )
+    if not user:
+        raise HTTPException(409, "An account with that email already exists. Please log in instead.")
+
+    # Set is_licensed based on partner_type
+    try:
+        from database import get_conn as _gc_pe
+        _conn = _gc_pe()
+        _conn.execute(
+            "UPDATE users SET is_licensed=? WHERE id=?",
+            (1 if is_agent else 0, user["id"])
+        )
+        _conn.commit()
+        _conn.close()
+    except Exception as _e:
+        print(f"[PublicEnroll] is_licensed update failed (non-blocking): {_e}")
+
+    # Start 14-day trial
+    try:
+        _set_trial(user["id"], days=14)
+    except Exception:
+        pass
+
+    # ── Enroll as partner ─────────────────────────────────────────────────────
+    # Everyone starts at Starter (tier='referral'). Tier advances quarterly by volume.
+    partner = _partner_enroll(user["id"], tier="referral")
+    if not partner:
+        raise HTTPException(500, "Account created but partner enrollment failed. Please contact support@homebridgegroup.co.")
+
+    referral_code = partner.get("referral_code", "")
+    referral_link = f"https://homebridgegroup.co/partner-landing.html?ref={referral_code}"
+
+    # ── Record attribution if they arrived via someone else's referral code ──
+    if body.referral_code:
+        try:
+            referring = partner_get_by_code(body.referral_code.upper().strip())
+            if referring:
+                _ref_attr(
+                    partner_id       = referring["id"],
+                    referred_user_id = user["id"],
+                    attribution_type = "code",
+                    referral_code    = body.referral_code.upper().strip(),
+                )
+        except Exception as _ae:
+            print(f"[PublicEnroll] Attribution failed (non-blocking): {_ae}")
+
+    # ── Send welcome email ────────────────────────────────────────────────────
+    _sendgrid_key  = os.getenv("SENDGRID_API_KEY", "")
+    _sendgrid_from = os.getenv("SENDGRID_FROM_EMAIL", "noreply@homebridgegroup.co")
+    if _sendgrid_key:
+        try:
+            import httpx as _httpx
+            _welcome_html = f"""
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;">
+  <div style="font-size:18px;font-weight:700;color:#0f0f0d;margin-bottom:4px;">Home<span style="color:#1749c9;">Bridge</span></div>
+  <hr style="border:none;border-top:1px solid #e8e7e0;margin:16px 0;" />
+  <p style="color:#0f0f0d;font-size:15px;font-weight:600;margin-bottom:8px;">Welcome to the Partner Program, {name.split()[0]}.</p>
+  <p style="color:#787870;font-size:14px;line-height:1.6;margin-bottom:24px;">
+    You're enrolled as a Starter Partner and earning 15% Partner Rewards on every active subscriber you refer.
+    Your tier advances automatically each quarter based on your results — no applications, no approvals.
+  </p>
+
+  <div style="background:#f5f5f7;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#86868b;margin-bottom:8px;">Your Referral Code</div>
+    <div style="font-family:monospace;font-size:28px;font-weight:800;color:#1d1d1f;letter-spacing:.12em;margin-bottom:8px;">{referral_code}</div>
+    <div style="font-size:13px;color:#86868b;line-height:1.5;">Share this verbally, in a text, or an email. Anyone who types it when signing up — you get credit. No expiry.</div>
+  </div>
+
+  <div style="background:#f5f5f7;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#86868b;margin-bottom:8px;">Your Referral Link</div>
+    <div style="font-size:13px;font-family:monospace;color:#1749c9;word-break:break-all;margin-bottom:8px;">{referral_link}</div>
+    <div style="font-size:13px;color:#86868b;line-height:1.5;">60-day cookie. Anyone who signs up within 60 days of clicking your link is attributed to you.</div>
+  </div>
+
+  <div style="margin-bottom:24px;">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#86868b;margin-bottom:10px;">How Your Tier Grows</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 12px;background:#eef2fb;border-radius:6px;">
+        <span style="font-weight:600;color:#1749c9;">Starter — You are here</span><span style="color:#1749c9;">15% · 1–4 active referrals</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 12px;background:#f5f5f7;border-radius:6px;">
+        <span style="color:#86868b;">Growth</span><span style="color:#86868b;">20% · 5–14 active referrals</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 12px;background:#f5f5f7;border-radius:6px;">
+        <span style="color:#86868b;">Elite</span><span style="color:#86868b;">25% · 15+ active referrals</span>
+      </div>
+    </div>
+    <div style="font-size:12px;color:#b0afa6;margin-top:8px;line-height:1.5;">Tiers are evaluated at the end of each quarter based on active paying subscribers. Payouts are quarterly.</div>
+  </div>
+
+  <a href="https://app.homebridgegroup.co"
+     style="display:inline-block;background:#1749c9;color:#fff;font-weight:600;
+            font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none;">
+    View Your Partner Dashboard →
+  </a>
+
+  <p style="color:#b0afa6;font-size:12px;margin-top:24px;line-height:1.5;">
+    Log in at app.homebridgegroup.co with <strong>{email}</strong> anytime to see your referrals, earnings, and payout history.<br/>
+    Questions? <a href="mailto:support@homebridgegroup.co" style="color:#1749c9;">support@homebridgegroup.co</a>
+  </p>
+  <hr style="border:none;border-top:1px solid #e8e7e0;margin:24px 0 16px;" />
+  <p style="color:#b0afa6;font-size:11px;">HomeBridge Partner Program · homebridgegroup.co</p>
+</div>
+"""
+            _httpx.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={
+                    "Authorization": f"Bearer {_sendgrid_key}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "personalizations": [{"to": [{"email": email}]}],
+                    "from":    {"email": _sendgrid_from, "name": "HomeBridge"},
+                    "subject": f"Welcome to the HomeBridge Partner Program — your code is {referral_code}",
+                    "content": [{"type": "text/html", "value": _welcome_html}],
+                },
+                timeout=10,
+            )
+            print(f"[PublicEnroll] Welcome email sent to {email}")
+        except Exception as _mail_err:
+            # Email failure must never block enrollment — code is shown on page
+            print(f"[PublicEnroll] Welcome email failed (non-blocking): {_mail_err}")
+
+    # ── Notify platform owner ─────────────────────────────────────────────────
+    # Read notification_email from the super_admin account (user id=2).
+    # Falls back to their login email if notification_email is not set.
+    # No hardcoded addresses — whoever owns the platform controls this via
+    # Profile → Lead & Notification Email in the app.
+    _owner_email = None
+    try:
+        from database import get_conn as _gc_owner
+        _oc = _gc_owner()
+        _or = _oc.execute(
+            "SELECT email, notification_email FROM users WHERE id = 2"
+        ).fetchone()
+        _oc.close()
+        if _or:
+            _owner_email = _or["notification_email"] or _or["email"]
+    except Exception as _oe:
+        print(f"[PublicEnroll] Owner email lookup failed (non-blocking): {_oe}")
+
+    if _sendgrid_key and _owner_email:
+        try:
+            import httpx as _hx2
+            _hx2.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={
+                    "Authorization": f"Bearer {_sendgrid_key}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "personalizations": [{"to": [{"email": _owner_email}]}],
+                    "from":    {"email": _sendgrid_from, "name": "HomeBridge"},
+                    "subject": f"New Partner: {name} ({body.partner_type or 'other'})",
+                    "content": [{"type": "text/html", "value": f"<p><strong>{name}</strong> ({email}) just enrolled as a Partner ({body.partner_type or 'other'}).</p><p>Referral code: <strong>{referral_code}</strong></p>"}],
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    # ── Issue JWT token ───────────────────────────────────────────────────────
+    token = _create_token(user["id"], email, "agent")
+
+    return {
+        "ok":            True,
+        "token":         token,
+        "referral_code": referral_code,
+        "referral_link": referral_link,
+        "partner":       partner,
+        "user": {
+            "id":         user["id"],
+            "email":      email,
+            "agent_name": name,
+            "role":       "agent",
+            "is_licensed": 1 if is_agent else 0,
+            "partner_tier": partner.get("tier"),
+            "partner_code": referral_code,
+        },
+    }
+
+
+@app.post("/partner/quarterly-evaluate")
+async def partner_quarterly_evaluate(current_user: dict = Depends(get_current_user)):
+    """
+    Admin/cron trigger — runs quarter-end tier evaluation for all active partners.
+    Counts active paying referrals (referral_attributions.is_active = 1) per partner.
+    Updates tier based on count:
+      Starter (referral): 1–4 active referrals
+      Growth  (broker):   5–14 active referrals
+      Elite:              15+ active referrals
+    Records tier_evaluated_at and active_referral_count on each partner row.
+    Safe to run multiple times — idempotent snapshot.
+    """
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    from database import get_conn as _gc_qe
+    from datetime import datetime as _dt_qe
+
+    conn = _gc_qe()
+    c    = conn.cursor()
+
+    # Fetch all active partners
+    c.execute("SELECT id, tier, user_id FROM partners WHERE status = 'active'")
+    partners = [dict(r) for r in c.fetchall()]
+
+    results = []
+    now_iso = _dt_qe.utcnow().isoformat()
+
+    for p in partners:
+        partner_id = p["id"]
+
+        # Count active paying referrals for this partner
+        c.execute("""
+            SELECT COUNT(*) as cnt
+            FROM referral_attributions
+            WHERE partner_id = ? AND is_active = 1
+        """, (partner_id,))
+        active_count = c.fetchone()["cnt"]
+
+        # Determine new tier based on locked Session 24 model
+        if active_count >= 15:
+            new_tier = "elite"
+        elif active_count >= 5:
+            new_tier = "broker"   # code key 'broker' = Growth tier in UI
+        else:
+            new_tier = "referral" # code key 'referral' = Starter tier in UI
+
+        old_tier = p["tier"]
+
+        # Update partner record
+        conn.execute("""
+            UPDATE partners
+            SET tier                 = ?,
+                active_referral_count = ?,
+                tier_evaluated_at    = ?
+            WHERE id = ?
+        """, (new_tier, active_count, now_iso, partner_id))
+
+        # Mirror to users table for fast lookup by renderViewSwitcher
+        conn.execute(
+            "UPDATE users SET partner_tier = ? WHERE id = ?",
+            (new_tier, p["user_id"])
+        )
+
+        results.append({
+            "partner_id":    partner_id,
+            "active_count":  active_count,
+            "old_tier":      old_tier,
+            "new_tier":      new_tier,
+            "changed":       old_tier != new_tier,
+        })
+
+    conn.commit()
+    conn.close()
+
+    from database import log_audit_event as _lae_qe
+    _lae_qe(
+        actor_id = current_user["id"],
+        action   = "partner_quarterly_evaluate",
+        detail   = f"Evaluated {len(partners)} partners. {sum(1 for r in results if r['changed'])} tier changes.",
+    )
+
+    return {
+        "ok":              True,
+        "partners_evaluated": len(partners),
+        "tier_changes":    sum(1 for r in results if r["changed"]),
+        "results":         results,
+        "evaluated_at":    now_iso,
+    }
 
 
 # ─────────────────────────────────────────────
