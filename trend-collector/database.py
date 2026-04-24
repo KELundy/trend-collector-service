@@ -333,6 +333,23 @@ def init_db():
         )
     """)
 
+    # Contacts — marketing site form submissions (Session 24)
+    # Saves every contact form submission for CRM-style querying.
+    # type: agent | team | broker | partner | other
+    # source: contact_form | partner_signup (future)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL DEFAULT '',
+            email      TEXT    NOT NULL,
+            type       TEXT    NOT NULL DEFAULT 'other',
+            message    TEXT    DEFAULT '',
+            source     TEXT    NOT NULL DEFAULT 'contact_form',
+            ip_address TEXT    DEFAULT NULL,
+            created_at TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+
     # Office invites — broker-initiated agent invitations
     c.execute("""
         CREATE TABLE IF NOT EXISTS office_invites (
@@ -476,6 +493,39 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+
+    # Non-destructive partner table migrations — Session 24 quarterly tier model
+    # stripe_connect_id: partner's connected Stripe account for payouts
+    # active_referral_count: snapshot count updated each quarter-end evaluation
+    # tier_evaluated_at: timestamp of last quarterly tier recalculation
+    # payout_frequency: always 'quarterly' per locked design decision Session 24
+    # stripe_bank_connected: 1 = bank account connected and ready for payout
+    for col, defn in [
+        ("stripe_connect_id",     "TEXT DEFAULT NULL"),
+        ("active_referral_count", "INTEGER DEFAULT 0"),
+        ("tier_evaluated_at",     "TEXT DEFAULT NULL"),
+        ("payout_frequency",      "TEXT DEFAULT 'quarterly'"),
+        ("stripe_bank_connected", "INTEGER DEFAULT 0"),
+        ("suspended_at",          "TEXT DEFAULT NULL"),
+        ("suspended_by",          "INTEGER DEFAULT NULL"),
+        ("suspension_reason",     "TEXT DEFAULT NULL"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE partners ADD COLUMN {col} {defn}")
+        except Exception:
+            pass  # Column already exists
+
+    # Non-destructive referral_attributions migrations — Session 24
+    # first_payment_at: when the referred user's first Stripe payment cleared
+    # is_active: 1 = currently paying subscriber (updated by billing webhooks)
+    for col, defn in [
+        ("first_payment_at", "TEXT DEFAULT NULL"),
+        ("is_active",        "INTEGER DEFAULT 0"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE referral_attributions ADD COLUMN {col} {defn}")
+        except Exception:
+            pass  # Column already exists
 
     conn.commit()
     conn.close()
@@ -2525,6 +2575,68 @@ def _market_report_row(row) -> dict:
         "extractedData": extracted,
         "uploadedAt":    row["uploaded_at"],
     }
+
+
+# ─────────────────────────────────────────────
+# CONTACTS — marketing site form submissions (Session 24)
+# ─────────────────────────────────────────────
+
+def contact_save(name: str, email: str, contact_type: str,
+                 message: str, source: str = "contact_form",
+                 ip_address: str = None) -> dict:
+    """
+    Save a contact form submission from homebridgegroup.co.
+    Returns the saved record as a dict.
+    type: agent | team | broker | partner | other
+    source: contact_form | partner_signup
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        INSERT INTO contacts (name, email, type, message, source, ip_address)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (name.strip(), email.strip().lower(), contact_type, message.strip(),
+          source, ip_address))
+    conn.commit()
+    contact_id = c.lastrowid
+    c.execute("SELECT * FROM contacts WHERE id=?", (contact_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def contact_list_all(limit: int = 200, offset: int = 0) -> list:
+    """
+    Return all contact submissions, newest first. Admin use only.
+    Supports pagination via limit/offset.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT * FROM contacts
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def contact_count_by_type() -> dict:
+    """
+    Return a count of contacts grouped by type. Admin dashboard use.
+    Example: {'agent': 12, 'broker': 4, 'partner': 7, 'other': 2}
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT type, COUNT(*) as cnt
+        FROM contacts
+        GROUP BY type
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return {row["type"]: row["cnt"] for row in rows}
 
 
 # ─────────────────────────────────────────────
