@@ -126,6 +126,96 @@ app.include_router(social_router)
 app.include_router(compliance_admin_router)
 
 
+def quarterly_evaluator_worker():
+    """
+    Background thread — wakes once per day and checks if today is the last
+    day of a calendar quarter (Mar 31, Jun 30, Sep 30, Dec 31).
+    If so, runs the partner tier evaluation directly against the database.
+
+    Quarter-end dates:
+      Q1 → March 31     → payouts early April
+      Q2 → June 30      → payouts early July
+      Q3 → September 30 → payouts early October
+      Q4 → December 31  → payouts early January
+
+    Runs at 06:00 UTC to ensure it fires after midnight in all US timezones.
+    Safe to restart — checks today's date each cycle, idempotent if run twice.
+    """
+    import time as _time_qe
+    from datetime import datetime as _dt_qe, timezone as _tz_qe
+
+    # Quarter-end dates: (month, day)
+    QUARTER_ENDS = {(3, 31), (6, 30), (9, 30), (12, 31)}
+
+    print("[QuarterlyEvaluator] Worker started.")
+
+    while True:
+        try:
+            now_utc = _dt_qe.now(_tz_qe.utc)
+
+            # Only fire at 06:00 UTC (within the 06:00–06:59 window)
+            if now_utc.hour == 6 and (now_utc.month, now_utc.day) in QUARTER_ENDS:
+                print(f"[QuarterlyEvaluator] Quarter-end detected: {now_utc.date()} — running tier evaluation...")
+                try:
+                    from database import get_conn as _gc_qw
+                    conn = _gc_qw()
+                    c    = conn.cursor()
+
+                    c.execute("SELECT id, tier, user_id FROM partners WHERE status = 'active'")
+                    partners = [dict(r) for r in c.fetchall()]
+                    now_iso  = _dt_qe.utcnow().isoformat()
+                    changes  = 0
+
+                    for p in partners:
+                        c.execute("""
+                            SELECT COUNT(*) as cnt
+                            FROM referral_attributions
+                            WHERE partner_id = ? AND is_active = 1
+                        """, (p["id"],))
+                        active_count = c.fetchone()["cnt"]
+
+                        new_tier = "elite"    if active_count >= 15 else \
+                                   "broker"   if active_count >= 5  else \
+                                   "referral"
+
+                        if new_tier != p["tier"]:
+                            changes += 1
+
+                        conn.execute("""
+                            UPDATE partners
+                            SET tier                  = ?,
+                                active_referral_count = ?,
+                                tier_evaluated_at     = ?
+                            WHERE id = ?
+                        """, (new_tier, active_count, now_iso, p["id"]))
+
+                        conn.execute(
+                            "UPDATE users SET partner_tier = ? WHERE id = ?",
+                            (new_tier, p["user_id"])
+                        )
+
+                    conn.commit()
+                    conn.close()
+
+                    from database import log_audit_event as _lae_qw
+                    _lae_qw(
+                        actor_id = 2,  # super_admin — system action
+                        action   = "partner_quarterly_evaluate",
+                        detail   = f"Auto-run at quarter-end {now_utc.date()}. "
+                                   f"{len(partners)} partners evaluated. {changes} tier changes.",
+                    )
+                    print(f"[QuarterlyEvaluator] ✓ Complete — {len(partners)} partners, {changes} tier changes.")
+
+                except Exception as eval_err:
+                    print(f"[QuarterlyEvaluator] ✗ Evaluation failed: {eval_err}")
+
+        except Exception as outer_err:
+            print(f"[QuarterlyEvaluator] Worker error: {outer_err}")
+
+        # Sleep 55 minutes — wakes ~26 times per day, catches the 06:xx window reliably
+        _time_qe.sleep(55 * 60)
+
+
 @app.on_event("startup")
 async def startup_event():
     # Ensure super admin account is always set correctly
@@ -159,6 +249,9 @@ async def startup_event():
             print(f"[Startup] Signal collector failed to start: {e}")
     else:
         print("[Startup] Signal collector DISABLED (SIGNAL_ENABLED=false) — set env var to true to enable.")
+    print("[Startup] Starting quarterly partner tier evaluator...")
+    t3 = threading.Thread(target=quarterly_evaluator_worker, daemon=True)
+    t3.start()
     print("[Startup] Ready.")
 
 
