@@ -80,16 +80,17 @@ class UserResponse(BaseModel):
 def _normalize_user(d: dict) -> dict:
     """Ensure all expected fields exist regardless of schema version."""
     return {
-        "id":           d.get("id"),
-        "email":        d.get("email", ""),
-        "password_hash":d.get("password_hash", ""),
-        "agent_name":   d.get("agent_name", ""),
-        "brokerage":    d.get("brokerage", ""),
-        "phone":        d.get("phone", ""),
-        "is_active":    bool(d.get("is_active", 1)),
-        "created_at":   d.get("created_at", ""),
-        "role":         d.get("role", "agent"),
-        "broker_id":    d.get("broker_id", None),
+        "id":                d.get("id"),
+        "email":             d.get("email", ""),
+        "password_hash":     d.get("password_hash", ""),
+        "agent_name":        d.get("agent_name", ""),
+        "brokerage":         d.get("brokerage", ""),
+        "phone":             d.get("phone", ""),
+        "notification_email":d.get("notification_email", None),
+        "is_active":         bool(d.get("is_active", 1)),
+        "created_at":        d.get("created_at", ""),
+        "role":              d.get("role", "agent"),
+        "broker_id":         d.get("broker_id", None),
     }
 
 def make_office_code(user_id: int) -> str:
@@ -285,13 +286,15 @@ def login(body: LoginRequest):
     return {
         "token": token,
         "user": {
-            "id":          user["id"],
-            "email":       user["email"],
-            "agent_name":  user["agent_name"],
-            "brokerage":   user["brokerage"],
-            "role":        user.get("role", "agent"),
-            "broker_id":   user.get("broker_id", None),
-            "is_new_user": is_new,
+            "id":                user["id"],
+            "email":             user["email"],
+            "agent_name":        user["agent_name"],
+            "brokerage":         user["brokerage"],
+            "role":              user.get("role", "agent"),
+            "broker_id":         user.get("broker_id", None),
+            "phone":             user.get("phone", ""),
+            "notification_email":user.get("notification_email", None),
+            "is_new_user":       is_new,
         }
     }
 
