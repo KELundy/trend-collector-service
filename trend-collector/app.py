@@ -276,8 +276,8 @@ class LibraryPatchRequest(BaseModel):
 
 
 @app.get("/library")
-async def get_library(context: str = "agent", current_user=Depends(get_current_user)):
-    items = library_get_all(current_user["id"], context=context)
+async def get_library(context: str = "agent", include_archived: bool = False, current_user=Depends(get_current_user)):
+    items = library_get_all(current_user["id"], context=context, include_archived=include_archived)
     return {"items": items, "count": len(items)}
 
 
