@@ -953,17 +953,20 @@ def library_save(user_id: int, niche: str, content: dict,
     return library_get_item(item_id)
 
 
-def library_get_all(user_id: int, context: str = "agent") -> list:
+def library_get_all(user_id: int, context: str = "agent", include_archived: bool = False) -> list:
     """
     Fetch all library items for a user filtered by context.
     context = 'agent'        — personal real estate content
     context = 'hb_marketing' — HomeBridge platform content
+    include_archived = False — archived items excluded by default (only shown in Archived tab)
     """
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""
+    archive_clause = "" if include_archived else "AND (status IS NULL OR status != 'archived')"
+    c.execute(f"""
         SELECT * FROM content_library
         WHERE user_id = ? AND (context = ? OR (context IS NULL AND ? = 'agent'))
+        {archive_clause}
         ORDER BY saved_at DESC
     """, (user_id, context, context))
     rows = c.fetchall()
