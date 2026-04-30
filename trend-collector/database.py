@@ -2058,6 +2058,42 @@ def update_password(user_id: int, new_password_hash: str):
 # LOCAL SIGNALS
 # ─────────────────────────────────────────────
 
+def signals_dedupe_check(user_id: int, source_url: str, headline: str) -> bool:
+    """
+    Returns True if this signal is a duplicate and should be skipped.
+    Duplicate = same source_url (non-empty) OR headline that starts with
+    the same first 80 characters as an existing signal for this user
+    collected in the last 30 days.
+    Called by signal_collector.py before every signals_save() call.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # URL-based dedup — same source URL already saved for this user recently
+    if source_url and source_url.strip():
+        c.execute("""
+            SELECT COUNT(*) as n FROM local_signals
+            WHERE user_id = ?
+              AND source_url = ?
+              AND collected_at > datetime('now', '-30 days')
+        """, (user_id, source_url.strip()))
+        if c.fetchone()["n"] > 0:
+            conn.close()
+            return True
+
+    # Headline-based dedup — first 80 chars match an existing signal
+    headline_prefix = headline.strip()[:80]
+    c.execute("""
+        SELECT COUNT(*) as n FROM local_signals
+        WHERE user_id = ?
+          AND substr(headline, 1, 80) = ?
+          AND collected_at > datetime('now', '-30 days')
+    """, (user_id, headline_prefix))
+    is_dupe = c.fetchone()["n"] > 0
+    conn.close()
+    return is_dupe
+
+
 def signals_save(user_id: int, area: str, headline: str, summary: str,
                  source_url: str, signal_type: str = "general",
                  relevance_score: float = 0.5, published_date: str = None):
