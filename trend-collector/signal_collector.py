@@ -25,6 +25,7 @@ from datetime import datetime
 COLLECT_INTERVAL_HOURS  = int(os.getenv("SIGNAL_COLLECT_HOURS", "24"))  # Default 24hr — override via Render env var
 HIGH_RELEVANCE_THRESHOLD = 0.6 # Minimum score to count as "strong"
 MIN_STRONG_SIGNALS       = 2   # Escalate if fewer than this many strong signals found
+MAX_SIGNAL_SEARCHES      = int(os.getenv("MAX_SIGNAL_SEARCHES", "3"))  # Max Tier 1 searches per agent per run — set in Render env vars
 _collector_started       = False
 
 
@@ -279,9 +280,13 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     # ── TIER 1: Hyper-local — one search per service area ───────────────────
     # Searching areas individually prevents one dominant area (e.g. DTC) from
     # consuming all 5 signal slots and burying quieter neighborhoods.
+    # MAX_SIGNAL_SEARCHES caps total Tier 1 calls per agent per run — set via
+    # Render env var MAX_SIGNAL_SEARCHES (default 3). Reduces API spend at scale.
     if service_areas:
         strong1 = 0
-        for idx, area in enumerate(service_areas[:5]):
+        areas_to_search = service_areas[:MAX_SIGNAL_SEARCHES]
+        print(f"[Signals] Tier 1: searching {len(areas_to_search)} of {len(service_areas)} area(s) (MAX_SIGNAL_SEARCHES={MAX_SIGNAL_SEARCHES}) — user {user_id}")
+        for idx, area in enumerate(areas_to_search):
             angle_desc, angle_types = SEARCH_ANGLES[idx % len(SEARCH_ANGLES)]
             tier1_prompt = f"""You are a hyper-local real estate market intelligence researcher.
 Today's date is {today_str}. Only return news published on or after {cutoff_str}.
