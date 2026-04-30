@@ -159,7 +159,7 @@ def _validate_published_date(raw_date: str, user_id: int, headline: str) -> tupl
         date_str = str(raw_date).strip()[:10]  # Take YYYY-MM-DD portion only
         parsed   = datetime.strptime(date_str, "%Y-%m-%d")
         age_days = (datetime.utcnow() - parsed).days
-        if age_days > 90:
+        if age_days > 45:
             print(f"[Signals] REJECTED stale signal ({age_days}d old): '{headline[:60]}' (user {user_id})")
             return None, True
         return date_str, False
@@ -171,19 +171,22 @@ def _validate_published_date(raw_date: str, user_id: int, headline: str) -> tupl
 
 def _save_signals(signals: list, user_id: int, tier: str, areas_str: str) -> int:
     """Save signals to DB, tagging with tier. Returns count saved.
-    Rejects any signal with a published_date older than 90 days.
+    Rejects any signal with a published_date older than 45 days.
+    Rejects duplicates (same source_url or near-identical headline within 30 days).
     Signals with no date are allowed through with a log warning.
     """
-    from database import signals_save
+    from database import signals_save, signals_dedupe_check
     saved    = 0
     rejected = 0
+    dupes    = 0
     for sig in signals[:5]:
         try:
-            headline = str(sig.get("headline", "")).strip()
+            headline   = str(sig.get("headline", "")).strip()
+            source_url = str(sig.get("source_url", "")).strip()
             if not headline or len(headline) < 10:
                 continue
 
-            # Validate recency — hard reject if published_date is present and >90 days old
+            # Validate recency — hard reject if published_date is present and >45 days old
             pub_date, should_reject = _validate_published_date(
                 sig.get("published_date", ""), user_id, headline
             )
@@ -191,12 +194,18 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str) -> int
                 rejected += 1
                 continue
 
+            # Deduplicate — skip if same URL or near-identical headline already saved recently
+            if signals_dedupe_check(user_id, source_url, headline):
+                dupes += 1
+                print(f"[Signals] DUPE skipped: '{headline[:60]}' (user {user_id})")
+                continue
+
             signals_save(
                 user_id        = user_id,
                 area           = str(sig.get("area", areas_str))[:200],
                 headline       = headline[:500],
                 summary        = str(sig.get("summary", ""))[:1000],
-                source_url     = str(sig.get("source_url", ""))[:500],
+                source_url     = source_url[:500],
                 signal_type    = f"{tier}:{sig.get('signal_type', 'general')}"[:50],
                 relevance_score= float(sig.get("relevance_score", 0.5)),
                 published_date = pub_date,
@@ -205,7 +214,9 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str) -> int
         except Exception as e:
             print(f"[Signals] Save error: {e}")
     if rejected:
-        print(f"[Signals] {rejected} stale signal(s) rejected (>90 days) for user {user_id}.")
+        print(f"[Signals] {rejected} stale signal(s) rejected (>45 days) for user {user_id}.")
+    if dupes:
+        print(f"[Signals] {dupes} duplicate signal(s) skipped for user {user_id}.")
     return saved
 
 
@@ -271,10 +282,10 @@ Look for:
 Prioritize signals specific to the named neighborhoods. If a specific neighborhood
 has no recent news, include the nearest relevant signal within the surrounding
 {market_str} area — clearly noting the actual area in the "area" field.
-Recency matters: last 30 days ideal, last 90 days acceptable.
+Recency matters: last 14 days ideal, last 30 days acceptable. Maximum 45 days — do not return anything older.
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-Only include signals from the last 90 days. If you cannot find anything within 90 days, return an empty array [].
+Only include signals from the last 45 days. If you cannot find anything within 45 days, return an empty array [].
 [{{
   "area": "neighborhood or area name",
   "headline": "one specific factual headline",
@@ -317,10 +328,10 @@ Look for:
 - Infrastructure projects (transit, highways, airports) affecting property values
 
 Include signals from any part of {market_str} — not just specific neighborhoods.
-Recency: last 60 days preferred.
+Recency: last 14 days preferred. Maximum 45 days — do not return anything older.
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-Only include signals from the last 90 days. If you cannot find anything within 90 days, return an empty array [].
+Only include signals from the last 45 days. If you cannot find anything within 45 days, return an empty array [].
 [{{
   "area": "{market_str} metro",
   "headline": "one specific factual headline",
@@ -362,7 +373,7 @@ These should be trends that a real estate professional in {market_str} specializ
 in {niche_str} could write a local-angle post about.
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-Only include signals from the last 90 days. If you cannot find anything within 90 days, return an empty array [].
+Only include signals from the last 45 days. If you cannot find anything within 45 days, return an empty array [].
 [{{
   "area": "National — {niche_str}",
   "headline": "one specific factual headline about the national trend",
