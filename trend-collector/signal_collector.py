@@ -258,51 +258,64 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
         print("[Signals] No Anthropic client — skipping.")
         return
 
-    areas_str   = ", ".join(service_areas[:5]) if service_areas else market
-    market_str  = market or "the local area"
-    niche_str   = primary_niches[0] if primary_niches else "Residential Real Estate"
+    areas_str  = ", ".join(service_areas[:5]) if service_areas else market
+    market_str = market or "the local area"
+    niche_str  = primary_niches[0] if primary_niches else "Residential Real Estate"
+    today_str  = datetime.utcnow().strftime("%B %d, %Y")  # e.g. "April 30, 2026"
+    cutoff_str = (datetime.utcnow() - __import__('datetime').timedelta(days=45)).strftime("%B %d, %Y")
     total_saved = 0
 
-    # ── TIER 1: Hyper-local ──────────────────────────────────────────────────
-    # Only run Tier 1 when the agent has specific service areas saved.
-    # Without named neighborhoods the hyper-local prompt returns thin results
-    # and wastes a Claude call — metro (Tier 2) is the right starting scope.
+    # Signal search angles — rotated across individual area searches so
+    # The Analyst doesn't keep finding the same dominant articles each run.
+    # Each area gets one angle, cycling through the list.
+    SEARCH_ANGLES = [
+        ("new development projects, building permits, zoning approvals, groundbreakings",        "development|permit|zoning"),
+        ("home sales data, inventory levels, days on market, price trends, market statistics",   "market"),
+        ("new businesses opening, major employers moving in or out, job announcements",          "news|employer"),
+        ("city council decisions, planning commission approvals, infrastructure or transit news", "infrastructure|zoning|policy"),
+        ("neighborhood changes, school district news, community development, park improvements", "news|community"),
+    ]
+
+    # ── TIER 1: Hyper-local — one search per service area ───────────────────
+    # Searching areas individually prevents one dominant area (e.g. DTC) from
+    # consuming all 5 signal slots and burying quieter neighborhoods.
     if service_areas:
-        tier1_prompt = f"""You are a hyper-local real estate market intelligence researcher.
+        strong1 = 0
+        for idx, area in enumerate(service_areas[:5]):
+            angle_desc, angle_types = SEARCH_ANGLES[idx % len(SEARCH_ANGLES)]
+            tier1_prompt = f"""You are a hyper-local real estate market intelligence researcher.
+Today's date is {today_str}. Only return news published on or after {cutoff_str}.
 
-Search the web for recent news and developments in these neighborhoods: {areas_str} in {market_str}.
+Search the web for very recent news specifically about: {area} in {market_str}.
 
-Look for:
-- New development projects, building permits, zoning approvals
-- Neighborhood changes, new businesses opening or closing
-- Local infrastructure or transit changes
-- Recent sales trends or inventory shifts in these areas
-- City council or planning commission decisions affecting these neighborhoods
+Focus your search on: {angle_desc}
 
-Prioritize signals specific to the named neighborhoods. If a specific neighborhood
-has no recent news, include the nearest relevant signal within the surrounding
-{market_str} area — clearly noting the actual area in the "area" field.
-Recency matters: last 14 days ideal, last 30 days acceptable. Maximum 45 days — do not return anything older.
+Your search MUST find stories published within the last 45 days (after {cutoff_str}).
+Do not return articles from before {cutoff_str} under any circumstances.
+If you cannot find anything published after {cutoff_str} specifically about {area},
+return an empty array [] — do not fall back to older stories.
 
-Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-Only include signals from the last 45 days. If you cannot find anything within 45 days, return an empty array [].
+Return ONLY a valid JSON array of up to 2 signals. No explanation, no preamble.
 [{{
-  "area": "neighborhood or area name",
-  "headline": "one specific factual headline",
-  "summary": "2-3 sentences on what happened and what it means for buyers/sellers",
-  "source_url": "URL if found, otherwise empty string",
-  "published_date": "YYYY-MM-DD date the story was published, or empty string if unknown",
-  "signal_type": "development|permit|market|infrastructure|zoning|news",
+  "area": "{area}",
+  "headline": "one specific factual headline — must be from a real published article",
+  "summary": "2-3 sentences: what happened and what it means for buyers/sellers in {area}",
+  "source_url": "URL of the article — required if found",
+  "published_date": "YYYY-MM-DD — the date the article was published",
+  "signal_type": "{angle_types}",
   "relevance_score": 0.0 to 1.0
 }}]
 
-Return ONLY the JSON array."""
+Return ONLY the JSON array. If nothing found after {cutoff_str}, return []."""
 
-        tier1_signals = _search_signals(client, tier1_prompt, user_id)
-        strong1       = _strong_signal_count(tier1_signals)
-        if tier1_signals:
-            total_saved += _save_signals(tier1_signals, user_id, "local", areas_str)
-            print(f"[Signals] Tier 1 (local): {len(tier1_signals)} signals, {strong1} strong — user {user_id}")
+            area_signals = _search_signals(client, tier1_prompt, user_id)
+            if area_signals:
+                saved = _save_signals(area_signals, user_id, "local", area)
+                total_saved += saved
+                strong1 += _strong_signal_count(area_signals)
+                print(f"[Signals] Tier 1 ({area}): {len(area_signals)} signals, {saved} saved — user {user_id}")
+            else:
+                print(f"[Signals] Tier 1 ({area}): no recent signals found — user {user_id}")
 
         if strong1 >= MIN_STRONG_SIGNALS:
             print(f"[Signals] ✓ User {user_id} — {total_saved} saved from Tier 1. Done.")
@@ -310,45 +323,72 @@ Return ONLY the JSON array."""
 
         print(f"[Signals] Tier 1 thin ({strong1} strong) — escalating to Tier 2 (metro) for user {user_id}")
     else:
-        # No service areas configured — fall back to market city at Tier 2 scope
         print(f"[Signals] No service areas set for user {user_id} — starting at Tier 2 (market: {market_str})")
 
     # ── TIER 2: Metro-level ──────────────────────────────────────────────────
+    # Runs two targeted searches — market data and development/policy —
+    # so we get variety instead of one dominant story type.
 
-    tier2_prompt = f"""You are a metro-level real estate market intelligence researcher.
+    tier2_prompts = [
+        f"""You are a metro-level real estate market intelligence researcher.
+Today's date is {today_str}. Only return news published on or after {cutoff_str}.
 
-The hyper-local search for specific neighborhoods came up thin.
-Now search for significant real estate and development news across the broader {market_str} metro area.
+Search the web for very recent {market_str} metro real estate MARKET DATA:
+- New MLS reports, inventory statistics, median price changes
+- Days on market trends, absorption rates, list-to-sale ratios
+- REColorado, DMAR, or local MLS data releases from the last 45 days
+- Mortgage rate impacts on the {market_str} market specifically
 
-Look for:
-- Major development projects anywhere in {market_str}
-- City-wide zoning or policy changes affecting real estate
-- Metro-area market shifts: inventory, pricing, days on market trends
-- Large employers moving in or out of {market_str}
-- Infrastructure projects (transit, highways, airports) affecting property values
+Only include data or reports published after {cutoff_str}.
+If nothing found after {cutoff_str}, return [].
 
-Include signals from any part of {market_str} — not just specific neighborhoods.
-Recency: last 14 days preferred. Maximum 45 days — do not return anything older.
-
-Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-Only include signals from the last 45 days. If you cannot find anything within 45 days, return an empty array [].
+Return ONLY a valid JSON array of up to 3 signals. No explanation, no preamble.
 [{{
   "area": "{market_str} metro",
-  "headline": "one specific factual headline",
-  "summary": "2-3 sentences on what happened and what it means for real estate",
-  "source_url": "URL if found, otherwise empty string",
-  "published_date": "YYYY-MM-DD date the story was published, or empty string if unknown",
-  "signal_type": "development|permit|market|infrastructure|zoning|news|policy",
+  "headline": "one specific factual headline with actual numbers if available",
+  "summary": "2-3 sentences on the data and what it means for buyers/sellers",
+  "source_url": "URL if found",
+  "published_date": "YYYY-MM-DD",
+  "signal_type": "market",
   "relevance_score": 0.0 to 1.0
 }}]
 
-Return ONLY the JSON array."""
+Return ONLY the JSON array.""",
 
-    tier2_signals = _search_signals(client, tier2_prompt, user_id)
-    strong2       = _strong_signal_count(tier2_signals)
-    if tier2_signals:
-        total_saved += _save_signals(tier2_signals, user_id, "metro", market_str)
-        print(f"[Signals] Tier 2 (metro): {len(tier2_signals)} signals, {strong2} strong — user {user_id}")
+        f"""You are a metro-level real estate development researcher.
+Today's date is {today_str}. Only return news published on or after {cutoff_str}.
+
+Search the web for very recent {market_str} metro development and policy news:
+- Major projects approved, breaking ground, or completing in {market_str}
+- City of Denver or surrounding city zoning or policy changes
+- Large employer announcements, office expansions, relocations in {market_str}
+- RTD, highway, or infrastructure projects affecting property values
+
+Only include stories published after {cutoff_str}.
+If nothing found after {cutoff_str}, return [].
+
+Return ONLY a valid JSON array of up to 3 signals. No explanation, no preamble.
+[{{
+  "area": "{market_str} area",
+  "headline": "one specific factual headline",
+  "summary": "2-3 sentences on what happened and what it means for real estate",
+  "source_url": "URL if found",
+  "published_date": "YYYY-MM-DD",
+  "signal_type": "development|infrastructure|policy|news",
+  "relevance_score": 0.0 to 1.0
+}}]
+
+Return ONLY the JSON array.""",
+    ]
+
+    strong2 = 0
+    for t2_prompt in tier2_prompts:
+        t2_signals = _search_signals(client, t2_prompt, user_id)
+        if t2_signals:
+            saved = _save_signals(t2_signals, user_id, "metro", market_str)
+            total_saved += saved
+            strong2 += _strong_signal_count(t2_signals)
+            print(f"[Signals] Tier 2 (metro): {len(t2_signals)} signals, {saved} saved — user {user_id}")
 
     if strong2 >= MIN_STRONG_SIGNALS:
         print(f"[Signals] ✓ User {user_id} — {total_saved} saved through Tier 2. Done.")
@@ -358,28 +398,29 @@ Return ONLY the JSON array."""
     print(f"[Signals] Tier 2 thin ({strong2} strong) — escalating to Tier 3 (national niche) for user {user_id}")
 
     tier3_prompt = f"""You are a national real estate trend researcher.
+Today's date is {today_str}. Only return news published on or after {cutoff_str}.
 
-The local and metro searches came up thin for {market_str}.
-Search for significant NATIONAL real estate trends specifically relevant to: {niche_str}
+Search for significant NATIONAL real estate news and trends relevant to: {niche_str}
 
-Look for:
-- National policy, regulatory, or legislative changes affecting {niche_str}
-- Major national market shifts in this niche (interest rates, inventory, demand)
-- Industry reports or data releases relevant to {niche_str} professionals
-- NAR, HUD, CFPB, or other regulatory body announcements
-- Technology or demographic trends reshaping {niche_str}
+Look for stories published after {cutoff_str} about:
+- NAR, HUD, CFPB, or federal housing policy announcements
+- Interest rate decisions and their impact on {niche_str}
+- National inventory or affordability data releases
+- Demographic or technology trends reshaping {niche_str}
+- Industry reports from Zillow, Redfin, CoreLogic, ATTOM, or similar
 
-These should be trends that a real estate professional in {market_str} specializing
-in {niche_str} could write a local-angle post about.
+These should be trends a {market_str} agent specializing in {niche_str}
+could write a compelling local-angle post about.
+
+Only include stories published after {cutoff_str}. If nothing found, return [].
 
 Return ONLY a valid JSON array of up to 5 signals. No explanation, no preamble.
-Only include signals from the last 45 days. If you cannot find anything within 45 days, return an empty array [].
 [{{
   "area": "National — {niche_str}",
-  "headline": "one specific factual headline about the national trend",
-  "summary": "2-3 sentences on what the trend is and what it means for agents and clients",
-  "source_url": "URL if found, otherwise empty string",
-  "published_date": "YYYY-MM-DD date the story was published, or empty string if unknown",
+  "headline": "one specific factual headline",
+  "summary": "2-3 sentences: the trend and what it means for agents and clients in {market_str}",
+  "source_url": "URL if found",
+  "published_date": "YYYY-MM-DD",
   "signal_type": "policy|market|regulatory|technology|demographic|industry",
   "relevance_score": 0.0 to 1.0
 }}]
@@ -388,8 +429,9 @@ Return ONLY the JSON array."""
 
     tier3_signals = _search_signals(client, tier3_prompt, user_id)
     if tier3_signals:
-        total_saved += _save_signals(tier3_signals, user_id, "national", niche_str)
-        print(f"[Signals] Tier 3 (national): {len(tier3_signals)} signals — user {user_id}")
+        saved = _save_signals(tier3_signals, user_id, "national", niche_str)
+        total_saved += saved
+        print(f"[Signals] Tier 3 (national): {len(tier3_signals)} signals, {saved} saved — user {user_id}")
 
     print(f"[Signals] ✓ User {user_id} ({agent_name}) — {total_saved} total signal(s) saved across all tiers.")
 
