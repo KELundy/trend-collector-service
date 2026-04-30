@@ -4377,6 +4377,267 @@ async def partner_quarterly_evaluate(current_user: dict = Depends(get_current_us
     }
 
 
+
+# ─────────────────────────────────────────────
+# FLYER EXPORT — Session 28
+# Generates a print-ready Letter PDF flyer from approved content.
+# Agent info pulled from their setup. Photo opt-in via include_photo flag.
+# ─────────────────────────────────────────────
+
+class FlyerRequest(BaseModel):
+    item_id:       int
+    headline:      str
+    body:          str
+    cta_label:     str  = ""
+    cta_url:       str  = ""
+    agent_name:    str  = ""
+    brokerage:     str  = ""
+    phone:         str  = ""
+    email:         str  = ""
+    license_number:str  = ""
+    designations:  str  = ""
+    disclaimer:    str  = ""
+    include_photo: bool = False
+    photo_b64:     str  = ""   # base64 JPEG — only used if include_photo is True
+    include_logo:  bool = False
+    logo_b64:      str  = ""   # base64 JPEG — brokerage logo, only used if include_logo is True
+
+@app.post("/content/flyer")
+async def generate_flyer(req: FlyerRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Generate a print-ready Letter (8.5x11) PDF flyer from approved content.
+    Uses ReportLab — same library as PaperTrail™ compliance PDFs.
+    Agent info comes from the request payload (pre-filled by frontend from localStorage).
+    Photo is opt-in — only included if include_photo=True and photo_b64 is provided.
+    Returns PDF as streaming download.
+    """
+    import io, base64
+    from datetime import datetime
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+    from reportlab.lib import colors
+
+    # ── Color palette — matches AutoMates brand
+    INK       = colors.HexColor("#060D1A")
+    INK_2     = colors.HexColor("#334155")
+    INK_3     = colors.HexColor("#64748B")
+    BLUE      = colors.HexColor("#1749c9")
+    ICE       = colors.HexColor("#60A5FA")
+    WHITE     = colors.white
+    OFF       = colors.HexColor("#F5F7FC")
+    BORDER    = colors.HexColor("#E2E8F0")
+
+    buf = io.BytesIO()
+    PAGE_W, PAGE_H = letter  # 8.5 x 11 inches
+    MARGIN = 0.65 * inch
+    CONTENT_W = PAGE_W - (MARGIN * 2)
+
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=MARGIN,
+        rightMargin=MARGIN,
+        topMargin=0.5 * inch,
+        bottomMargin=0.5 * inch,
+    )
+
+    def S(name, **kw):
+        return ParagraphStyle(name, **kw)
+
+    styles = {
+        "logo_auto":  S("logo_auto",  fontName="Helvetica-Bold", fontSize=18, textColor=WHITE,  leading=22),
+        "logo_mates": S("logo_mates", fontName="Helvetica-Bold", fontSize=18, textColor=ICE,    leading=22),
+        "tagline":    S("tagline",    fontName="Helvetica",      fontSize=8,  textColor=colors.HexColor("#93C5FD"), leading=11, alignment=TA_LEFT),
+        "headline":   S("headline",   fontName="Helvetica-Bold", fontSize=26, textColor=INK,    leading=32, spaceAfter=12),
+        "body":       S("body",       fontName="Helvetica",      fontSize=11, textColor=INK_2,  leading=17, spaceAfter=8),
+        "cta":        S("cta",        fontName="Helvetica-Bold", fontSize=12, textColor=BLUE,   leading=16),
+        "agent_name": S("agent_name", fontName="Helvetica-Bold", fontSize=13, textColor=INK,    leading=17),
+        "agent_sub":  S("agent_sub",  fontName="Helvetica",      fontSize=10, textColor=INK_3,  leading=14),
+        "disclaimer": S("disclaimer", fontName="Helvetica",      fontSize=7,  textColor=INK_3,  leading=10),
+        "footer":     S("footer",     fontName="Helvetica",      fontSize=7,  textColor=colors.HexColor("#94A3B8"), leading=10, alignment=TA_CENTER),
+    }
+
+    def sp(h=8):  return Spacer(1, h)
+    def rule(col=BORDER, thick=0.5): return HRFlowable(width="100%", thickness=thick, color=col, spaceAfter=6, spaceBefore=4)
+
+    story = []
+
+    # ── HEADER — dark navy bar with AutoMates logo
+    logo_text = '<font name="Helvetica-Bold" size="18" color="#FFFFFF">Auto</font><font name="Helvetica-Bold" size="18" color="#60A5FA">Mates</font>'
+    tagline_text = "Your Digital Marketing Team"
+    header_table = Table([[
+        Paragraph(logo_text, styles["body"]),
+        Paragraph(tagline_text, styles["tagline"]),
+    ]], colWidths=[CONTENT_W * 0.4, CONTENT_W * 0.6])
+    header_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), INK),
+        ("ALIGN",         (1, 0), (1, 0),   "RIGHT"),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 14),
+        ("TOPPADDING",    (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("ROUNDEDCORNERS",(0, 0), (-1, -1), [4, 4, 0, 0]),
+    ]))
+    story += [header_table, sp(20)]
+
+    # ── HEADLINE
+    story += [
+        Paragraph(req.headline or "Untitled", styles["headline"]),
+        rule(BORDER, 0.5),
+        sp(10),
+    ]
+
+    # ── BODY + PHOTO (opt-in, right side)
+    body_text = req.body or ""
+    # Truncate body to ~600 chars to fit nicely on one page
+    if len(body_text) > 620:
+        body_text = body_text[:617] + "…"
+
+    if req.include_photo and req.photo_b64:
+        # Two-column layout: body left, photo right
+        try:
+            from reportlab.platypus import Image as RLImage
+            img_bytes = base64.b64decode(req.photo_b64)
+            img_buf   = io.BytesIO(img_bytes)
+            photo_w   = 1.6 * inch
+            photo_h   = 1.6 * inch
+            img       = RLImage(img_buf, width=photo_w, height=photo_h)
+            img.hAlign = "RIGHT"
+            body_col_w = CONTENT_W - photo_w - 0.2 * inch
+            body_table = Table([
+                [Paragraph(body_text, styles["body"]), img],
+            ], colWidths=[body_col_w, photo_w + 0.1 * inch])
+            body_table.setStyle(TableStyle([
+                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+                ("TOPPADDING",    (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]))
+            story.append(body_table)
+        except Exception:
+            # Photo failed — fall back to text only
+            story.append(Paragraph(body_text, styles["body"]))
+    else:
+        story.append(Paragraph(body_text, styles["body"]))
+
+    story.append(sp(16))
+
+    # ── CTA
+    if req.cta_label or req.cta_url:
+        cta_display = req.cta_label or req.cta_url
+        cta_url     = req.cta_url or ""
+        cta_str     = f'<a href="{cta_url}" color="#1749c9">{cta_display}</a>' if cta_url else cta_display
+        cta_box = Table([[Paragraph(f"→ {cta_str}", styles["cta"])]],
+                        colWidths=[CONTENT_W])
+        cta_box.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), OFF),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 14),
+            ("TOPPADDING",    (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+            ("BOX",           (0, 0), (-1, -1), 1, BLUE),
+            ("ROUNDEDCORNERS",(0, 0), (-1, -1), [6, 6, 6, 6]),
+        ]))
+        story += [cta_box, sp(20)]
+
+    # ── AGENT INFO BAR
+    story.append(rule(BORDER, 0.5))
+    story.append(sp(10))
+
+    # Build agent info — with optional brokerage logo on the right
+    agent_name_para  = Paragraph(req.agent_name, styles["agent_name"]) if req.agent_name else None
+    sub_parts = []
+    if req.brokerage:      sub_parts.append(req.brokerage)
+    if req.phone:          sub_parts.append(req.phone)
+    if req.email:          sub_parts.append(req.email)
+    if req.license_number: sub_parts.append(f"Lic. {req.license_number}")
+    if req.designations:   sub_parts.append(req.designations)
+    agent_sub_para = Paragraph("  ·  ".join(sub_parts), styles["agent_sub"]) if sub_parts else None
+
+    if req.include_logo and req.logo_b64:
+        try:
+            from reportlab.platypus import Image as RLImage
+            logo_bytes = base64.b64decode(req.logo_b64)
+            logo_buf   = io.BytesIO(logo_bytes)
+            logo_w     = 1.4 * inch
+            logo_h     = 0.5 * inch
+            logo_img   = RLImage(logo_buf, width=logo_w, height=logo_h)
+            logo_img.hAlign = "RIGHT"
+            left_col_w = CONTENT_W - logo_w - 0.2 * inch
+            agent_content = []
+            if agent_name_para:  agent_content.append(agent_name_para)
+            if agent_sub_para:   agent_content.append(agent_sub_para)
+            from reportlab.platypus import KeepTogether
+            agent_col  = agent_content
+            logo_table = Table(
+                [[col if i == 0 else logo_img for i, col in enumerate([agent_col, logo_img])]],
+                colWidths=[left_col_w, logo_w + 0.1 * inch]
+            ) if False else None  # placeholder — use flat layout below
+            # Flat layout: stack agent name/sub, then logo on same row as name
+            info_rows = []
+            if agent_name_para: info_rows.append([agent_name_para, logo_img])
+            if agent_sub_para:  info_rows.append([agent_sub_para, ""])
+            if info_rows:
+                info_tbl = Table(info_rows, colWidths=[left_col_w, logo_w + 0.1 * inch])
+                info_tbl.setStyle(TableStyle([
+                    ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN",         (1, 0), (1, -1),  "RIGHT"),
+                    ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+                    ("TOPPADDING",    (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]))
+                story.append(info_tbl)
+        except Exception:
+            # Logo failed — fall back to text only
+            if agent_name_para: story.append(agent_name_para)
+            if agent_sub_para:  story.append(agent_sub_para)
+    else:
+        if agent_name_para: story.append(agent_name_para)
+        if agent_sub_para:  story.append(agent_sub_para)
+
+    story.append(sp(10))
+
+    # ── DISCLAIMER
+    if req.disclaimer:
+        story += [
+            rule(BORDER, 0.3),
+            sp(4),
+            Paragraph(req.disclaimer, styles["disclaimer"]),
+            sp(6),
+        ]
+
+    # ── FOOTER
+    generated_date = datetime.utcnow().strftime("%B %d, %Y")
+    story += [
+        rule(BORDER, 0.3),
+        sp(4),
+        Paragraph(
+            f"Created with AutoMates — a product of HomeBridge Group, LLC · {generated_date} · automatesmarketing.com",
+            styles["footer"]
+        ),
+    ]
+
+    try:
+        doc.build(story)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Flyer PDF generation failed: {str(e)}")
+
+    pdf_bytes = buf.getvalue()
+    safe_name = (req.agent_name or "Agent").replace(" ", "_")
+    filename  = f"AutoMates_Flyer_{safe_name}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ─────────────────────────────────────────────
 # DIAGNOSTIC + MIGRATION — super_admin only
 # Debug endpoints removed — migrations complete, one-time use only.
