@@ -658,6 +658,24 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 print(f"[Scheduler] User {user_id} not found, skipping niche '{niche}'.")
                 continue
 
+            # ── Usage limit check — never generate beyond plan limit ─────────
+            # Protects against free trial agents running 12 niches daily and
+            # burning API credits that far exceed their $99/month subscription value.
+            from database import usage_check, usage_increment
+            role = user_row["role"] or "agent"
+            plan = user_row["plan"] or "trial"
+            if role not in ("super_admin", "admin"):
+                usage = usage_check(user_id, role, plan)
+                if not usage["allowed"]:
+                    print(f"[Scheduler] ✗ User {user_id} at generation limit ({usage['used']}/{usage['limit']}) — skipping niche '{niche}'. Resets: {usage['resets_on']}")
+                    failed_niches.append(niche)
+                    schedule_mark_ran(sched_id, _compute_next_run(
+                        sched.get("frequency", "weekly"),
+                        sched.get("time_of_day", "08:00"),
+                        sched.get("timezone", "America/Denver"),
+                    ))
+                    continue
+
             # ── Fetch hyper-local signals to enrich content generation ──────
             local_signal_trends = []
             try:
@@ -717,6 +735,9 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
             item_id  = saved_item.get("id")
             headline = content_to_save.get("headline", "Your scheduled content is ready")
             saved_items.append((niche, item_id, headline))
+            # Count this generation against the agent's monthly limit
+            if role not in ("super_admin", "admin"):
+                usage_increment(user_id)
             print(f"[Scheduler] ✓ Saved item {item_id} for user {user_id} / '{niche}'")
 
         except Exception as e:
