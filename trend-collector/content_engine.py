@@ -344,7 +344,7 @@ def _build_content_prompt(payload):
         + "─" * 40 + "\n"
         "{\n"
         '  "headline": "A clear, specific, human headline with a real point of view. One sentence, no period. Something worth sharing.",\n'
-        f'  "thumbnailIdea": "A grounded realistic visual concept specific to this niche and {market}. 1-2 sentences.",\n'
+        f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words that capture the visual scene. Use the local architecture style typical of {market} (ranch-style, craftsman, mid-century modern, or new construction — never colonial), the neighborhood feel, season, lighting, and niche context. No people, no agents. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk / Cherry Hills estate manicured lawn summer afternoon. Write only the brief, no sentences.",\n'
         f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
         f'  "post": "A full social post in {agent_name}\'s voice. Takes a real position. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
         '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
@@ -441,7 +441,7 @@ OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE
 {"─" * 40}
 {{
   "headline": "A sharp specific headline that a broker would immediately recognize as relevant. One sentence, no period. A point of view — not a product pitch.",
-  "thumbnailIdea": "A visual concept conveying technology, trust, or real estate professionalism. Modern, clean, not generic stock. 1-2 sentences.",
+  "thumbnailIdea": "A specific, concrete image brief for a real estate technology brand post. Write 6-10 descriptive words capturing the visual: modern office, laptop with dashboard, real estate agent reviewing content on screen, clean desk professional setting, city skyline background. No people's faces visible. No logos. No generic handshakes. Examples: 'modern home office laptop dashboard clean minimal natural light' or 'real estate agent reviewing phone screen coffee shop warm light'. Write only the brief — no sentences, no explanation.",
   "hashtags": "#hashtag1 #hashtag2 (8-10 tags — mix of real estate tech, brokerage management, PropTech)",
   "post": "A full LinkedIn/social post written as {company_name}. Reads like a company with a genuine point of view. Ends with: — {disclaimer}",
   "cta": "A low-pressure invitation — a conversation offer, not a sales command.",
@@ -3546,7 +3546,7 @@ HARD RULE: Never invent URLs. Only include URLs that appeared in your actual sea
 OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE:
 {{
   "headline": "A specific headline reflecting the most local data you found. One sentence, no period.",
-  "thumbnailIdea": "A realistic visual concept tied to the research. 1-2 sentences.",
+  "thumbnailIdea": "A specific, concrete image brief tied directly to the research findings and local market. Write 6-10 descriptive words — include the local architecture style, neighborhood character, season, and the market topic (price trends, new development, neighborhood activity). No people, no agents. Examples: 'Southmoor Park brick ranch homes quiet street spring tulips' or 'Greenwood Village luxury estate for sale sign evening light'. Write only the brief — no sentences, no explanation.",
   "hashtags": "#hashtag1 #hashtag2 (8-10 tags — include {market_str.split()[0]}-specific tags)",
   "post": "Full social post in {agent_name}'s voice. Uses real data from research. Takes a position. Includes 📍 Sources line with real URLs from search results. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
   "cta": "The CTA as specified — include booking URL if provided.",
