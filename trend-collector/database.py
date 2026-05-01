@@ -580,6 +580,7 @@ def migrate_content_library_columns():
         ("image_url",             "TEXT"),
         ("compliance_checked_at", "TEXT"),
         ("edited_at",             "TEXT"),
+        ("image_regen_count",     "INTEGER DEFAULT 0"),
     ]
     for col, coltype in columns:
         try:
@@ -1055,13 +1056,16 @@ def _row_to_item(row) -> dict:
     ctx = "agent"
     try: ctx = row["context"] or "agent"
     except Exception: pass
-    # FIX: include cir_id and image_url — columns exist in DB but were
+    # FIX: include cir_id, image_url, image_regen_count — columns exist in DB but were
     # never returned, so the frontend could never display them.
-    cir_id    = None
-    image_url = None
-    try: cir_id    = row["cir_id"]
+    cir_id            = None
+    image_url         = None
+    image_regen_count = 0
+    try: cir_id            = row["cir_id"]
     except Exception: pass
-    try: image_url = row["image_url"]
+    try: image_url         = row["image_url"]
+    except Exception: pass
+    try: image_regen_count = row["image_regen_count"] or 0
     except Exception: pass
     return {
         "id":              row["id"],
@@ -1078,6 +1082,7 @@ def _row_to_item(row) -> dict:
         "context":         ctx,
         "cir_id":              cir_id,
         "image_url":           image_url,
+        "image_regen_count":   image_regen_count,
         "editedAt":            row["edited_at"]            if "edited_at"            in row.keys() else None,
         "complianceCheckedAt": row["compliance_checked_at"] if "compliance_checked_at" in row.keys() else None,
     }
