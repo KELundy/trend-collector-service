@@ -3585,19 +3585,36 @@ HARD RULES:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error parsing Claude response: {str(e)}")
 
-    # Run compliance check
+    # Run compliance checks — Pass 1 (phrase matching) and Pass 2 (Claude semantic)
+    # run concurrently in a thread pool since both are sync functions and
+    # Pass 2 is a full Claude API call that previously added ~10s sequentially.
+    import asyncio as _asyncio
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
     mls_names = profile.mlsNames or []
     state     = profile.state or ""
 
-    # Pass 1
-    p1_badge, profile_name = _run_compliance_check(
-        raw_text, agent_name, brokerage, mls_names,
-        niche=niche, content_mode="agent", state=state,
-    )
-    # Pass 2
-    semantic = _run_semantic_compliance_check(
-        raw_text, profile_name=profile_name, state=state, niche=niche
-    )
+    loop = _asyncio.get_event_loop()
+    with _TPE(max_workers=2) as pool:
+        p1_future = loop.run_in_executor(
+            pool,
+            lambda: _run_compliance_check(
+                raw_text, agent_name, brokerage, mls_names,
+                niche=niche, content_mode="agent", state=state,
+            )
+        )
+        # Pass 2 needs profile_name from Pass 1 — but profile_name is derived
+        # purely from agent_name/brokerage, not from Pass 1 results.
+        # Compute it cheaply here so Pass 2 can run in parallel.
+        _profile_name_early = f"{agent_name} | {brokerage}" if brokerage else agent_name
+        p2_future = loop.run_in_executor(
+            pool,
+            lambda: _run_semantic_compliance_check(
+                raw_text, profile_name=_profile_name_early, state=state, niche=niche
+            )
+        )
+        (p1_badge, profile_name), semantic = await _asyncio.gather(p1_future, p2_future)
+
     # Merge
     compliance = _build_final_badge(
         p1_badge, profile_name, semantic, state=state,
