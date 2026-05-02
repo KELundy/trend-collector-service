@@ -2525,12 +2525,12 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
                 "https://api.openai.com/v1/images/generations",
                 headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
                 json={
-                    "model":           "gpt-image-2",
-                    "prompt":          prompt[:4000],
-                    "n":               1,
-                    "size":            "1536x1024",
-                    "quality":         "low",        # cost-efficient for testing; change to "medium" or "high" for production
-                    "response_format": "b64_json",   # base64 — permanent, no URL expiry
+                    "model":   "gpt-image-2",
+                    "prompt":  prompt[:4000],
+                    "n":       1,
+                    "size":    "1024x1024",   # gpt-image-2 supported sizes: 1024x1024, 1024x1536, 1536x1024
+                    "quality": "low",         # cost-efficient for testing; change to "medium" or "high" for production
+                    # response_format not supported by gpt-image-2 — it returns b64_json by default
                 }
             )
     except Exception as e:
