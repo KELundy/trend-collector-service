@@ -204,6 +204,26 @@ async def oauth_callback(platform: str, request: Request):
                 me_data          = me.json()
                 platform_user_id = me_data.get("id", "")
                 platform_handle  = me_data.get("name", "")
+                # Exchange short-lived user token for long-lived token (60 days)
+                try:
+                    ll_resp = await client.get(
+                        "https://graph.facebook.com/v19.0/oauth/access_token",
+                        params={
+                            "grant_type":        "fb_exchange_token",
+                            "client_id":         META_APP_ID,
+                            "client_secret":     META_APP_SECRET,
+                            "fb_exchange_token": access_token,
+                        }
+                    )
+                    ll_data = ll_resp.json()
+                    if ll_data.get("access_token"):
+                        access_token = ll_data["access_token"]
+                        # Long-lived tokens expire in ~60 days
+                        ll_expires_in = ll_data.get("expires_in", 5184000)
+                        expires_at = (datetime.utcnow() + timedelta(seconds=ll_expires_in)).isoformat()
+                        print(f"[Facebook] Long-lived token obtained for user {user_id}, expires in {ll_expires_in}s")
+                except Exception as e:
+                    print(f"[Facebook] Long-lived token exchange failed: {e} — using short-lived token")
                 # Fetch pages immediately while we have a valid token
                 if platform_user_id:
                     pages_resp = await client.get(
@@ -319,7 +339,10 @@ class FacebookPageSelectRequest(BaseModel):
 
 @router.post("/facebook/select-page")
 async def facebook_select_page(body: FacebookPageSelectRequest, current_user=Depends(get_current_user)):
-    """Store the selected Facebook page token directly for this user."""
+    """Store the selected Facebook page token directly for this user.
+    Exchanges the short-lived page token for a never-expiring page token
+    using the long-lived user token already stored in the database.
+    """
     user_id = current_user["id"]
 
     # Get existing connection to preserve user token and other fields
@@ -327,7 +350,27 @@ async def facebook_select_page(body: FacebookPageSelectRequest, current_user=Dep
     if not conn_data:
         raise HTTPException(400, "No Facebook connection found. Please reconnect Facebook first.")
 
-    # Update connection with the selected page token and page handle
+    # Exchange page token for never-expiring page token
+    # Page tokens obtained from a long-lived user token never expire
+    final_page_token = body.page_token
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Use the stored long-lived user token to get a permanent page token
+            user_token = conn_data["access_token"]
+            accounts_resp = await client.get(
+                f"https://graph.facebook.com/v19.0/{body.page_id}",
+                params={"fields": "access_token", "access_token": user_token}
+            )
+            accounts_data = accounts_resp.json()
+            if accounts_data.get("access_token"):
+                final_page_token = accounts_data["access_token"]
+                print(f"[Facebook] Never-expiring page token obtained for page {body.page_id}")
+            else:
+                print(f"[Facebook] Could not get permanent page token — using provided token. Response: {accounts_data}")
+    except Exception as e:
+        print(f"[Facebook] Page token exchange failed: {e} — using provided token")
+
+    # Update connection with the permanent page token
     database.save_platform_connection(
         user_id          = user_id,
         platform         = "facebook",
@@ -336,7 +379,7 @@ async def facebook_select_page(body: FacebookPageSelectRequest, current_user=Dep
         expires_at       = conn_data.get("expires_at", ""),
         platform_user_id = conn_data.get("platform_user_id", ""),
         platform_handle  = body.page_name,
-        page_token       = body.page_token,
+        page_token       = final_page_token,
     )
 
     # Clear the pages cache for this user
