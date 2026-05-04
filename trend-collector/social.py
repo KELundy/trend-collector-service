@@ -255,6 +255,40 @@ async def disconnect_platform(platform: str, current_user=Depends(get_current_us
 # ─────────────────────────────────────────────
 # ROUTE 5: Post content
 # ─────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────
+# ROUTE 5b: Facebook page token helper
+# Fetches page tokens for the connected Facebook account.
+# Use to get a fresh page token to store in FACEBOOK_PAGE_TOKEN env var.
+# ─────────────────────────────────────────────
+@router.get("/facebook/page-token")
+async def get_facebook_page_token(current_user=Depends(get_current_user)):
+    conn_data = database.get_platform_connection(current_user["id"], "facebook")
+    if not conn_data:
+        raise HTTPException(400, "No Facebook account connected. Connect it in Profile first.")
+
+    user_token = conn_data["access_token"]
+    user_id    = conn_data.get("platform_user_id", "")
+
+    if not user_id:
+        raise HTTPException(400, "Facebook user ID not found. Please reconnect Facebook in Profile.")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"https://graph.facebook.com/v19.0/{user_id}/accounts",
+            params={"access_token": user_token}
+        )
+
+    data      = resp.json()
+    page_list = data.get("data", [])
+
+    if not page_list:
+        raise HTTPException(400, f"No Facebook Pages found. Facebook response: {data}")
+
+    pages = [{"name": p.get("name",""), "id": p.get("id",""), "access_token": p.get("access_token","")} for p in page_list]
+    return {"ok": True, "pages": pages}
+
 class PostRequest(BaseModel):
     library_item_id: Optional[int] = None
     platform: str
