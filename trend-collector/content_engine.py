@@ -150,7 +150,32 @@ def _build_content_prompt(payload):
     selected_trends = ", ".join(payload.selectedTrends)    or "current market activity"
 
     tone_text    = f"Voice: {payload.tone}.\n"    if payload.tone   else f"Voice: {brand_voice}.\n"
-    length_text  = f"Length: {payload.length}.\n" if payload.length else "Length: medium.\n"
+    # ── Content length — precise definitions, not just a word ──────────────────
+    _length_val = (payload.length or "medium").lower().strip()
+    if _length_val == "short":
+        length_text = (
+            "LENGTH — SHORT FORM: 50-80 words MAXIMUM. This is a scroll-stopper, not an article. "
+            "One sharp observation or human moment. Maximum 3 sentences. No lists, no headers, no breakdown sections. "
+            "Write like a text message from a smart friend — immediate, specific, human. "
+            "If it takes more than 20 seconds to read, it is too long. Cut ruthlessly.\n"
+        )
+    elif _length_val == "long":
+        length_text = (
+            "LENGTH — LONG FORM: 400-600 words. This is a genuine article-style piece. "
+            "Structure: open with a specific observation or situation (1 paragraph), "
+            "build a real argument with local context and specific details (3-4 paragraphs), "
+            "include at least one concrete example or scenario from this market, "
+            "end with a position statement and a conversation-starting question (1 paragraph). "
+            "This piece should be worth saving. It should feel like the agent sat down and actually wrote something. "
+            "Do not pad with generic advice. Every paragraph must earn its place.\n"
+        )
+    else:  # medium (default)
+        length_text = (
+            "LENGTH — MEDIUM FORM: 150-250 words. One clear position with 2-3 supporting points. "
+            "Reads in under 90 seconds. Include one quotable line that could stand alone as a screenshot. "
+            "No more than 4 short paragraphs. No lengthy breakdowns or numbered lists unless essential. "
+            "This is the standard LinkedIn post — substantive but not exhausting.\n"
+        )
     avoid_text   = f"Never use these words or phrases: {words_avoid}.\n" if words_avoid else ""
     prefer_text  = f"Naturally weave in these words or phrases: {words_prefer}.\n" if words_prefer else ""
     bio_text     = f"About {agent_name}: {short_bio}\n" if short_bio else ""
