@@ -66,7 +66,7 @@ PLATFORMS = {
     "facebook": {
         "auth_url":      "https://www.facebook.com/v19.0/dialog/oauth",
         "token_url":     "https://graph.facebook.com/v19.0/oauth/access_token",
-        "scopes":        "pages_manage_posts,pages_read_engagement,instagram_content_publish,instagram_basic",
+        "scopes":        "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_content_publish,instagram_basic",
         "client_id":     META_APP_ID,
         "client_secret": META_APP_SECRET,
         "redirect_uri":  f"{BACKEND_URL}/social/facebook/callback",
