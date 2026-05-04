@@ -295,6 +295,11 @@ def init_db():
             UNIQUE(user_id, platform)
         )
     """)
+    # Non-destructive: add page_token to platform_connections (Plan B Facebook page picker)
+    try:
+        c.execute("ALTER TABLE platform_connections ADD COLUMN page_token TEXT DEFAULT ''")
+    except Exception:
+        pass  # Column already exists
 
     # Platform posts — PaperTrail audit of published content
     c.execute("""
@@ -698,24 +703,26 @@ def log_audit_event(actor_id: int, action: str,
 # ─────────────────────────────────────────────
 def save_platform_connection(user_id: int, platform: str, access_token: str,
                               refresh_token: str, expires_at: str,
-                              platform_user_id: str, platform_handle: str):
+                              platform_user_id: str, platform_handle: str,
+                              page_token: str = ""):
     """Insert or replace a platform OAuth connection for a user."""
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
         INSERT INTO platform_connections
             (user_id, platform, access_token, refresh_token, expires_at,
-             platform_user_id, platform_handle, connected_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             platform_user_id, platform_handle, page_token, connected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(user_id, platform) DO UPDATE SET
             access_token     = excluded.access_token,
             refresh_token    = excluded.refresh_token,
             expires_at       = excluded.expires_at,
             platform_user_id = excluded.platform_user_id,
             platform_handle  = excluded.platform_handle,
+            page_token       = excluded.page_token,
             connected_at     = datetime('now')
     """, (user_id, platform, access_token, refresh_token, expires_at,
-          platform_user_id, platform_handle))
+          platform_user_id, platform_handle, page_token))
     conn.commit()
     conn.close()
 
@@ -742,7 +749,7 @@ def get_platform_connection(user_id: int, platform: str) -> Optional[dict]:
     c = conn.cursor()
     c.execute("""
         SELECT platform, access_token, refresh_token, expires_at,
-               platform_user_id, platform_handle, connected_at
+               platform_user_id, platform_handle, page_token, connected_at
         FROM platform_connections
         WHERE user_id = ? AND platform = ?
     """, (user_id, platform))
