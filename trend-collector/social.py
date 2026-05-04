@@ -88,6 +88,10 @@ PLATFORMS = {
 # ─────────────────────────────────────────────
 _oauth_states: dict = {}
 
+# Temporary in-memory cache of Facebook pages fetched during OAuth callback
+# Keyed by user_id — cleared after page selection
+_fb_pages_cache: dict = {}
+
 def _store_state(user_id: int, platform: str) -> str:
     state = secrets.token_urlsafe(24)
     _oauth_states[state] = {
@@ -200,6 +204,13 @@ async def oauth_callback(platform: str, request: Request):
                 me_data          = me.json()
                 platform_user_id = me_data.get("id", "")
                 platform_handle  = me_data.get("name", "")
+                # Fetch pages immediately while we have a valid token
+                if platform_user_id:
+                    pages_resp = await client.get(
+                        f"https://graph.facebook.com/v19.0/{platform_user_id}/accounts",
+                        params={"access_token": access_token}
+                    )
+                    _fb_pages_cache[user_id] = pages_resp.json().get("data", [])
 
             elif platform == "youtube":
                 me               = await client.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"}, headers={"Authorization": f"Bearer {access_token}"})
@@ -221,6 +232,12 @@ async def oauth_callback(platform: str, request: Request):
         platform_user_id=platform_user_id,
         platform_handle=platform_handle,
     )
+
+    # Facebook: if pages found, send to page picker instead of direct connect
+    if platform == "facebook" and _fb_pages_cache.get(user_id):
+        import urllib.parse as _ul
+        pages_json = _ul.quote(json.dumps(_fb_pages_cache[user_id]))
+        return RedirectResponse(f"{FRONTEND_URL}?select_page=facebook&pages={pages_json}&handle={platform_handle}")
 
     return RedirectResponse(f"{FRONTEND_URL}?connected={platform}&handle={platform_handle}")
 
@@ -289,6 +306,44 @@ async def get_facebook_page_token(current_user=Depends(get_current_user)):
     pages = [{"name": p.get("name",""), "id": p.get("id",""), "access_token": p.get("access_token","")} for p in page_list]
     return {"ok": True, "pages": pages}
 
+
+# ─────────────────────────────────────────────
+# ROUTE 5c: Facebook page selection
+# Called after agent picks their page in the page picker UI.
+# Stores the page token directly — no more dynamic lookup at post time.
+# ─────────────────────────────────────────────
+class FacebookPageSelectRequest(BaseModel):
+    page_id: str
+    page_name: str
+    page_token: str
+
+@router.post("/facebook/select-page")
+async def facebook_select_page(body: FacebookPageSelectRequest, current_user=Depends(get_current_user)):
+    """Store the selected Facebook page token directly for this user."""
+    user_id = current_user["id"]
+
+    # Get existing connection to preserve user token and other fields
+    conn_data = database.get_platform_connection(user_id, "facebook")
+    if not conn_data:
+        raise HTTPException(400, "No Facebook connection found. Please reconnect Facebook first.")
+
+    # Update connection with the selected page token and page handle
+    database.save_platform_connection(
+        user_id          = user_id,
+        platform         = "facebook",
+        access_token     = conn_data["access_token"],
+        refresh_token    = conn_data.get("refresh_token", ""),
+        expires_at       = conn_data.get("expires_at", ""),
+        platform_user_id = conn_data.get("platform_user_id", ""),
+        platform_handle  = body.page_name,
+        page_token       = body.page_token,
+    )
+
+    # Clear the pages cache for this user
+    _fb_pages_cache.pop(user_id, None)
+
+    return {"ok": True, "page_name": body.page_name, "page_id": body.page_id}
+
 class PostRequest(BaseModel):
     library_item_id: Optional[int] = None
     platform: str
@@ -338,7 +393,7 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
         elif platform == "google":
             result = await _post_google(access_token, post_text)
         elif platform == "facebook":
-            result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
+            result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text, image_url, conn_data.get("page_token", ""))
         elif platform == "youtube":
             result = await _post_youtube(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
         else:
@@ -502,12 +557,23 @@ async def _post_google(access_token: str, text: str) -> dict:
 # Development mode for accounts not registered as app developers/testers.
 # The page token is a permanent token tied directly to the HomeBridge Group page.
 # ─────────────────────────────────────────────
-async def _post_facebook(access_token: str, user_id: str, text: str, image_url: str = None) -> dict:
-    page_token = os.getenv("FACEBOOK_PAGE_TOKEN", "")
-    page_id    = os.getenv("FACEBOOK_PAGE_ID", "")
+async def _post_facebook(access_token: str, user_id: str, text: str, image_url: str = None, page_token: str = "") -> dict:
+    # Use stored page token from database (set during page picker flow)
+    # Fall back to FACEBOOK_PAGE_TOKEN env var for backward compatibility
+    page_id = os.getenv("FACEBOOK_PAGE_ID", "")
+    if not page_token:
+        page_token = os.getenv("FACEBOOK_PAGE_TOKEN", "")
 
-    if not page_token or not page_id:
-        raise HTTPException(500, "Facebook page token or page ID not configured. Check Render environment variables FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID.")
+    if not page_token:
+        raise HTTPException(400, "No Facebook page token found. Please reconnect Facebook and select your page.")
+    if not page_id and not page_token:
+        raise HTTPException(500, "Facebook page not configured.")
+
+    # If we have a page token but no page_id, extract page_id from the token owner
+    if not page_id:
+        async with httpx.AsyncClient(timeout=10) as client:
+            me = await client.get("https://graph.facebook.com/me", params={"access_token": page_token, "fields": "id"})
+            page_id = me.json().get("id", "")
 
     post_data   = {"message": text, "access_token": page_token}
     fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/feed"
