@@ -48,7 +48,7 @@ PLATFORMS = {
     "linkedin": {
         "auth_url":      "https://www.linkedin.com/oauth/v2/authorization",
         "token_url":     "https://www.linkedin.com/oauth/v2/accessToken",
-        "scopes":        "openid profile w_member_social w_organization_social rw_organization_admin",
+        "scopes":        "openid profile email w_member_social",
         "client_id":     LINKEDIN_CLIENT_ID,
         "client_secret": LINKEDIN_CLIENT_SECRET,
         "redirect_uri":  f"{BACKEND_URL}/social/linkedin/callback",
