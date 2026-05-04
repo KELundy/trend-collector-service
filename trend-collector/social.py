@@ -354,6 +354,14 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
     media_asset = None
     if image_url:
         try:
+            import base64 as _base64
+            # Handle base64 data URI — decode to raw bytes
+            if image_url.startswith("data:"):
+                _header, b64data = image_url.split(",", 1)
+                image_bytes = _base64.b64decode(b64data)
+            else:
+                image_bytes = None
+
             async with httpx.AsyncClient(timeout=30) as client:
                 reg = await client.post(
                     "https://api.linkedin.com/v2/assets?action=registerUpload",
@@ -368,14 +376,18 @@ async def _post_linkedin(access_token: str, person_urn: str, text: str, image_ur
                     reg_data    = reg.json()
                     upload_url  = reg_data["value"]["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
                     media_asset = reg_data["value"]["asset"]
-                    img_resp    = await client.get(image_url)
-                    if img_resp.status_code == 200:
-                        put_resp = await client.put(upload_url, content=img_resp.content, headers={"Authorization": f"Bearer {access_token}"})
-                        if put_resp.status_code not in (200, 201):
-                            print(f"[LinkedIn] Image PUT failed {put_resp.status_code}: {put_resp.text[:200]}")
-                            media_asset = None
+                    put_resp    = None
+                    if image_bytes is not None:
+                        put_resp = await client.put(upload_url, content=image_bytes, headers={"Authorization": f"Bearer {access_token}", "Content-Type": "image/png"})
                     else:
-                        print(f"[LinkedIn] Image fetch failed {img_resp.status_code} — URL may have expired. Posting text-only.")
+                        img_resp = await client.get(image_url)
+                        if img_resp.status_code == 200:
+                            put_resp = await client.put(upload_url, content=img_resp.content, headers={"Authorization": f"Bearer {access_token}"})
+                        else:
+                            print(f"[LinkedIn] Image fetch failed {img_resp.status_code} — posting text-only.")
+                            media_asset = None
+                    if put_resp and put_resp.status_code not in (200, 201):
+                        print(f"[LinkedIn] Image PUT failed {put_resp.status_code}: {put_resp.text[:200]}")
                         media_asset = None
         except Exception as e:
             print(f"[LinkedIn] Image upload exception: {e}")
@@ -466,13 +478,27 @@ async def _post_facebook(access_token: str, user_id: str, text: str, image_url: 
 
     post_data   = {"message": text, "access_token": page_token}
     fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/feed"
-    if image_url:
-        fb_endpoint          = f"https://graph.facebook.com/v19.0/{page_id}/photos"
-        post_data["url"]     = image_url
-        post_data["caption"] = text
 
     async with httpx.AsyncClient() as client:
-        resp = await client.post(fb_endpoint, data=post_data)
+        if image_url:
+            import base64 as _base64
+            # Handle base64 data URI — send raw bytes to Facebook /photos endpoint
+            if image_url.startswith("data:"):
+                _header, b64data = image_url.split(",", 1)
+                image_bytes = _base64.b64decode(b64data)
+                fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/photos"
+                resp = await client.post(
+                    fb_endpoint,
+                    data={"caption": text, "access_token": page_token},
+                    files={"source": ("image.png", image_bytes, "image/png")},
+                )
+            else:
+                fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/photos"
+                post_data["url"]     = image_url
+                post_data["caption"] = text
+                resp = await client.post(fb_endpoint, data=post_data)
+        else:
+            resp = await client.post(fb_endpoint, data=post_data)
 
     if resp.status_code not in (200, 201):
         raise HTTPException(502, f"Facebook API error {resp.status_code}: {resp.text}")
