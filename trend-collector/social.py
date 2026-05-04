@@ -462,19 +462,18 @@ async def _post_google(access_token: str, text: str) -> dict:
 
 # ─────────────────────────────────────────────
 # PLATFORM POSTING — Facebook Page
+#
+# Uses FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID from Render env vars directly.
+# This bypasses the /{user_id}/accounts lookup which fails in Facebook
+# Development mode for accounts not registered as app developers/testers.
+# The page token is a permanent token tied directly to the HomeBridge Group page.
 # ─────────────────────────────────────────────
 async def _post_facebook(access_token: str, user_id: str, text: str, image_url: str = None) -> dict:
-    async with httpx.AsyncClient() as client:
-        pages     = await client.get(f"https://graph.facebook.com/v19.0/{user_id}/accounts", params={"access_token": access_token})
-        page_data = pages.json()
+    page_token = os.getenv("FACEBOOK_PAGE_TOKEN", "")
+    page_id    = os.getenv("FACEBOOK_PAGE_ID", "")
 
-    page_list = page_data.get("data", [])
-    if not page_list:
-        raise HTTPException(400, "No Facebook Pages found. You need a Facebook Page to post.")
-
-    page       = page_list[0]
-    page_id    = page["id"]
-    page_token = page["access_token"]
+    if not page_token or not page_id:
+        raise HTTPException(500, "Facebook page token or page ID not configured. Check Render environment variables FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID.")
 
     post_data   = {"message": text, "access_token": page_token}
     fb_endpoint = f"https://graph.facebook.com/v19.0/{page_id}/feed"
