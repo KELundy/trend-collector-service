@@ -108,6 +108,7 @@ class ContentRequest(BaseModel):
     timestamp: Optional[str] = None
     content_mode: Optional[str] = Field("agent")
     generation_mode: Optional[str] = Field(None)   # "guided" | "idea" | "freeform" | "pulse" | "intel"
+    personal_mode:   Optional[bool] = Field(False)  # freeform only — True = purely personal, no RE bridge/CTA/image
 
 
 def _get_anthropic_client():
@@ -566,83 +567,141 @@ def _build_freeform_content_prompt(payload):
         lang_instruction = ""
 
     market_first_word = market.split()[0].replace(",", "")
+    raw_thought       = payload.situation
+    personal_mode     = bool(getattr(payload, "personal_mode", False))
 
-    raw_thought = payload.situation  # frontend sends the thought as the situation field
-
-    return (
+    # ── Shared opening ────────────────────────────────────────────────────────
+    opening = (
         f"You are ghostwriting for {agent_display}, a real estate professional in {market}.\n\n"
         f"WHO {agent_name.upper()} IS\n"
         + "─" * 40 + "\n"
         + bio_text
-        + f"Market: {market}\n"
-        + f"Specialization: {primary_categories}\n"
         + f"Voice: {brand_voice}\n"
         + (lang_instruction if lang_instruction else "")
         + avoid_text + prefer_text
         + f"\nTHE AGENT'S RAW THOUGHT\n"
         + "─" * 40 + "\n"
         + f"\"{raw_thought}\"\n\n"
-        "This is what was on the agent's mind. It may be personal. It may seem unrelated to real estate. "
-        "That is fine — and it is actually the point.\n\n"
-        "YOUR JOB AS THE WRITER\n"
-        + "─" * 40 + "\n"
-        "1. HONOR THE THOUGHT FIRST. Do not discard it or bury it. The raw observation is the soul of the post. "
-        "Start there. Let the reader feel it.\n\n"
-        "2. FIND THE HUMAN TRUTH IN IT. Every genuine thought contains something universal — "
-        "a tension, a realization, a moment of clarity. Name it.\n\n"
-        f"3. BRIDGE NATURALLY TO THE AGENT'S WORLD. Once the human truth is established, "
-        f"connect it to what {agent_name} does — their market, their clients, their niche. "
-        "This bridge must feel inevitable, not forced. If it feels like a stretch, you have bridged too early. "
-        "The real estate connection should arrive like a quiet realization, not an advertisement.\n\n"
-        "4. NEVER LET THE REAL ESTATE CONTENT SWALLOW THE THOUGHT. The post should feel like "
-        "a real person thinking out loud who happens to be a real estate professional — "
-        "not a real estate professional who found an excuse to talk about property.\n\n"
-        "WHAT THIS SHOULD FEEL LIKE\n"
-        + "─" * 40 + "\n"
-        "The best version of this post reads like something a trusted colleague sent you at 7am — "
-        "a thought they couldn't shake, written while it was still fresh. "
-        "It makes the reader pause. It makes them feel something. "
-        "It ends with a question that invites a real reply — not a generic 'what do you think?'\n\n"
-        "LENGTH\n"
-        + "─" * 40 + "\n"
-        "Medium form: 150-250 words. One human observation, one clear bridge, one genuine question at the end. "
-        "No headers. No bullet points. No lists. Just a person thinking in paragraphs.\n\n"
-        "BANNED FOREVER\n"
-        + "─" * 40 + "\n"
-        "- Forced real estate pivots: 'Speaking of which, the Denver market...' — never\n"
-        "- Hype phrases: 'game-changer', 'incredible opportunity', 'the market is on fire'\n"
-        "- 'Call me today' as the opener or the whole point\n"
-        "- Exclamation points used to manufacture excitement\n"
-        "- Generic prompts to 'like, share, and follow'\n"
-        "- Hedge language: 'it depends,' 'every situation is different'\n\n"
-        f"IDENTITY RULES\n"
-        + "─" * 40 + "\n"
-        f"1. {agent_name} must appear naturally as a first-person voice or sign-off.\n"
-        f"2. {brokerage_disclosure}\n"
-        f"3. The script must sound like someone actually talking — natural pauses, real sentences.\n\n"
-        "COMPLIANCE RULES\n"
-        + "─" * 40 + "\n"
-        "- Fair Housing Act: No language implying preference by protected class.\n"
-        "- NAR Code of Ethics Article 12: Truthful only. No guaranteed outcomes.\n"
-        f"- Brokerage disclosure: {brokerage or 'the agent'} must be identifiable.\n\n"
-        f"THE CTA FIELD\n{cta_instruction}\n\n"
-        "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
-        + "─" * 40 + "\n"
-        "{\n"
-        '  "headline": "A human, specific headline that captures the essence of the thought — not a real estate tagline. One sentence, no period.",\n'
-        f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words. Use the local feel of {market} (ranch-style, craftsman, mid-century modern, or new construction). No people. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk.",\n'
-        f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
-        f'  "post": "The full social post. Starts with the human thought. Bridges naturally to {agent_name}\'s world. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
-        '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
-        '  "script": "A 45-60 second spoken version of the post. Same soul, same thought, same bridge. Sounds like a real person talking — not a news anchor. Natural pauses marked with \' / \'."\n'
-        "}\n\n"
-        "HARD RULES:\n"
-        "- Every value must be complete — no placeholders\n"
-        f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
-        "- post MUST end with a genuine question (not generic)\n"
-        "- No line breaks inside JSON string values — use spaces between sentences\n"
-        "- Return ONLY the JSON object."
     )
+
+    if personal_mode:
+        # ── PERSONAL MODE — pure human post, zero real estate ────────────────
+        # No bridge. No CTA url. No neighborhood image. Just the person.
+        return (
+            opening
+            + "This is a purely personal post. The agent is sharing a human thought — "
+            "not promoting their business, not bridging to real estate, not selling anything.\n\n"
+            "YOUR JOB AS THE WRITER\n"
+            + "─" * 40 + "\n"
+            "1. HONOR THE THOUGHT EXACTLY. Do not redirect it toward real estate under any circumstances.\n\n"
+            "2. FIND THE HUMAN TRUTH IN IT. What is the universal feeling or observation here? Name it clearly.\n\n"
+            "3. STAY FULLY PERSONAL. No real estate pivot. No housing metaphors. No mention of clients, "
+            "markets, or transactions. This post could have been written by a teacher, a nurse, a chef — "
+            f"it just happens to be signed by {agent_name}.\n\n"
+            "4. END WITH A GENUINE QUESTION that invites real replies from real people. "
+            "Not 'what do you think?' — something specific to the thought.\n\n"
+            "LENGTH\n"
+            + "─" * 40 + "\n"
+            "100-200 words. Tight. A person thinking out loud, not writing an essay. "
+            "No headers. No bullet points. Pure paragraphs.\n\n"
+            "BANNED FOREVER\n"
+            + "─" * 40 + "\n"
+            "- Any mention of real estate, housing, home buying, home selling, or the market\n"
+            "- Any CTA to book a call or contact the agent\n"
+            "- Any neighborhood or city reference used as a real estate signal\n"
+            "- Exclamation points used to manufacture excitement\n"
+            "- Generic prompts to 'like, share, and follow'\n\n"
+            f"IDENTITY RULES\n"
+            + "─" * 40 + "\n"
+            f"1. Write in first person as {agent_name}.\n"
+            f"2. {brokerage_disclosure}\n\n"
+            "COMPLIANCE RULES\n"
+            + "─" * 40 + "\n"
+            "- Fair Housing Act: No language implying preference by protected class.\n"
+            "- NAR Code of Ethics Article 12: Truthful only.\n\n"
+            "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
+            + "─" * 40 + "\n"
+            "{\n"
+            '  "headline": "A human headline that captures the thought — not a real estate tagline. One sentence, no period.",\n'
+            '  "thumbnailIdea": "A warm, personal, non-real-estate image — a quiet morning scene, an open notebook, hands around a coffee cup, a window with soft light. 6-8 descriptive words. No homes, no neighborhoods, no for-sale signs.",\n'
+            f'  "hashtags": "#hashtag1 #hashtag2 (6-8 tags — personal, human, reflective — no real estate tags)",\n'
+            f'  "post": "The purely personal post. No real estate. Ends with a genuine question. Ends with: — {agent_name}{brokerage_footer}",\n'
+            '  "cta": "No call to action — leave this field as an empty string.",\n'
+            '  "script": "A 30-45 second spoken version. Personal, reflective, genuine. No sales language. Natural pauses marked with \' / \'."\n'
+            "}\n\n"
+            "HARD RULES:\n"
+            "- Every value must be complete — no placeholders\n"
+            f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} as a quiet sign-off\n'
+            "- cta MUST be an empty string — no booking links, no contact info\n"
+            "- post MUST contain zero real estate language\n"
+            "- No line breaks inside JSON string values\n"
+            "- Return ONLY the JSON object."
+        )
+    else:
+        # ── CONNECT MODE — human thought bridged naturally to agent's world ───
+        return (
+            opening
+            + "This is what was on the agent's mind. It may be personal. It may seem unrelated to real estate. "
+            "That is fine — and it is actually the point.\n\n"
+            "YOUR JOB AS THE WRITER\n"
+            + "─" * 40 + "\n"
+            "1. HONOR THE THOUGHT FIRST. Do not discard it or bury it. The raw observation is the soul of the post. "
+            "Start there. Let the reader feel it.\n\n"
+            "2. FIND THE HUMAN TRUTH IN IT. Every genuine thought contains something universal — "
+            "a tension, a realization, a moment of clarity. Name it.\n\n"
+            f"3. BRIDGE NATURALLY TO THE AGENT'S WORLD. Once the human truth is established, "
+            f"connect it to what {agent_name} does — their market, their clients, their niche. "
+            "This bridge must feel inevitable, not forced. If it feels like a stretch, you have bridged too early. "
+            "The real estate connection should arrive like a quiet realization, not an advertisement.\n\n"
+            "4. NEVER LET THE REAL ESTATE CONTENT SWALLOW THE THOUGHT. The post should feel like "
+            "a real person thinking out loud who happens to be a real estate professional — "
+            "not a real estate professional who found an excuse to talk about property.\n\n"
+            "WHAT THIS SHOULD FEEL LIKE\n"
+            + "─" * 40 + "\n"
+            "The best version of this post reads like something a trusted colleague sent you at 7am — "
+            "a thought they couldn't shake, written while it was still fresh. "
+            "It makes the reader pause. It makes them feel something. "
+            "It ends with a question that invites a real reply — not a generic 'what do you think?'\n\n"
+            "LENGTH\n"
+            + "─" * 40 + "\n"
+            "Medium form: 150-250 words. One human observation, one clear bridge, one genuine question at the end. "
+            "No headers. No bullet points. No lists. Just a person thinking in paragraphs.\n\n"
+            "BANNED FOREVER\n"
+            + "─" * 40 + "\n"
+            "- Forced real estate pivots: 'Speaking of which, the Denver market...' — never\n"
+            "- Hype phrases: 'game-changer', 'incredible opportunity', 'the market is on fire'\n"
+            "- 'Call me today' as the opener or the whole point\n"
+            "- Exclamation points used to manufacture excitement\n"
+            "- Generic prompts to 'like, share, and follow'\n"
+            "- Hedge language: 'it depends,' 'every situation is different'\n\n"
+            f"IDENTITY RULES\n"
+            + "─" * 40 + "\n"
+            f"1. {agent_name} must appear naturally as a first-person voice or sign-off.\n"
+            f"2. {brokerage_disclosure}\n"
+            f"3. The script must sound like someone actually talking — natural pauses, real sentences.\n\n"
+            "COMPLIANCE RULES\n"
+            + "─" * 40 + "\n"
+            "- Fair Housing Act: No language implying preference by protected class.\n"
+            "- NAR Code of Ethics Article 12: Truthful only. No guaranteed outcomes.\n"
+            f"- Brokerage disclosure: {brokerage or 'the agent'} must be identifiable.\n\n"
+            f"THE CTA FIELD\n{cta_instruction}\n\n"
+            "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
+            + "─" * 40 + "\n"
+            "{\n"
+            '  "headline": "A human, specific headline that captures the essence of the thought — not a real estate tagline. One sentence, no period.",\n'
+            f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words. Use the local feel of {market} (ranch-style, craftsman, mid-century modern, or new construction). No people. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk.",\n'
+            f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
+            f'  "post": "The full social post. Starts with the human thought. Bridges naturally to {agent_name}\'s world. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
+            '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
+            '  "script": "A 45-60 second spoken version of the post. Same soul, same thought, same bridge. Sounds like a real person talking — not a news anchor. Natural pauses marked with \' / \'."\n'
+            "}\n\n"
+            "HARD RULES:\n"
+            "- Every value must be complete — no placeholders\n"
+            f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
+            "- post MUST end with a genuine question (not generic)\n"
+            "- No line breaks inside JSON string values — use spaces between sentences\n"
+            "- Return ONLY the JSON object."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
