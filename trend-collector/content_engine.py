@@ -107,6 +107,7 @@ class ContentRequest(BaseModel):
     selectedTrends: List[str] = Field(default_factory=list)
     timestamp: Optional[str] = None
     content_mode: Optional[str] = Field("agent")
+    generation_mode: Optional[str] = Field(None)   # "guided" | "idea" | "freeform" | "pulse" | "intel"
 
 
 def _get_anthropic_client():
@@ -480,6 +481,168 @@ HARD RULES:
 - Do NOT mention specific pricing or make competitive comparisons by name
 - Return ONLY the JSON object."""
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FREEFORM PROMPT BUILDER
+# Used when generation_mode == "freeform" — agent typed a raw thought that
+# may have nothing to do with real estate. The Writer's job is to honor the
+# thought, find the human truth inside it, then bridge it naturally to the
+# agent's niche and market. Never forced. Never sounds like a real estate ad
+# that started with a random observation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_freeform_content_prompt(payload):
+    profile  = payload.agentProfile or AgentProfileModel()
+
+    agent_name    = profile.agentName    or "the agent"
+    business_name = profile.businessName or ""
+    brokerage     = profile.brokerage    or ""
+    base_market   = profile.market       or "their local market"
+    service_areas = profile.serviceAreas or []
+    market        = (f"{base_market} (serving: {', '.join(service_areas)})" if service_areas else base_market)
+    brand_voice   = profile.brandVoice   or "conversational and genuine"
+    short_bio     = profile.shortBio     or ""
+    words_avoid   = profile.wordsAvoid   or ""
+    words_prefer  = profile.wordsPrefer  or ""
+
+    agent_display = agent_name
+    if business_name:
+        agent_display += f" of {business_name}"
+    if brokerage and brokerage.lower() not in business_name.lower():
+        agent_display += f" with {brokerage}"
+
+    primary_categories = ", ".join(payload.identity.primaryCategories) or "real estate"
+
+    brokerage_footer = f" | {brokerage}" if brokerage else ""
+    brokerage_disclosure = (
+        f'Brokerage disclosure required: end the post with "— {agent_name}{brokerage_footer}" as a quiet footer.'
+        if brokerage else
+        f'End with "— {agent_name}" as a natural sign-off.'
+    )
+
+    # CTA block — reuse same logic as standard prompt
+    methods = profile.ctaMethods or []
+    active_methods = [m for m in methods if isinstance(m, dict) and m.get("url","").strip()]
+    if not active_methods and (profile.ctaUrl or "").strip():
+        active_methods = [{"type": profile.ctaType or "calendar",
+                           "url":  profile.ctaUrl  or "",
+                           "label": profile.ctaLabel or ""}]
+    if active_methods:
+        type_phrases = {
+            "calendar": "calendar booking link", "text": "direct text number",
+            "phone": "phone number", "email": "email address",
+            "website": "website URL", "authority": "authority page URL",
+        }
+        method_lines = []
+        for m in active_methods:
+            t   = m.get("type","calendar")
+            url = m.get("url","").strip()
+            lbl = m.get("label","").strip()
+            phrase = type_phrases.get(t, "contact link")
+            method_lines.append(f'  • {lbl}: {url}  [{phrase}]' if lbl else f'  • {url}  [{phrase}]')
+        cta_instruction = (
+            f"CTA REQUIREMENT: Include ALL of the following contact methods verbatim, "
+            f"woven naturally into a single human-sounding call to action.\n"
+            f"Contact methods:\n" + "\n".join(method_lines) + "\n"
+            f"Present them as natural options: 'Book a call, send a text, or visit my site — whatever works best for you.'"
+        )
+    else:
+        cta_instruction = (
+            "CTA REQUIREMENT: Write a low-pressure genuine invitation to a conversation. "
+            "Plant curiosity, not urgency. No 'call me today' commands."
+        )
+
+    avoid_text  = f"Never use these words or phrases: {words_avoid}.\n" if words_avoid else ""
+    prefer_text = f"Naturally weave in these words or phrases: {words_prefer}.\n" if words_prefer else ""
+    bio_text    = f"About {agent_name}: {short_bio}\n" if short_bio else ""
+
+    lang_pref = (profile.languagePref or "english").lower()
+    if lang_pref == "spanish":
+        lang_instruction = "LANGUAGE: Write ALL content entirely in Spanish.\n"
+    elif lang_pref == "bilingual":
+        lang_instruction = "LANGUAGE: Write BILINGUAL content — English first, then Spanish translation.\n"
+    else:
+        lang_instruction = ""
+
+    market_first_word = market.split()[0].replace(",", "")
+
+    raw_thought = payload.situation  # frontend sends the thought as the situation field
+
+    return (
+        f"You are ghostwriting for {agent_display}, a real estate professional in {market}.\n\n"
+        f"WHO {agent_name.upper()} IS\n"
+        + "─" * 40 + "\n"
+        + bio_text
+        + f"Market: {market}\n"
+        + f"Specialization: {primary_categories}\n"
+        + f"Voice: {brand_voice}\n"
+        + (lang_instruction if lang_instruction else "")
+        + avoid_text + prefer_text
+        + f"\nTHE AGENT'S RAW THOUGHT\n"
+        + "─" * 40 + "\n"
+        + f"\"{raw_thought}\"\n\n"
+        "This is what was on the agent's mind. It may be personal. It may seem unrelated to real estate. "
+        "That is fine — and it is actually the point.\n\n"
+        "YOUR JOB AS THE WRITER\n"
+        + "─" * 40 + "\n"
+        "1. HONOR THE THOUGHT FIRST. Do not discard it or bury it. The raw observation is the soul of the post. "
+        "Start there. Let the reader feel it.\n\n"
+        "2. FIND THE HUMAN TRUTH IN IT. Every genuine thought contains something universal — "
+        "a tension, a realization, a moment of clarity. Name it.\n\n"
+        f"3. BRIDGE NATURALLY TO THE AGENT'S WORLD. Once the human truth is established, "
+        f"connect it to what {agent_name} does — their market, their clients, their niche. "
+        "This bridge must feel inevitable, not forced. If it feels like a stretch, you have bridged too early. "
+        "The real estate connection should arrive like a quiet realization, not an advertisement.\n\n"
+        "4. NEVER LET THE REAL ESTATE CONTENT SWALLOW THE THOUGHT. The post should feel like "
+        "a real person thinking out loud who happens to be a real estate professional — "
+        "not a real estate professional who found an excuse to talk about property.\n\n"
+        "WHAT THIS SHOULD FEEL LIKE\n"
+        + "─" * 40 + "\n"
+        "The best version of this post reads like something a trusted colleague sent you at 7am — "
+        "a thought they couldn't shake, written while it was still fresh. "
+        "It makes the reader pause. It makes them feel something. "
+        "It ends with a question that invites a real reply — not a generic 'what do you think?'\n\n"
+        "LENGTH\n"
+        + "─" * 40 + "\n"
+        "Medium form: 150-250 words. One human observation, one clear bridge, one genuine question at the end. "
+        "No headers. No bullet points. No lists. Just a person thinking in paragraphs.\n\n"
+        "BANNED FOREVER\n"
+        + "─" * 40 + "\n"
+        "- Forced real estate pivots: 'Speaking of which, the Denver market...' — never\n"
+        "- Hype phrases: 'game-changer', 'incredible opportunity', 'the market is on fire'\n"
+        "- 'Call me today' as the opener or the whole point\n"
+        "- Exclamation points used to manufacture excitement\n"
+        "- Generic prompts to 'like, share, and follow'\n"
+        "- Hedge language: 'it depends,' 'every situation is different'\n\n"
+        f"IDENTITY RULES\n"
+        + "─" * 40 + "\n"
+        f"1. {agent_name} must appear naturally as a first-person voice or sign-off.\n"
+        f"2. {brokerage_disclosure}\n"
+        f"3. The script must sound like someone actually talking — natural pauses, real sentences.\n\n"
+        "COMPLIANCE RULES\n"
+        + "─" * 40 + "\n"
+        "- Fair Housing Act: No language implying preference by protected class.\n"
+        "- NAR Code of Ethics Article 12: Truthful only. No guaranteed outcomes.\n"
+        f"- Brokerage disclosure: {brokerage or 'the agent'} must be identifiable.\n\n"
+        f"THE CTA FIELD\n{cta_instruction}\n\n"
+        "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
+        + "─" * 40 + "\n"
+        "{\n"
+        '  "headline": "A human, specific headline that captures the essence of the thought — not a real estate tagline. One sentence, no period.",\n'
+        f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words. Use the local feel of {market} (ranch-style, craftsman, mid-century modern, or new construction). No people. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk.",\n'
+        f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
+        f'  "post": "The full social post. Starts with the human thought. Bridges naturally to {agent_name}\'s world. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
+        '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
+        '  "script": "A 45-60 second spoken version of the post. Same soul, same thought, same bridge. Sounds like a real person talking — not a news anchor. Natural pauses marked with \' / \'."\n'
+        "}\n\n"
+        "HARD RULES:\n"
+        "- Every value must be complete — no placeholders\n"
+        f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
+        "- post MUST end with a genuine question (not generic)\n"
+        "- No line breaks inside JSON string values — use spaces between sentences\n"
+        "- Return ONLY the JSON object."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3326,9 +3489,12 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    content_mode = (payload.content_mode or "agent").lower()
+    content_mode    = (payload.content_mode    or "agent").lower()
+    generation_mode = (payload.generation_mode or "").lower()
     if content_mode == "b2b":
         prompt = _build_b2b_content_prompt(payload)
+    elif generation_mode == "freeform":
+        prompt = _build_freeform_content_prompt(payload)
     else:
         prompt = _build_content_prompt(payload)
 
