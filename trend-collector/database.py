@@ -2134,16 +2134,37 @@ def signals_save(user_id: int, area: str, headline: str, summary: str,
 
 
 def signals_get_latest(user_id: int, limit: int = 5) -> list:
-    """Get the most recent unused high-relevance signals for an agent."""
+    """Get the most recent unused high-relevance signals for an agent.
+
+    Priority order — location specificity first, then recency, then relevance:
+      1. Hyper-local  (signal_type LIKE 'local:%')    — agent's specific service areas
+      2. Metro        (signal_type LIKE 'metro:%')    — city/market level
+      3. Local RSS    (signal_type = 'rss:*', area != 'National') — market RSS feeds
+      4. National RSS (signal_type = 'rss:*', area = 'National') — national RSS feeds
+      5. National     (signal_type LIKE 'national:%') — national Claude web search
+
+    Within each tier: newest collected_at first, then relevance_score as tiebreaker.
+    This ensures a Denver service-area story always beats a national NAR story,
+    regardless of when each was collected or their relevance scores.
+    """
     conn = get_conn()
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
     c.execute("""
-        SELECT * FROM local_signals
+        SELECT *,
+            CASE
+                WHEN signal_type LIKE 'local:%'                                    THEN 1
+                WHEN signal_type LIKE 'metro:%'                                    THEN 2
+                WHEN signal_type LIKE 'rss:%'   AND area != 'National'             THEN 3
+                WHEN signal_type LIKE 'rss:%'   AND area  = 'National'             THEN 4
+                WHEN signal_type LIKE 'national:%'                                 THEN 5
+                ELSE 4
+            END AS tier_rank
+        FROM local_signals
         WHERE user_id = ?
           AND used = 0
           AND (expires_at IS NULL OR expires_at > ?)
-        ORDER BY relevance_score DESC, collected_at DESC
+        ORDER BY tier_rank ASC, collected_at DESC, relevance_score DESC
         LIMIT ?
     """, (user_id, now, limit))
     rows = [dict(r) for r in c.fetchall()]
