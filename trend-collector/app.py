@@ -66,6 +66,7 @@ from database import (
     generate_compliance_pdf,
     get_compliance_records,
     get_compliance_records_for_broker,
+    backfill_compliance_records,
     get_broker_office_stats,
     get_broker_agent_content,
     get_team_stats,
@@ -236,6 +237,10 @@ async def startup_event():
     migrate_add_niche_column()
     migrate_content_library_columns()
     migrate_context_column()  # safe no-op if column already exists
+    try:
+        backfill_compliance_records()  # one-time, skips already-present records
+    except Exception as _bf_e:
+        print(f"[Startup] compliance_records backfill skipped: {_bf_e}")
     print("[Startup] Starting background trend collector...")
     t1 = threading.Thread(target=trend_collection_worker, daemon=True)
     t1.start()
