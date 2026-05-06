@@ -519,14 +519,18 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
                     summary  = " ".join(_re.sub(r"<[^>]+>", " ", raw_desc).split())[:500]
 
                     # pubDate from rss2json is normalised to "YYYY-MM-DD HH:MM:SS"
+                    # rss2json returns "0000-00-00 00:00:00" as a sentinel when the
+                    # feed has no date — treat that as no date rather than a real
+                    # timestamp (which would fail the 45-day cutoff and drop the item).
                     pub_raw = (item.get("pubDate") or "").strip()
                     pub_dt  = None
-                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-                        try:
-                            pub_dt = datetime.strptime(pub_raw[:len(fmt)], fmt)
-                            break
-                        except Exception:
-                            continue
+                    if not pub_raw.startswith("0000"):
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                            try:
+                                pub_dt = datetime.strptime(pub_raw[:len(fmt)], fmt)
+                                break
+                            except Exception:
+                                continue
 
                     if pub_dt is None:
                         pub_date_str = None  # No parseable date — allow through
