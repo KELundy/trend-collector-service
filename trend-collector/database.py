@@ -38,11 +38,13 @@ def _compliance_verdict(comp_raw) -> str:
         v = str(comp.get("overallStatus") or comp.get("overall_verdict") or comp.get("status") or "").lower()
         if comp.get("passed") is True:
             v = "pass"
-        if v in ("pass", "compliant", "ok", "green"):
+        # ComplianceBadge overallStatus values: "reviewed" | "review-recommended" | "attention-required"
+        # Legacy values: "pass" | "compliant" | "warn" | "fail"
+        if v in ("pass", "compliant", "ok", "green", "reviewed"):
             return "pass"
-        if v in ("warn", "warning", "review"):
+        if v in ("warn", "warning", "review", "review-recommended"):
             return "warn"
-        if v in ("attention", "fail", "error"):
+        if v in ("attention", "fail", "error", "attention-required"):
             return "fail"
         return "pending"
     except Exception:
@@ -1159,6 +1161,78 @@ def get_compliance_records_for_broker(
             "compliance":       comp,
         })
     return results
+
+
+def backfill_compliance_records() -> int:
+    """
+    One-time backfill — copies approved/published posts that already have a
+    CIR™ ID from content_library into compliance_records.
+    Safe to call multiple times — skips any cir_id already present.
+    Returns the number of records written.
+    Called automatically at startup from app.py after init_db().
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # Find all approved/published items with a cir_id not yet in compliance_records
+    c.execute("""
+        SELECT cl.id, cl.user_id, cl.cir_id, cl.niche, cl.content, cl.compliance,
+               cl.approved_at, cl.saved_at, cl.copied_platforms
+        FROM content_library cl
+        WHERE cl.status IN ('approved', 'published')
+          AND cl.cir_id IS NOT NULL
+          AND cl.cir_id != ''
+          AND cl.cir_id NOT IN (SELECT cir_id FROM compliance_records)
+    """)
+    rows = c.fetchall()
+
+    written = 0
+    for r in rows:
+        try:
+            content    = json.loads(r["content"])    if r["content"]    else {}
+            compliance = json.loads(r["compliance"]) if r["compliance"] else {}
+
+            headline = (content.get("headline") or content.get("title") or "")[:300]
+            overall  = compliance.get("overallStatus") or compliance.get("overall_verdict") or ""
+            fh       = compliance.get("fairHousing")   or compliance.get("fair_housing")    or ""
+            disc     = compliance.get("brokerageDisclosure") or compliance.get("disclosure") or ""
+            nar      = compliance.get("narStandards")  or compliance.get("nar_standards")   or ""
+            state_c  = compliance.get("stateCompliance") or ""
+            rules_v  = compliance.get("rules_version") or ""
+            approved = r["approved_at"] or r["saved_at"] or datetime.utcnow().isoformat()
+
+            # Platform from copied_platforms if available
+            try:
+                plats    = json.loads(r["copied_platforms"] or "[]")
+                platform = plats[0] if plats else ""
+            except Exception:
+                platform = ""
+
+            c.execute("""
+                INSERT INTO compliance_records
+                    (user_id, cir_id, library_item_id, niche, headline, platform,
+                     overall_status, fair_housing, disclosure, nar_standards,
+                     state_compliance, rules_version, compliance_json, approved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                r["user_id"], r["cir_id"], r["id"],
+                r["niche"] or "", headline, platform,
+                overall, fh, disc, nar, state_c, rules_v,
+                json.dumps(compliance),
+                approved,
+            ))
+            written += 1
+        except Exception as e:
+            print(f"[Backfill] Skipping item {r['id']}: {e}")
+            continue
+
+    conn.commit()
+    conn.close()
+    if written:
+        print(f"[Backfill] compliance_records: {written} historical record(s) written.")
+    else:
+        print("[Backfill] compliance_records: already up to date, nothing to write.")
+    return written
 
 
 # ─────────────────────────────────────────────
