@@ -21,7 +21,6 @@ import json
 import time
 import threading
 import urllib.request
-import xml.etree.ElementTree as ET
 from datetime import datetime
 
 COLLECT_INTERVAL_HOURS   = int(os.getenv("SIGNAL_COLLECT_HOURS", "24"))  # Default 24hr — override via Render env var
@@ -450,9 +449,12 @@ def _get_market_rss_feeds(market: str) -> list:
 
 def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
     """
-    Tier 0 — Parse RSS feeds for an agent's market and return signals in the
+    Tier 0 — Fetch RSS feeds via rss2json.com API and return signals in the
     same dict shape as Claude signals. Always includes all national feeds.
     Market-specific feeds are added based on the agent's market string.
+
+    Uses rss2json.com as a proxy — bypasses publisher-side SSL/403 blocks
+    that direct urllib fetches hit on Render. Requires RSS2JSON_API_KEY env var.
 
     Only returns items published after cutoff_dt (45-day hard limit).
     Never raises — individual feed failures are logged and skipped.
@@ -462,6 +464,12 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
         return []
 
     import re as _re
+    import urllib.parse
+
+    api_key = os.getenv("RSS2JSON_API_KEY", "")
+    if not api_key:
+        print("[Signals/RSS] RSS2JSON_API_KEY not set — skipping Tier 0.")
+        return []
 
     # Build the feed list: national always-on + market-matched feeds
     market_feeds = _get_market_rss_feeds(market)
@@ -476,47 +484,44 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
     results = []
     for label, url, sig_type, default_area in all_feeds:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "AutoMates/1.0 (signal-collector)"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                raw_xml = resp.read()
-            root = ET.fromstring(raw_xml)
+            # Call rss2json API — returns JSON regardless of source feed format
+            api_url = (
+                f"https://api.rss2json.com/v1/api.json"
+                f"?api_key={api_key}"
+                f"&rss_url={urllib.parse.quote(url, safe='')}"
+                f"&count=10"
+            )
+            req = urllib.request.Request(api_url, headers={"User-Agent": "AutoMates/1.0 (signal-collector)"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read())
 
-            # Handle both RSS <channel><item> and Atom <entry> formats
-            ns    = {"atom": "http://www.w3.org/2005/Atom"}
-            items = root.findall(".//item") or root.findall(".//atom:entry", ns)
+            # rss2json returns status "ok" on success, "error" on bad feed
+            if data.get("status") != "ok":
+                msg = data.get("message", "unknown error")
+                print(f"[Signals/RSS] Feed skipped — {label}: rss2json status={data.get('status')} — {msg}")
+                continue
 
+            items = data.get("items", [])
             feed_count = 0
-            for item in items[:10]:  # Cap at 10 items per feed per run
+
+            for item in items:
                 try:
-                    # Title / headline
-                    title_el = item.find("title") or item.find("atom:title", ns)
-                    headline = (title_el.text or "").strip() if title_el is not None else ""
+                    # rss2json normalises field names across RSS and Atom
+                    headline = (item.get("title") or "").strip()
                     if not headline or len(headline) < 10:
                         continue
 
-                    # Link / source_url
-                    link_el    = item.find("link") or item.find("atom:link", ns)
-                    source_url = ""
-                    if link_el is not None:
-                        source_url = (link_el.text or link_el.get("href", "")).strip()
+                    source_url = (item.get("link") or "").strip()
 
-                    # Description / summary — strip HTML tags
-                    desc_el   = (item.find("description") or item.find("summary") or
-                                 item.find("atom:summary", ns) or item.find("atom:content", ns))
-                    raw_desc  = (desc_el.text or "") if desc_el is not None else ""
-                    summary   = " ".join(_re.sub(r"<[^>]+>", " ", raw_desc).split())[:500]
+                    # description is already HTML-stripped by rss2json in most cases;
+                    # run a light strip pass to catch any residual tags
+                    raw_desc = item.get("description") or item.get("content") or ""
+                    summary  = " ".join(_re.sub(r"<[^>]+>", " ", raw_desc).split())[:500]
 
-                    # Published date — try pubDate, published, updated, dc:date
-                    DC_NS  = "http://purl.org/dc/elements/1.1/"
-                    pub_el = (item.find("pubDate") or item.find("published") or
-                              item.find("atom:published", ns) or item.find("updated") or
-                              item.find(f"{{{DC_NS}}}date"))
-                    pub_raw = (pub_el.text or "").strip() if pub_el is not None else ""
-
-                    # Parse date — RSS uses RFC 2822, Atom uses ISO 8601
-                    pub_dt = None
-                    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z",
-                                "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+                    # pubDate from rss2json is normalised to "YYYY-MM-DD HH:MM:SS"
+                    pub_raw = (item.get("pubDate") or "").strip()
+                    pub_dt  = None
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
                         try:
                             pub_dt = datetime.strptime(pub_raw[:len(fmt)], fmt)
                             break
@@ -524,20 +529,19 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
                             continue
 
                     if pub_dt is None:
-                        pub_date_str = None  # No parseable date — allow through, same policy as Claude
+                        pub_date_str = None  # No parseable date — allow through
                     else:
-                        pub_dt_naive = pub_dt.replace(tzinfo=None) if pub_dt.tzinfo else pub_dt
-                        if pub_dt_naive < cutoff_dt:
+                        if pub_dt < cutoff_dt:
                             continue  # Hard reject — older than 45 days
-                        pub_date_str = pub_dt_naive.strftime("%Y-%m-%d")
+                        pub_date_str = pub_dt.strftime("%Y-%m-%d")
 
                     results.append({
-                        "area":           default_area,
-                        "headline":       headline,
-                        "summary":        summary or f"From {label}.",
-                        "source_url":     source_url,
-                        "published_date": pub_date_str,
-                        "signal_type":    sig_type,
+                        "area":            default_area,
+                        "headline":        headline,
+                        "summary":         summary or f"From {label}.",
+                        "source_url":      source_url,
+                        "published_date":  pub_date_str,
+                        "signal_type":     sig_type,
                         "relevance_score": 0.75,  # Curated sources are high-relevance by default
                     })
                     feed_count += 1
