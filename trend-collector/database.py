@@ -538,6 +538,40 @@ def init_db():
         except Exception:
             pass  # Column already exists
 
+    # ── COMPLIANCE RECORDS — Session 34 ──────────────────────────────────────
+    # Permanent audit trail written at the moment a post is approved and a
+    # CIR™ ID is generated. Survives content_library deletions — once written
+    # this record is never altered or removed by any platform action.
+    # library_item_id is nullable so deleted posts do not orphan the record.
+    # compliance_json stores the full ComplianceBadge for complete auditability.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS compliance_records (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL,
+            cir_id           TEXT    NOT NULL,
+            library_item_id  INTEGER DEFAULT NULL,
+            niche            TEXT    DEFAULT '',
+            headline         TEXT    DEFAULT '',
+            platform         TEXT    DEFAULT '',
+            overall_status   TEXT    DEFAULT '',
+            fair_housing     TEXT    DEFAULT '',
+            disclosure       TEXT    DEFAULT '',
+            nar_standards    TEXT    DEFAULT '',
+            state_compliance TEXT    DEFAULT '',
+            rules_version    TEXT    DEFAULT '',
+            compliance_json  TEXT    DEFAULT NULL,
+            approved_at      TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    try:
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_compliance_records_user "
+            "ON compliance_records(user_id, approved_at DESC)"
+        )
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -940,6 +974,194 @@ def get_latest_trends(limit=200):
 
 
 # ─────────────────────────────────────────────
+# COMPLIANCE RECORDS — permanent audit trail
+# ─────────────────────────────────────────────
+
+def record_compliance_approval(
+    user_id: int,
+    cir_id: str,
+    library_item_id: int,
+    niche: str,
+    content: dict,
+    compliance: dict,
+    approved_at: str,
+) -> None:
+    """
+    Write a permanent compliance record at the moment a CIR™ is issued.
+    Called from library_update() immediately after the CIR ID is generated.
+    Never raises — a write failure here must never block the approval flow.
+    The record is immutable once written: no update or delete path exists.
+    """
+    try:
+        headline = ""
+        if isinstance(content, dict):
+            headline = (content.get("headline") or content.get("title") or "")[:300]
+
+        comp = compliance if isinstance(compliance, dict) else {}
+        overall  = comp.get("overallStatus") or comp.get("overall_verdict") or ""
+        fh       = comp.get("fairHousing") or comp.get("fair_housing") or ""
+        disc     = comp.get("brokerageDisclosure") or comp.get("disclosure") or ""
+        nar      = comp.get("narStandards") or comp.get("nar_standards") or ""
+        state_c  = comp.get("stateCompliance") or ""
+        rules_v  = comp.get("rules_version") or ""
+
+        conn = get_conn()
+        c    = conn.cursor()
+        c.execute("""
+            INSERT INTO compliance_records
+                (user_id, cir_id, library_item_id, niche, headline,
+                 overall_status, fair_housing, disclosure, nar_standards,
+                 state_compliance, rules_version, compliance_json, approved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, cir_id, library_item_id,
+            niche or "", headline,
+            overall, fh, disc, nar, state_c, rules_v,
+            json.dumps(compliance),
+            approved_at,
+        ))
+        conn.commit()
+        conn.close()
+        print(f"[CIR] Compliance record written — {cir_id} for user {user_id}")
+    except Exception as e:
+        print(f"[CIR] WARNING: compliance record write failed for {cir_id}: {e}")
+
+
+def get_compliance_records(
+    user_id: int,
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 200,
+) -> list:
+    """
+    Return permanent compliance records for an agent, newest first.
+    Optionally filtered by approved_at date range (ISO strings).
+    Used by agent history view and broker compliance tab.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+
+    query  = "SELECT * FROM compliance_records WHERE user_id = ?"
+    params = [user_id]
+
+    if date_from:
+        query  += " AND approved_at >= ?"
+        params.append(date_from)
+    if date_to:
+        query  += " AND approved_at <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY approved_at DESC LIMIT ?"
+    params.append(limit)
+
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+
+    results = []
+    for r in rows:
+        comp = {}
+        try:
+            comp = json.loads(r["compliance_json"]) if r["compliance_json"] else {}
+        except Exception:
+            pass
+        results.append({
+            "id":               r["id"],
+            "cir_id":           r["cir_id"],
+            "library_item_id":  r["library_item_id"],
+            "niche":            r["niche"] or "",
+            "headline":         r["headline"] or "",
+            "platform":         r["platform"] or "",
+            "overall_status":   r["overall_status"] or "",
+            "fair_housing":     r["fair_housing"] or "",
+            "disclosure":       r["disclosure"] or "",
+            "nar_standards":    r["nar_standards"] or "",
+            "state_compliance": r["state_compliance"] or "",
+            "rules_version":    r["rules_version"] or "",
+            "approved_at":      r["approved_at"] or "",
+            "compliance":       comp,
+        })
+    return results
+
+
+def get_compliance_records_for_broker(
+    broker_id: int,
+    agent_id: int = None,
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 500,
+) -> list:
+    """
+    Return compliance records for all agents under a broker, or a single
+    agent if agent_id is supplied. Verifies agent belongs to broker.
+    Used by broker/team compliance dashboard.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+
+    # Build agent scope — all agents under this broker, or one specific agent
+    if agent_id:
+        c.execute(
+            "SELECT id, agent_name FROM users WHERE id = ? AND broker_id = ? AND is_active = 1",
+            (agent_id, broker_id)
+        )
+    else:
+        c.execute(
+            "SELECT id, agent_name FROM users WHERE broker_id = ? AND is_active = 1",
+            (broker_id,)
+        )
+    agents = {row["id"]: row["agent_name"] for row in c.fetchall()}
+
+    if not agents:
+        conn.close()
+        return []
+
+    placeholders = ",".join("?" * len(agents))
+    query  = f"SELECT * FROM compliance_records WHERE user_id IN ({placeholders})"
+    params = list(agents.keys())
+
+    if date_from:
+        query  += " AND approved_at >= ?"
+        params.append(date_from)
+    if date_to:
+        query  += " AND approved_at <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY approved_at DESC LIMIT ?"
+    params.append(limit)
+
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+
+    results = []
+    for r in rows:
+        comp = {}
+        try:
+            comp = json.loads(r["compliance_json"]) if r["compliance_json"] else {}
+        except Exception:
+            pass
+        results.append({
+            "id":               r["id"],
+            "agent_id":         r["user_id"],
+            "agent_name":       agents.get(r["user_id"], "Unknown"),
+            "cir_id":           r["cir_id"],
+            "library_item_id":  r["library_item_id"],
+            "niche":            r["niche"] or "",
+            "headline":         r["headline"] or "",
+            "overall_status":   r["overall_status"] or "",
+            "fair_housing":     r["fair_housing"] or "",
+            "disclosure":       r["disclosure"] or "",
+            "nar_standards":    r["nar_standards"] or "",
+            "state_compliance": r["state_compliance"] or "",
+            "rules_version":    r["rules_version"] or "",
+            "approved_at":      r["approved_at"] or "",
+            "compliance":       comp,
+        })
+    return results
+
+
+# ─────────────────────────────────────────────
 # CONTENT LIBRARY
 # ─────────────────────────────────────────────
 def library_save(user_id: int, niche: str, content: dict,
@@ -1027,20 +1249,28 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     # ── CIR™ generation — write on first approval ──
     # Only create a CIR ID if this update sets status to 'approved'
     # and the item doesn't already have one.
+    _new_cir_id      = None  # track whether we just generated one
+    _item_for_record = None  # full item snapshot for compliance_records write
     if updates.get("status") == "approved":
         c.execute(
-            "SELECT cir_id FROM content_library WHERE id = ? AND user_id = ?",
+            "SELECT cir_id, niche, content, compliance FROM content_library WHERE id = ? AND user_id = ?",
             (item_id, user_id)
         )
         existing = c.fetchone()
         if existing and not existing["cir_id"]:
             import secrets as _sec
-            cir_date = datetime.utcnow().strftime("%Y%m%d")
-            cir_rand = _sec.token_hex(3).upper()  # 6 uppercase hex chars
-            cir_id   = f"CIR-{cir_date}-{cir_rand}"
+            cir_date     = datetime.utcnow().strftime("%Y%m%d")
+            cir_rand     = _sec.token_hex(3).upper()  # 6 uppercase hex chars
+            _new_cir_id  = f"CIR-{cir_date}-{cir_rand}"
             fields.append("cir_id = ?")
-            values.append(cir_id)
-            print(f"[CIR] Generated {cir_id} for library item {item_id} (user {user_id})")
+            values.append(_new_cir_id)
+            print(f"[CIR] Generated {_new_cir_id} for library item {item_id} (user {user_id})")
+            # Capture snapshot for compliance_records — use incoming content/compliance
+            # if the update carries them, otherwise fall back to what's in the DB now.
+            _snap_content    = updates.get("content")    or (json.loads(existing["content"])    if existing["content"]    else {})
+            _snap_compliance = updates.get("compliance") or (json.loads(existing["compliance"]) if existing["compliance"] else {})
+            _snap_niche      = existing["niche"] or ""
+            _item_for_record = (_snap_niche, _snap_content, _snap_compliance)
 
     values += [item_id, user_id]
     c.execute(
@@ -1049,6 +1279,20 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     )
     conn.commit()
     conn.close()
+
+    # ── Write permanent compliance record — after DB commit, never blocks ──
+    if _new_cir_id and _item_for_record:
+        _niche, _content, _compliance = _item_for_record
+        record_compliance_approval(
+            user_id         = user_id,
+            cir_id          = _new_cir_id,
+            library_item_id = item_id,
+            niche           = _niche,
+            content         = _content,
+            compliance      = _compliance,
+            approved_at     = datetime.utcnow().isoformat(),
+        )
+
     return library_get_item(item_id)
 
 
@@ -1601,7 +1845,7 @@ def generate_compliance_pdf(
 
     # Header
     hdr = Table([[
-        Paragraph('<font name="Helvetica-Bold" size="18" color="#0f0f0d">Home</font><font name="Helvetica-Bold" size="18" color="#1749c9">Bridge</font>', styles["body"]),
+        Paragraph('<font name="Helvetica-Bold" size="18" color="#0f0f0d">Auto</font><font name="Helvetica-Bold" size="18" color="#C8963C">Mates</font>', styles["body"]),
         Paragraph('<font color="#787870">Compliance Audit Report</font>', styles["body_small"]),
     ]], colWidths=[W*0.5, W*0.5])
     hdr.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(1,0),(1,0),"RIGHT"),("BOTTOMPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0)]))
@@ -1724,9 +1968,10 @@ def generate_compliance_pdf(
         story.append(ct)
 
     story += [sp(16), rule(), sp(4),
-        Paragraph(f"This report was automatically generated by HomeBridge on {generated_at}. "
+        Paragraph(f"This report was automatically generated by AutoMates on {generated_at}. "
                   "It reflects all content reviewed and approved by the agent named above. "
-                  "All compliance verdicts are generated by HomeBridge's automated compliance engine and do not constitute legal advice. "
+                  "All compliance verdicts are generated by AutoMates' automated compliance engine and do not constitute legal advice. "
+                  "AutoMates checks compliance — it does not verify or guarantee compliance. "
                   "This document is intended for internal review and compliance record-keeping purposes.", styles["footer"])]
 
     doc.build(story)
