@@ -436,6 +436,47 @@ async def trigger_signal_collection(current_user=Depends(get_current_user)):
         raise HTTPException(500, detail=str(e))
 
 
+@app.get("/signals/rss-status")
+async def get_rss_status(current_user=Depends(get_current_user)):
+    """
+    Returns the count and most recent RSS-sourced signals for the current agent.
+    Used by the Home dashboard to confirm RSS integration is running.
+    Super admin can also use this to verify feed health.
+    """
+    from database import get_conn
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT COUNT(*) as total,
+               MAX(collected_at) as last_collected
+        FROM local_signals
+        WHERE user_id = ?
+          AND source_type = 'rss'
+          AND (expires_at IS NULL OR expires_at > datetime('now'))
+    """, (current_user["id"],))
+    row   = c.fetchone()
+    total = row["total"] if row else 0
+    last  = row["last_collected"] if row else None
+
+    c.execute("""
+        SELECT headline, area, signal_type, published_date, collected_at
+        FROM local_signals
+        WHERE user_id = ?
+          AND source_type = 'rss'
+          AND (expires_at IS NULL OR expires_at > datetime('now'))
+        ORDER BY collected_at DESC
+        LIMIT 5
+    """, (current_user["id"],))
+    recent = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {
+        "rss_enabled":       os.getenv("RSS_ENABLED", "true").lower() == "true",
+        "total_active":      total,
+        "last_collected_at": last,
+        "recent_signals":    recent,
+    }
+
+
 
 
 class ScoreRequest(BaseModel):
