@@ -213,6 +213,12 @@ def init_db():
         c.execute("ALTER TABLE local_signals ADD COLUMN published_date TEXT DEFAULT NULL")
     except Exception:
         pass  # Column already exists
+    # Non-destructive: Signal source type — distinguishes RSS-sourced signals from Claude web search (Session 32)
+    # Values: 'rss' | 'claude'  — defaults to 'claude' so all existing rows are correctly typed
+    try:
+        c.execute("ALTER TABLE local_signals ADD COLUMN source_type TEXT DEFAULT 'claude'")
+    except Exception:
+        pass  # Column already exists
 
     # Agent setup — stores identity/profile data server-side
     c.execute("""
@@ -2108,19 +2114,21 @@ def signals_dedupe_check(user_id: int, source_url: str, headline: str) -> bool:
 
 def signals_save(user_id: int, area: str, headline: str, summary: str,
                  source_url: str, signal_type: str = "general",
-                 relevance_score: float = 0.5, published_date: str = None):
+                 relevance_score: float = 0.5, published_date: str = None,
+                 source_type: str = "claude"):
     """Save a hyper-local signal for an agent.
     published_date — ISO date string of when the story was published (e.g. '2026-04-15').
-    Signals older than 90 days are rejected in signal_collector.py before this is called.
+    source_type    — 'rss' for RSS-sourced signals, 'claude' for Claude web search signals.
+    Signals older than 45 days are rejected in signal_collector.py before this is called.
     """
     from datetime import timedelta
     conn = get_conn()
     expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
     conn.execute("""
         INSERT INTO local_signals
-            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date))
+            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date, source_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date, source_type))
     conn.commit()
     conn.close()
 
