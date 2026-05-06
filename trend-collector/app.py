@@ -64,6 +64,8 @@ from database import (
     schedule_delete, schedules_get_due, schedule_mark_ran,
     calculate_identity_score,
     generate_compliance_pdf,
+    get_compliance_records,
+    get_compliance_records_for_broker,
     get_broker_office_stats,
     get_broker_agent_content,
     get_team_stats,
@@ -969,8 +971,117 @@ async def download_compliance_report(req: ComplianceReportRequest, current_user=
         raise HTTPException(status_code=500, detail=f"PDF generation requires reportlab: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
-    filename = f"HomeBridge_Compliance_Report_{current_user.get('agent_name','Agent').replace(' ','_')}.pdf"
+    filename = f"AutoMates_Compliance_Report_{current_user.get('agent_name','Agent').replace(' ','_')}.pdf"
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/compliance/history")
+async def get_agent_compliance_history(
+    date_from: str = "",
+    date_to:   str = "",
+    current_user=Depends(get_current_user)
+):
+    """
+    Return the agent's permanent compliance record history.
+    Newest first. Optionally filtered by date range (ISO strings).
+    Records persist even after library items are deleted.
+    """
+    records = get_compliance_records(
+        user_id   = current_user["id"],
+        date_from = date_from,
+        date_to   = date_to,
+    )
+    return {"records": records, "total": len(records)}
+
+
+@app.get("/compliance/history/report")
+async def download_agent_compliance_history_pdf(
+    date_from: str = "",
+    date_to:   str = "",
+    current_user=Depends(get_current_user)
+):
+    """
+    Generate a PDF compliance report from the permanent compliance_records
+    table instead of content_library — survives post deletions.
+    """
+    try:
+        pdf_bytes = generate_compliance_pdf(
+            user_id    = current_user["id"],
+            agent_name = current_user.get("agent_name", ""),
+            brokerage  = current_user.get("brokerage", ""),
+            email      = current_user.get("email", ""),
+            setup      = {},
+            date_from  = date_from,
+            date_to    = date_to,
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation requires reportlab: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+    name     = current_user.get("agent_name", "Agent").replace(" ", "_")
+    filename = f"AutoMates_Compliance_History_{name}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@app.post("/broker/compliance-history")
+async def broker_compliance_history(req: dict, current_user=Depends(get_current_user)):
+    """
+    Return compliance records for all agents under a broker, or a single
+    agent if agent_id is provided. Filterable by date range.
+    Used by the broker/team compliance dashboard.
+    """
+    if current_user.get("role") not in ("broker", "team", "admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Broker or team accounts only.")
+    records = get_compliance_records_for_broker(
+        broker_id  = current_user["id"],
+        agent_id   = req.get("agent_id"),
+        date_from  = req.get("date_from", ""),
+        date_to    = req.get("date_to", ""),
+    )
+    return {"records": records, "total": len(records)}
+
+
+@app.post("/broker/compliance-history/report")
+async def broker_compliance_history_pdf(req: dict, current_user=Depends(get_current_user)):
+    """
+    Generate a PDF compliance report for a specific agent under this broker.
+    Uses generate_compliance_pdf with optional date filtering.
+    """
+    if current_user.get("role") not in ("broker", "team", "admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Broker or team accounts only.")
+    agent_id = req.get("agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id required.")
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id = ? AND broker_id = ?", (agent_id, current_user["id"]))
+    agent = c.fetchone()
+    conn.close()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found in your office.")
+    try:
+        pdf_bytes = generate_compliance_pdf(
+            user_id    = agent["id"],
+            agent_name = agent["agent_name"],
+            brokerage  = agent["brokerage"],
+            email      = agent["email"],
+            setup      = {},
+            date_from  = req.get("date_from", ""),
+            date_to    = req.get("date_to", ""),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+    filename = f"AutoMates_Compliance_{agent['agent_name'].replace(' ','_')}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 
 import secrets, json as _json
