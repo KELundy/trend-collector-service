@@ -270,12 +270,20 @@ async def get_connections(current_user=Depends(get_current_user)):
     connections = database.get_platform_connections(current_user["id"])
     safe = []
     for c in connections:
+        # For Facebook, also fetch whether a page token is stored
+        # so the frontend can show "Select your page" if not yet done.
+        # Uses get_platform_connection (includes page_token) — backend only, token never sent to frontend.
+        has_page_token = False
+        if c["platform"] == "facebook":
+            fb_conn = database.get_platform_connection(current_user["id"], "facebook")
+            has_page_token = bool(fb_conn and fb_conn.get("page_token", "").strip())
         safe.append({
-            "platform":     c["platform"],
-            "handle":       c.get("platform_handle", ""),
-            "connected_at": c.get("connected_at", ""),
-            "expires_at":   c.get("expires_at", ""),
-            "is_expired":   _is_expired(c.get("expires_at", "")),
+            "platform":       c["platform"],
+            "handle":         c.get("platform_handle", ""),
+            "connected_at":   c.get("connected_at", ""),
+            "expires_at":     c.get("expires_at", ""),
+            "is_expired":     _is_expired(c.get("expires_at", "")),
+            "has_page_token": has_page_token,
         })
     return {"connections": safe}
 
