@@ -1746,25 +1746,56 @@ async def public_agent_profile(slug: str):
             except Exception:
                 pass
 
-    # Build posts array with full text
+    # Week streak — consecutive weeks with at least one approved post
+    week_streak = 0
+    if items:
+        from collections import defaultdict as _dd
+        week_set = set()
+        for item in items:
+            approved = item.get("approved_at") or ""
+            if approved:
+                try:
+                    dt = datetime.fromisoformat(approved[:19])
+                    week_set.add(dt.strftime("%G-W%V"))
+                except Exception:
+                    pass
+        check = now
+        while True:
+            wk = check.strftime("%G-W%V")
+            if wk in week_set:
+                week_streak += 1
+                check -= timedelta(weeks=1)
+            else:
+                break
+
+    # Build posts array — full text + per-post slug for individual URLs
+    import re as _re
+    def _post_slug(headline, post_id):
+        base = _re.sub(r"[^a-z0-9]+", "-",
+               (headline or "post").lower().strip()).strip("-")[:60]
+        return f"{base}-{post_id}"
+
     posts = []
     for item in items:
         try:
             cd = _json.loads(item.get("content") or "{}")
         except Exception:
             cd = {}
-        body      = cd.get("body","") or cd.get("post","") or cd.get("content","")
-        headline  = cd.get("headline","") or cd.get("title","")
+        body     = cd.get("body","") or cd.get("post","") or cd.get("content","")
+        headline = cd.get("headline","") or cd.get("title","")
         if not body and not headline:
             continue
+        ps = _post_slug(headline, item["id"])
         posts.append({
             "id":          item["id"],
+            "slug":        ps,
             "headline":    headline,
             "body":        body,
             "niche":       item.get("niche",""),
             "cir_id":      item.get("cir_id",""),
             "approved_at": (item.get("approved_at") or "")[:10],
-            "verify_url":  f"https://homebridgegroup.co/verify.html?cir={item.get('cir_id','')}" if item.get("cir_id") else "",
+            "post_url":    f"https://{slug}.homebridgegroup.co/posts/{ps}",
+            "verify_url":  f"https://app.homebridgegroup.co/verify/{item.get('cir_id','')}" if item.get("cir_id") else "",
         })
 
     conn.close()
@@ -1775,15 +1806,25 @@ async def public_agent_profile(slug: str):
         "brokerage":     user.get("brokerage",""),
         "market":        setup.get("market",""),
         "short_bio":     setup.get("shortBio",""),
+        # Voice fields — the differentiating human content
+        "origin":        setup.get("origin",""),
+        "advantage":     setup.get("unfairAdvantage","") or setup.get("advantage",""),
+        "belief":        setup.get("signatureBelief","") or setup.get("belief",""),
+        "not_for":       setup.get("notForClient","") or setup.get("notFor",""),
         "niches":        setup.get("primaryNiches",[]),
+        "sub_niches":    setup.get("subNiches",[]),
         "designations":  setup.get("designations",[]),
         "service_areas": setup.get("serviceAreas",[]),
         "website":       setup.get("websiteUrl",""),
+        "cta_url":       setup.get("ctaUrl",""),
+        "cta_label":     setup.get("ctaLabel",""),
+        "state":         setup.get("state",""),
         "posts_total":   posts_total,
         "posts_30_days": posts_30_days,
         "cir_count":     cir_count,
         "compliance_pct":compliance_pct,
         "member_since":  member_since,
+        "week_streak":   week_streak,
         "posts":         posts,
         "profile_url":   f"https://{slug}.homebridgegroup.co",
         "rss_url":       f"https://api.homebridgegroup.co/public/agent/{slug}/feed",
@@ -1878,7 +1919,143 @@ async def public_agent_rss(slug: str):
     return _Response(content=rss, media_type="application/rss+xml")
 
 
-@app.post("/setup/slug")
+@app.get("/public/agent/{slug}/posts/{post_slug}")
+async def public_agent_post(slug: str, post_slug: str):
+    """
+    Individual post page — permanent crawlable URL for each approved post.
+    Powers per-post Google indexing and AI citation.
+    URL: {slug}.homebridgegroup.co/posts/{post-slug}
+    Serves agent.html — JavaScript reads the path and fetches this data.
+    """
+    import json as _json, re as _re
+    from database import get_conn as _gc
+    from fastapi.responses import JSONResponse
+
+    user = _get_agent_by_slug(slug)
+    if not user:
+        raise HTTPException(404, "Agent not found.")
+
+    conn = _gc()
+    c    = conn.cursor()
+
+    # Find post by matching slug pattern (headline-based + id suffix)
+    c.execute("""
+        SELECT id, niche, content, cir_id, approved_at, status
+        FROM content_library
+        WHERE user_id = ? AND status IN ('approved','published')
+        ORDER BY approved_at DESC
+    """, (user["id"],))
+    items = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    def _make_post_slug(headline, item_id):
+        base = _re.sub(r"[^a-z0-9]+", "-",
+               (headline or "post").lower().strip()).strip("-")[:60]
+        return f"{base}-{item_id}"
+
+    matched = None
+    for item in items:
+        try:
+            cd = _json.loads(item.get("content") or "{}")
+        except Exception:
+            cd = {}
+        headline = cd.get("headline","") or cd.get("title","")
+        if _make_post_slug(headline, item["id"]) == post_slug:
+            body = cd.get("body","") or cd.get("post","") or cd.get("content","")
+            matched = {
+                "id":          item["id"],
+                "slug":        post_slug,
+                "headline":    headline,
+                "body":        body,
+                "niche":       item.get("niche",""),
+                "cir_id":      item.get("cir_id",""),
+                "approved_at": (item.get("approved_at") or "")[:10],
+                "agent_name":  user["agent_name"],
+                "brokerage":   user.get("brokerage",""),
+                "profile_url": f"https://{slug}.homebridgegroup.co",
+                "verify_url":  f"https://app.homebridgegroup.co/verify/{item['cir_id']}" if item.get("cir_id") else "",
+            }
+            break
+
+    if not matched:
+        raise HTTPException(404, "Post not found.")
+
+    return JSONResponse(matched)
+
+
+@app.get("/public/verify/{cir_id}")
+async def public_verify_cir(cir_id: str):
+    """
+    Public CIR verification endpoint.
+    Called by verify.html at app.homebridgegroup.co/verify/{cir_id}
+    Returns the full compliance record for a given CIR ID.
+    No auth required — this is intentionally public.
+    """
+    import json as _json
+    from database import get_conn as _gc
+
+    conn = _gc()
+    c    = conn.cursor()
+
+    # Check compliance_records first (permanent table)
+    c.execute("""
+        SELECT cr.*, u.agent_name, u.brokerage, u.agent_slug
+        FROM compliance_records cr
+        JOIN users u ON cr.user_id = u.id
+        WHERE cr.cir_id = ?
+    """, (cir_id,))
+    row = c.fetchone()
+
+    if not row:
+        # Fall back to content_library for older records
+        c.execute("""
+            SELECT cl.*, u.agent_name, u.brokerage, u.agent_slug
+            FROM content_library cl
+            JOIN users u ON cl.user_id = u.id
+            WHERE cl.cir_id = ?
+        """, (cir_id,))
+        row = c.fetchone()
+
+    conn.close()
+
+    if not row:
+        raise HTTPException(404, "CIR record not found.")
+
+    row = dict(row)
+
+    comp = {}
+    try:
+        comp = _json.loads(row.get("compliance_json") or row.get("compliance") or "{}")
+    except Exception:
+        pass
+
+    headline = row.get("headline","")
+    if not headline:
+        try:
+            cd = _json.loads(row.get("content") or "{}")
+            headline = cd.get("headline","") or cd.get("title","")
+        except Exception:
+            pass
+
+    return {
+        "cir_id":         cir_id,
+        "agent_name":     row.get("agent_name",""),
+        "brokerage":      row.get("brokerage",""),
+        "agent_slug":     row.get("agent_slug",""),
+        "niche":          row.get("niche",""),
+        "headline":       headline,
+        "overall_status": row.get("overall_status","") or comp.get("overallStatus",""),
+        "fair_housing":   row.get("fair_housing","")   or comp.get("fairHousing",""),
+        "disclosure":     row.get("disclosure","")     or comp.get("brokerageDisclosure",""),
+        "nar_standards":  row.get("nar_standards","")  or comp.get("narStandards",""),
+        "state_compliance": row.get("state_compliance","") or comp.get("stateCompliance",""),
+        "rules_version":  row.get("rules_version","")  or comp.get("rules_version",""),
+        "rules_verified_dates": comp.get("rules_verified_dates",{}),
+        "notes":          comp.get("notes",[]) or comp.get("disclosureChecks",[]),
+        "approved_at":    row.get("approved_at",""),
+        "profile_url":    f"https://{row.get('agent_slug','')}.homebridgegroup.co" if row.get("agent_slug") else "",
+        "verified":       True,
+    }
 async def set_agent_slug(request: Request, current_user: dict = Depends(get_current_user)):
     """
     Let an agent set or customize their URL slug.
