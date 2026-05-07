@@ -797,12 +797,15 @@ async def send_approval_sms(to_phone: str, agent_name: str, headline: str, appro
     if not phone.startswith("+"):
         phone = "+1" + "".join(c for c in phone if c.isdigit())
 
-    short_headline = headline[:80] + ("..." if len(headline) > 80 else "")
-    message = (
-        f"AutoMates: Your post \"{short_headline}\" is ready for review. "
-        f"Tap to approve: {approve_url} "
-        f"Reply STOP to opt out."
-    )
+    # Keep under 160 chars (1 SMS segment = $0.0166).
+    # Short token URL is ~55 chars, leaving ~90 chars for headline.
+    short_headline = headline[:60] + ("…" if len(headline) > 60 else "")
+    message = f'AutoMates: "{short_headline}" ready. Tap: {approve_url}'
+    # Safety — truncate further if URL was unexpectedly long
+    if len(message) > 160:
+        overage = len(message) - 160
+        short_headline = headline[:max(20, 60 - overage)] + "…"
+        message = f'AutoMates: "{short_headline}" ready. Tap: {approve_url}'
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
