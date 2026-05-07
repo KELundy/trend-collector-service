@@ -928,10 +928,26 @@ class SetupSaveRequest(BaseModel):
 async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_user)):
     save_agent_setup(current_user["id"], body.setup)
 
-    # Auto-generate slug if this agent doesn't have one yet
     from database import get_conn as _gc_slug
     _conn_s = _gc_slug()
     _c_s    = _conn_s.cursor()
+
+    # ── Sync approvalPhone → users.phone so SMS notifications fire correctly ──
+    # The scheduler and send-approval routes read users.phone directly from the
+    # JWT/user record. Without this sync, the phone saved in setup JSON is never
+    # seen by those routes and SMS is silently skipped.
+    _approval_phone = (body.setup or {}).get("approvalPhone", "").strip()
+    if _approval_phone:
+        # Normalise to E.164 (+1XXXXXXXXXX) before storing
+        _ph = _approval_phone
+        if not _ph.startswith("+"):
+            _ph = "+1" + "".join(c for c in _ph if c.isdigit())
+        _c_s.execute(
+            "UPDATE users SET phone = ? WHERE id = ?",
+            (_ph, current_user["id"])
+        )
+
+    # Auto-generate slug if this agent doesn't have one yet
     _c_s.execute("SELECT agent_slug FROM users WHERE id = ?", (current_user["id"],))
     _slug_row = _c_s.fetchone()
     if not (_slug_row and _slug_row["agent_slug"]):
@@ -946,7 +962,8 @@ async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_us
             _auto_slug = f"{_auto_slug}-{current_user['id']}"
         _c_s.execute("UPDATE users SET agent_slug = ? WHERE id = ?",
                      (_auto_slug, current_user["id"]))
-        _conn_s.commit()
+
+    _conn_s.commit()
     _conn_s.close()
 
     return {"success": True}
