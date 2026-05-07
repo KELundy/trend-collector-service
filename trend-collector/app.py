@@ -633,7 +633,7 @@ def _run_scheduled_generation(sched: dict):
             # Point directly at the API endpoint — no static approve.html needed.
             # The /approve endpoint looks up item_id from the token, so the URL is clean.
             api_url     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
-            approve_url = f"{api_url}/approve?token={token}"
+            approve_url = f"{api_url}/approve/{token}"
             agent_name = user_row["agent_name"] or "Agent"
             headline   = content_to_save.get("headline", "Your scheduled content is ready")
 
@@ -828,7 +828,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
         # Use first item for the primary approval link; headline reflects count
         first_niche, first_item_id, first_headline = saved_items[0]
         token       = create_approval_token(user_id, first_item_id)
-        approve_url = f"{api_url}/approve?token={token}"
+        approve_url = f"{api_url}/approve/{token}"
 
         if len(saved_items) == 1:
             headline_for_email = first_headline
@@ -3021,7 +3021,7 @@ async def send_approval_request(
 
     token    = create_approval_token(current_user["id"], item_id)
     api_url     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
-    approve_url = f"{api_url}/approve?token={token}"
+    approve_url = f"{api_url}/approve/{token}"
 
     # Pull agent name + headline for the message
     agent_name = current_user.get("agent_name", "Your agent")
@@ -3316,7 +3316,7 @@ function toggleChip(cb) {
   <h1>{headline}</h1>
   {comp_html}
   {post_html}
-  <form method="POST" action="/approve?token={token}">
+  <form method="POST" action="/approve/{token}">
     {platform_section}
     {primary_btn}
     {secondary_btn}
@@ -3885,10 +3885,22 @@ async def update_notification_email(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # APPROVAL ENDPOINTS
-# GET  /approve?token=   → preview page (shows content, Approve button)
-# POST /approve?token=   → performs approval, returns success page
+# GET  /approve?token=      → preview page (query param — legacy)
+# GET  /approve/{token}     → preview page (path param — new, shorter URL)
+# POST /approve?token=      → performs approval (query param — legacy)
+# POST /approve/{token}     → performs approval (path param — new)
 # POST /approve/resend?token= → creates fresh token from expired one, resends
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/approve/{token_path}")
+async def approval_preview_path(token_path: str, request: Request):
+    """Path-based approve route — shorter URL, fits in one SMS segment."""
+    return await approval_preview(token=token_path)
+
+@app.post("/approve/{token_path}")
+async def approval_post_path(token_path: str, request: Request):
+    """Path-based approve POST route — delegates to approval_confirm."""
+    return await approval_confirm(request=request, token=token_path)
 
 @app.get("/approve")
 async def approval_preview(token: str = ""):
@@ -4096,7 +4108,7 @@ async def approval_resend(token: str = ""):
 
     new_token   = create_approval_token(user_id, item_id)
     api_url     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
-    approve_url = f"{api_url}/approve?token={new_token}"
+    approve_url = f"{api_url}/approve/{new_token}"
 
     sent_email = False
     sent_sms   = False
