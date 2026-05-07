@@ -797,10 +797,11 @@ async def send_approval_sms(to_phone: str, agent_name: str, headline: str, appro
     if not phone.startswith("+"):
         phone = "+1" + "".join(c for c in phone if c.isdigit())
 
-    short_headline = headline[:60] + ("..." if len(headline) > 60 else "")
+    short_headline = headline[:80] + ("..." if len(headline) > 80 else "")
     message = (
-        "HomeBridge: \"" + short_headline + "\" "
-        "is ready for your approval. Tap to review: " + approve_url
+        f"AutoMates: Your post \"{short_headline}\" is ready for review. "
+        f"Tap to approve: {approve_url} "
+        f"Reply STOP to opt out."
     )
 
     async with httpx.AsyncClient(timeout=15) as client:
