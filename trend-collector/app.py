@@ -1707,7 +1707,10 @@ async def public_agent_profile(slug: str):
         except Exception:
             pass
 
-    # All approved/published posts — FULL TEXT for SEO
+    # All approved/published/archived posts — FULL TEXT for SEO.
+    # Archived posts remain on the authority page — archiving is a housekeeping
+    # action inside the app, not a retraction of CIR-verified content.
+    # No LIMIT — agents accumulate hundreds of posts over time.
     now       = datetime.utcnow()
     month_ago = (now - timedelta(days=30)).isoformat()
 
@@ -1715,19 +1718,20 @@ async def public_agent_profile(slug: str):
         SELECT id, niche, content, compliance, cir_id,
                approved_at, published_at, status
         FROM content_library
-        WHERE user_id = ? AND status IN ('approved','published')
+        WHERE user_id = ? AND status IN ('approved','published','archived')
         ORDER BY approved_at DESC
-        LIMIT 50
     """, (user_id,))
     items = [dict(r) for r in c.fetchall()]
 
-    # Stats
-    posts_total   = len(items)
-    posts_30_days = sum(1 for i in items if (i.get("approved_at") or "") >= month_ago)
+    # Stats — count only active (non-archived) posts for displayed metrics.
+    # CIR count includes archived — those records are permanent.
+    active_items  = [i for i in items if i.get("status") in ("approved", "published")]
+    posts_total   = len(active_items)
+    posts_30_days = sum(1 for i in active_items if (i.get("approved_at") or "") >= month_ago)
     cir_count     = sum(1 for i in items if i.get("cir_id"))
 
     clean_count = 0
-    for item in items:
+    for item in active_items:
         try:
             comp = _json.loads(item.get("compliance") or "{}")
             if comp.get("overallStatus") in ("compliant","pass"):
