@@ -2510,11 +2510,20 @@ def signals_purge_expired():
 
 # Monthly limits by plan
 PLAN_LIMITS = {
-    "trial":          10,
-    "agent":          30,
-    "team":           75,
-    "office_starter": 150,
-    "office_growth":  400,
+    # Trial — 10 free generations, no card required
+    "trial":            10,
+    # Locked pricing — must match Stripe product keys exactly
+    "founding_member":  50,   # $129/mo locked for life — first 50 subscribers, same cap as Starter
+    "starter":          50,   # $149/mo or $119/mo annual
+    "professional":     60,   # $199/mo or $159/mo annual
+    "power":           100,   # $299/mo or $239/mo annual
+    # Add-on Pack (+30) is handled by incrementing users.monthly_limit directly
+    # via usage_set_limit() — not through this dict
+    # Legacy keys — kept so existing DB rows don't break
+    "agent":            30,
+    "team":             75,
+    "office_starter":  150,
+    "office_growth":   400,
     "enterprise":     9999,
 }
 
