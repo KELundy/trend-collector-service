@@ -1831,9 +1831,12 @@ async def public_agent_profile(slug: str):
     # Stats — active posts only (approved/published) for displayed metrics.
     # CIR count includes archived — those records are permanent.
     active_items  = [i for i in items if i.get("status") in ("approved", "published")]
-    posts_total   = len(active_items)
     posts_30_days = sum(1 for i in active_items if (i.get("approved_at") or "") >= month_ago)
     cir_count     = sum(1 for i in items if i.get("cir_id"))
+    # posts_total = all CIR-reviewed posts, including archived.
+    # Archiving is housekeeping — a CIR was issued and a licensed professional
+    # stood behind that content. The count reflects the full body of reviewed work.
+    posts_total   = cir_count
 
     clean_count = 0
     for item in active_items:
@@ -2161,9 +2164,10 @@ async def public_verify_cir(cir_id: str):
         "rules_version":  row.get("rules_version","")  or comp.get("rules_version",""),
         "rules_verified_dates": comp.get("rules_verified_dates",{}),
         "notes":          comp.get("notes",[]) or comp.get("disclosureChecks",[]),
+        "disclosure_checks": comp.get("disclosureChecks",[]) or comp.get("notes",[]),
         "approved_at":    row.get("approved_at",""),
         "profile_url":    f"https://{row.get('agent_slug','')}.homebridgegroup.co" if row.get("agent_slug") else "",
-        "verified":       True,
+        "record_confirmed": True,
     }
 async def set_agent_slug(request: Request, current_user: dict = Depends(get_current_user)):
     """
