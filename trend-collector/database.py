@@ -119,6 +119,19 @@ def init_db():
         ("generation_count",       "INTEGER DEFAULT 0"),
         ("generation_reset_date",  "TEXT DEFAULT NULL"),
         ("monthly_limit",          "INTEGER DEFAULT 30"),
+        # Approved post tracking — primary billing unit (Session 36)
+        # approved_post_count: posts approved (CIR issued) this billing period
+        # generation_backstop_count: raw generations this billing period (abuse guard)
+        # billing_reset_day: day-of-month the agent's billing cycle resets (1–28)
+        # addon_posts_limit: extra approved posts from purchased Add-on Packs this period
+        # addon_backstop_limit: extra backstop credits from Add-on Packs this period
+        # last_generation_hash: MD5 of last generation inputs — detects free regenerations
+        ("approved_post_count",      "INTEGER DEFAULT 0"),
+        ("generation_backstop_count","INTEGER DEFAULT 0"),
+        ("billing_reset_day",        "INTEGER DEFAULT 1"),
+        ("addon_posts_limit",        "INTEGER DEFAULT 0"),
+        ("addon_backstop_limit",     "INTEGER DEFAULT 0"),
+        ("last_generation_hash",     "TEXT DEFAULT NULL"),
         # Partner Program — added Session 12
         ("partner_tier",           "TEXT DEFAULT NULL"),
         ("partner_code",           "TEXT DEFAULT NULL"),
@@ -2508,104 +2521,379 @@ def signals_purge_expired():
 # USAGE LIMITS
 # ─────────────────────────────────────────────
 
-# Monthly limits by plan
+# ─────────────────────────────────────────────
+# USAGE SYSTEM — two-counter model
+#
+# PRIMARY UNIT: approved_post_count
+#   Incremented when an agent approves a post (CIR issued).
+#   This is the billable unit — what agents pay for.
+#   Resets on the agent's billing_reset_day each month.
+#
+# ABUSE GUARD: generation_backstop_count
+#   Incremented on every raw generation API call.
+#   Not shown prominently to agents — background guardrail only.
+#   Soft message when hit: "Review what you have before generating more."
+#   Ratio: 3x the approved post limit.
+#
+# TRIAL: 10 lifetime generations, never resets.
+#
+# UNLIMITED_ROLES: super_admin and admin bypass all checks entirely.
+# ─────────────────────────────────────────────
+
 PLAN_LIMITS = {
-    # Trial — 10 free generations, no card required
-    "trial":            10,
-    # Locked pricing — must match Stripe product keys exactly
-    "founding_member":  50,   # $129/mo locked for life — first 50 subscribers, same cap as Starter
-    "starter":          50,   # $149/mo or $119/mo annual
-    "professional":     60,   # $199/mo or $159/mo annual
-    "power":           100,   # $299/mo or $239/mo annual
-    # Add-on Pack (+30) is handled by incrementing users.monthly_limit directly
-    # via usage_set_limit() — not through this dict
-    # Legacy keys — kept so existing DB rows don't break
-    "agent":            30,
-    "team":             75,
-    "office_starter":  150,
-    "office_growth":   400,
-    "enterprise":     9999,
+    # plan_key: {"posts": N, "backstop": N*3}
+    # posts    = approved post limit per billing period
+    # backstop = raw generation ceiling per billing period (abuse guard)
+    "trial":           {"posts": 10,   "backstop": 30,   "lifetime": True},
+    "founding_member": {"posts": 50,   "backstop": 150,  "lifetime": False},
+    "starter":         {"posts": 50,   "backstop": 150,  "lifetime": False},
+    "professional":    {"posts": 60,   "backstop": 200,  "lifetime": False},
+    "power":           {"posts": 100,  "backstop": 350,  "lifetime": False},
+    # Legacy keys — kept so existing DB rows never break
+    "agent":           {"posts": 30,   "backstop": 90,   "lifetime": False},
+    "team":            {"posts": 75,   "backstop": 225,  "lifetime": False},
+    "office_starter":  {"posts": 150,  "backstop": 450,  "lifetime": False},
+    "office_growth":   {"posts": 400,  "backstop": 1200, "lifetime": False},
+    "enterprise":      {"posts": 9999, "backstop": 9999, "lifetime": False},
 }
 
-# Roles that are never limited
+# Roles that are never limited — bypass all checks
 UNLIMITED_ROLES = {"super_admin", "admin"}
 
+# Hard rate limit — max generations per hour per account (bot protection)
+HOURLY_RATE_LIMIT = 10
 
-def usage_check(user_id: int, role: str, plan: str) -> dict:
+
+def _get_plan_limits(plan: str) -> dict:
+    """Return the posts and backstop limits for a plan. Safe fallback to trial."""
+    return PLAN_LIMITS.get(plan, PLAN_LIMITS["trial"])
+
+
+def _compute_next_billing_reset(reset_day: int) -> datetime:
     """
-    Check whether the user has generation capacity remaining.
-    Returns {"allowed": bool, "used": int, "limit": int, "resets_on": str}
-    Always allowed for super_admin and admin.
-    Resets on the 1st of each month UTC.
+    Compute the next billing reset datetime from a day-of-month (1–28).
+    If today is before reset_day this month, reset is this month.
+    If today is on or after reset_day, reset is next month.
+    Clamps to 28 to avoid Feb/short-month issues.
     """
-    if role in UNLIMITED_ROLES:
-        return {"allowed": True, "used": 0, "limit": 9999, "resets_on": None}
+    today = datetime.utcnow()
+    day   = min(max(int(reset_day or 1), 1), 28)
+    # Try this month first
+    try:
+        candidate = today.replace(day=day, hour=0, minute=0, second=0, microsecond=0)
+    except ValueError:
+        candidate = today.replace(day=28, hour=0, minute=0, second=0, microsecond=0)
+    if candidate <= today:
+        # Move to next month
+        if today.month == 12:
+            candidate = candidate.replace(year=today.year + 1, month=1)
+        else:
+            candidate = candidate.replace(month=today.month + 1)
+    return candidate
 
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT generation_count, generation_reset_date, monthly_limit FROM users WHERE id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return {"allowed": False, "used": 0, "limit": 0, "resets_on": None}
 
-    count      = row["generation_count"] or 0
+def _check_and_reset_if_due(conn, user_id: int, row: dict, plan: str) -> dict:
+    """
+    Check whether the billing period has rolled over and reset counters if so.
+    Returns the (possibly reset) row values as a plain dict.
+    Trial accounts never reset — their counters are lifetime.
+    Modifies the DB in place if reset is needed.
+    Returns dict with keys: approved_post_count, generation_backstop_count,
+    generation_reset_date, billing_reset_day, addon_posts_limit, addon_backstop_limit.
+    """
+    limits = _get_plan_limits(plan)
+    if limits.get("lifetime"):
+        # Trial — never reset
+        return dict(row)
+
+    reset_day  = row["billing_reset_day"] or 1
     reset_date = row["generation_reset_date"]
-    limit      = row["monthly_limit"] or PLAN_LIMITS.get(plan, 30)
     today      = datetime.utcnow()
 
-    # Compute reset date — 1st of next month
-    if today.month == 12:
-        next_reset = datetime(today.year + 1, 1, 1)
+    needs_reset = False
+    if not reset_date:
+        needs_reset = True
     else:
-        next_reset = datetime(today.year, today.month + 1, 1)
-    resets_on = next_reset.strftime("%B 1, %Y")
-
-    # If reset date has passed, reset the counter
-    if reset_date:
         try:
-            rd = datetime.fromisoformat(reset_date)
-            if today >= rd:
-                _usage_reset(user_id, next_reset.isoformat())
-                count = 0
+            if today >= datetime.fromisoformat(reset_date):
+                needs_reset = True
         except Exception:
-            pass
-    else:
-        # First time — set reset date
-        _usage_reset(user_id, next_reset.isoformat())
+            needs_reset = True
+
+    if needs_reset:
+        next_reset = _compute_next_billing_reset(reset_day)
+        conn.execute("""
+            UPDATE users
+            SET approved_post_count       = 0,
+                generation_backstop_count = 0,
+                generation_reset_date     = ?,
+                addon_posts_limit         = 0,
+                addon_backstop_limit      = 0
+            WHERE id = ?
+        """, (next_reset.isoformat(), user_id))
+        conn.commit()
+        return {
+            "approved_post_count":       0,
+            "generation_backstop_count": 0,
+            "generation_reset_date":     next_reset.isoformat(),
+            "billing_reset_day":         reset_day,
+            "addon_posts_limit":         0,
+            "addon_backstop_limit":      0,
+        }
+    return dict(row)
+
+
+def check_post_approval_allowed(user_id: int, role: str, plan: str) -> dict:
+    """
+    Check whether this user can approve one more post (consume a post credit).
+    Called from PATCH /library/{item_id} when status changes to 'approved'.
+
+    Returns:
+        allowed        — bool
+        posts_used     — approved posts this period
+        posts_limit    — total approved post limit (base + addon)
+        backstop_used  — generations this period
+        backstop_limit — generation backstop (base + addon)
+        resets_on      — human-readable reset date string
+    """
+    if role in UNLIMITED_ROLES:
+        return {
+            "allowed": True, "posts_used": 0, "posts_limit": 9999,
+            "backstop_used": 0, "backstop_limit": 9999, "resets_on": None,
+        }
+
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT approved_post_count, generation_backstop_count,
+               generation_reset_date, billing_reset_day,
+               addon_posts_limit, addon_backstop_limit
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {"allowed": False, "posts_used": 0, "posts_limit": 0,
+                "backstop_used": 0, "backstop_limit": 0, "resets_on": None}
+
+    row = _check_and_reset_if_due(conn, user_id, row, plan)
+    conn.close()
+
+    limits         = _get_plan_limits(plan)
+    posts_limit    = limits["posts"]    + (row["addon_posts_limit"]    or 0)
+    backstop_limit = limits["backstop"] + (row["addon_backstop_limit"] or 0)
+    posts_used     = row["approved_post_count"]       or 0
+    backstop_used  = row["generation_backstop_count"] or 0
+
+    reset_day  = row["billing_reset_day"] or 1
+    next_reset = _compute_next_billing_reset(reset_day)
+    resets_on  = next_reset.strftime("%B %-d, %Y")
 
     return {
-        "allowed":    count < limit,
-        "used":       count,
-        "limit":      limit,
-        "resets_on":  resets_on,
+        "allowed":        posts_used < posts_limit,
+        "posts_used":     posts_used,
+        "posts_limit":    posts_limit,
+        "backstop_used":  backstop_used,
+        "backstop_limit": backstop_limit,
+        "resets_on":      resets_on,
+    }
+
+
+def check_generation_backstop_allowed(user_id: int, role: str, plan: str) -> dict:
+    """
+    Check whether this user can perform another generation (backstop guard).
+    Called before every Claude API call in content_engine.py.
+    Does NOT check approved post count — that's check_post_approval_allowed().
+
+    Returns:
+        allowed        — bool (False = soft stop, show review message)
+        backstop_used  — generations this period
+        backstop_limit — ceiling for this period
+        resets_on      — human-readable reset date
+    """
+    if role in UNLIMITED_ROLES:
+        return {"allowed": True, "backstop_used": 0, "backstop_limit": 9999, "resets_on": None}
+
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT approved_post_count, generation_backstop_count,
+               generation_reset_date, billing_reset_day,
+               addon_posts_limit, addon_backstop_limit
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {"allowed": True, "backstop_used": 0, "backstop_limit": 9999, "resets_on": None}
+
+    row = _check_and_reset_if_due(conn, user_id, row, plan)
+    conn.close()
+
+    limits         = _get_plan_limits(plan)
+    backstop_limit = limits["backstop"] + (row["addon_backstop_limit"] or 0)
+    backstop_used  = row["generation_backstop_count"] or 0
+
+    # Trial: backstop is also lifetime
+    if limits.get("lifetime"):
+        posts_used  = row["approved_post_count"] or 0
+        posts_limit = limits["posts"]
+        allowed     = posts_used < posts_limit  # trial gates on approved posts, not backstop
+        return {
+            "allowed":        allowed,
+            "backstop_used":  backstop_used,
+            "backstop_limit": posts_limit,
+            "resets_on":      None,
+        }
+
+    reset_day  = row["billing_reset_day"] or 1
+    next_reset = _compute_next_billing_reset(reset_day)
+    resets_on  = next_reset.strftime("%B %-d, %Y")
+
+    return {
+        "allowed":        backstop_used < backstop_limit,
+        "backstop_used":  backstop_used,
+        "backstop_limit": backstop_limit,
+        "resets_on":      resets_on,
+    }
+
+
+def record_generation(user_id: int, role: str) -> None:
+    """
+    Increment generation_backstop_count for one raw generation call.
+    Never called for demo-token or UNLIMITED_ROLES.
+    Never blocks the request — fire and forget, called after generation succeeds.
+    """
+    if role in UNLIMITED_ROLES:
+        return
+    try:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE users SET generation_backstop_count = COALESCE(generation_backstop_count, 0) + 1 WHERE id = ?",
+            (user_id,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Usage] record_generation failed for user {user_id}: {e}")
+
+
+def record_post_approval(user_id: int, role: str) -> None:
+    """
+    Increment approved_post_count when a CIR is issued (status → approved).
+    This is the primary billing counter.
+    Never called for UNLIMITED_ROLES.
+    """
+    if role in UNLIMITED_ROLES:
+        return
+    try:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE users SET approved_post_count = COALESCE(approved_post_count, 0) + 1 WHERE id = ?",
+            (user_id,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Usage] record_post_approval failed for user {user_id}: {e}")
+
+
+def apply_addon_pack(user_id: int) -> dict:
+    """
+    Apply one Add-on Pack purchase to a user's current billing period.
+    Adds 30 approved posts and 90 backstop credits.
+    Stackable — call once per pack purchased.
+    Returns updated limits for confirmation.
+    """
+    conn = get_conn()
+    conn.execute("""
+        UPDATE users
+        SET addon_posts_limit    = COALESCE(addon_posts_limit, 0)    + 30,
+            addon_backstop_limit = COALESCE(addon_backstop_limit, 0) + 90
+        WHERE id = ?
+    """, (user_id,))
+    conn.commit()
+    c = conn.cursor()
+    c.execute("SELECT addon_posts_limit, addon_backstop_limit FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return {
+        "addon_posts_limit":    row["addon_posts_limit"]    if row else 0,
+        "addon_backstop_limit": row["addon_backstop_limit"] if row else 0,
+    }
+
+
+def set_billing_reset_day(user_id: int, day: int) -> None:
+    """
+    Set the day-of-month on which this agent's billing period resets.
+    Called by the Stripe webhook on subscription creation.
+    Clamped to 1–28 to avoid month-end edge cases.
+    """
+    day = min(max(int(day), 1), 28)
+    conn = get_conn()
+    conn.execute("UPDATE users SET billing_reset_day = ? WHERE id = ?", (day, user_id))
+    conn.commit()
+    conn.close()
+
+
+def activate_subscription(user_id: int, plan: str, billing_cycle: str,
+                           stripe_customer_id: str, stripe_subscription_id: str,
+                           billing_reset_day: int = 1):
+    """
+    Activate a subscription for a user.
+    Sets plan, billing cycle, Stripe IDs, and billing reset day.
+    Resets counters for the new billing period.
+    """
+    day = min(max(int(billing_reset_day or 1), 1), 28)
+    next_reset = _compute_next_billing_reset(day)
+    conn = get_conn()
+    conn.execute("""
+        UPDATE users
+        SET plan                      = ?,
+            billing_cycle             = ?,
+            sub_status                = 'active',
+            stripe_customer_id        = ?,
+            stripe_subscription_id    = ?,
+            billing_reset_day         = ?,
+            generation_reset_date     = ?,
+            approved_post_count       = 0,
+            generation_backstop_count = 0,
+            addon_posts_limit         = 0,
+            addon_backstop_limit      = 0
+        WHERE id = ?
+    """, (plan, billing_cycle, stripe_customer_id, stripe_subscription_id,
+          day, next_reset.isoformat(), user_id))
+    conn.commit()
+    conn.close()
+
+
+# ── Keep usage_check and usage_increment as thin compatibility shims ──
+# These are still imported by content_engine.py and app.py in places.
+# They now delegate to the new two-counter system.
+# Remove these once all call sites are updated.
+def usage_check(user_id: int, role: str, plan: str) -> dict:
+    """Compatibility shim — delegates to check_generation_backstop_allowed."""
+    result = check_generation_backstop_allowed(user_id, role, plan)
+    return {
+        "allowed":   result["allowed"],
+        "used":      result["backstop_used"],
+        "limit":     result["backstop_limit"],
+        "resets_on": result["resets_on"],
     }
 
 
 def usage_increment(user_id: int):
-    """Increment the generation counter for a user."""
-    conn = get_conn()
-    conn.execute(
-        "UPDATE users SET generation_count = COALESCE(generation_count, 0) + 1 WHERE id = ?",
-        (user_id,)
-    )
-    conn.commit()
-    conn.close()
+    """Compatibility shim — use record_generation() for new call sites."""
+    pass  # No-op — generation recording now happens via record_generation()
 
 
 def _usage_reset(user_id: int, next_reset_iso: str):
-    """Reset generation count and set next reset date."""
-    conn = get_conn()
-    conn.execute(
-        "UPDATE users SET generation_count = 0, generation_reset_date = ? WHERE id = ?",
-        (next_reset_iso, user_id)
-    )
-    conn.commit()
-    conn.close()
+    """Compatibility shim — reset now happens inside _check_and_reset_if_due."""
+    pass
 
 
 def usage_set_limit(user_id: int, limit: int):
-    """Override monthly limit for a specific user (admin use)."""
+    """Admin override — sets the base monthly_limit column (legacy). Use apply_addon_pack() for packs."""
     conn = get_conn()
     conn.execute("UPDATE users SET monthly_limit = ? WHERE id = ?", (limit, user_id))
     conn.commit()
