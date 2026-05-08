@@ -3496,11 +3496,17 @@ async def get_situations_multi(niches: Optional[str] = None, include_lighter: bo
 
 @router.post("/generate-content", response_model=ContentResponse)
 async def generate_content(payload: ContentRequest, request: Request) -> ContentResponse:
-    # ── Usage limit gate ──────────────────────────────────────────────────────
-    # Enforce monthly generation limits before calling Claude.
+    # ── Generation backstop gate ──────────────────────────────────────────────
+    # Enforces the abuse-prevention backstop (3x post limit).
+    # Approved post limit is enforced at PATCH /library/{item_id}, not here.
     # super_admin and admin are always unlimited.
+    # Regenerations (same mode+niche+situation) are always free.
+    _uid  = None
+    _role = "agent"
+    _plan = "trial"
+    _is_regen = False
     try:
-        from database import usage_check, usage_increment
+        from database import check_generation_backstop_allowed, record_generation
         import os as _os
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
@@ -3510,7 +3516,6 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
             _conn = _sq.connect(db_path)
             _conn.row_factory = _sq.Row
             _c = _conn.cursor()
-            # Decode JWT to get user_id
             try:
                 import jwt as _jwt
                 SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
@@ -3520,23 +3525,52 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
                     _c.execute("SELECT id, role, plan FROM users WHERE id = ?", (int(uid),))
                     urow = _c.fetchone()
                     if urow:
-                        check = usage_check(urow["id"], urow["role"] or "agent", urow["plan"] or "trial")
-                        if not check["allowed"]:
-                            _conn.close()
-                            from fastapi import HTTPException as _HTTPEx
-                            raise _HTTPEx(
-                                status_code=429,
-                                detail={
-                                    "error":      "generation_limit_reached",
-                                    "message":    f"You've used all {check['limit']} posts included in your plan this month.",
-                                    "used":       check["used"],
-                                    "limit":      check["limit"],
-                                    "resets_on":  check["resets_on"],
-                                    "upgrade_msg":"Contact us to add more generations or upgrade your plan.",
-                                }
+                        _uid  = urow["id"]
+                        _role = urow["role"] or "agent"
+                        _plan = urow["plan"] or "trial"
+
+                        # ── Regeneration detection ────────────────────────────
+                        # Hash of mode + niche + situation identifies identical requests.
+                        # Same hash = free regeneration, does not count against backstop.
+                        import hashlib as _hl
+                        _regen_str = "|".join([
+                            str(payload.generation_mode or ""),
+                            str(payload.content_mode or ""),
+                            "|".join(sorted(payload.identity.primaryCategories or [])),
+                            str(payload.situation or ""),
+                        ])
+                        _regen_hash = _hl.md5(_regen_str.encode()).hexdigest()
+                        _c.execute("SELECT last_generation_hash FROM users WHERE id = ?", (_uid,))
+                        _hash_row = _c.fetchone()
+                        _prev_hash = _hash_row["last_generation_hash"] if _hash_row and "last_generation_hash" in _hash_row.keys() else None
+                        _is_regen = (_prev_hash == _regen_hash)
+
+                        # Always update the hash for next call
+                        try:
+                            _conn.execute(
+                                "UPDATE users SET last_generation_hash = ? WHERE id = ?",
+                                (_regen_hash, _uid)
                             )
-                        if urow["role"] not in ("super_admin", "admin"):
-                            usage_increment(urow["id"])
+                            _conn.commit()
+                        except Exception:
+                            pass  # Column may not exist yet — non-blocking
+
+                        if not _is_regen:
+                            # New generation — check the backstop
+                            backstop = check_generation_backstop_allowed(_uid, _role, _plan)
+                            if not backstop["allowed"]:
+                                _conn.close()
+                                from fastapi import HTTPException as _HTTPEx
+                                raise _HTTPEx(
+                                    status_code=429,
+                                    detail={
+                                        "error":           "backstop_limit_reached",
+                                        "message":         "You've generated a lot of content this month. Take some time to review and approve what you have before generating more.",
+                                        "backstop_used":   backstop["backstop_used"],
+                                        "backstop_limit":  backstop["backstop_limit"],
+                                        "resets_on":       backstop["resets_on"],
+                                    }
+                                )
             except Exception:
                 pass  # Limit check failure never blocks generation
             _conn.close()
@@ -3598,9 +3632,22 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
         agent_name=agent_name, brokerage=brokerage,
     )
     try:
-        return _parse_claude_output(raw_text, compliance)
+        result = _parse_claude_output(raw_text, compliance)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error structuring content response: {str(e)}")
+
+    # ── Record backstop count after successful generation ─────────────────────
+    # Only for new generations (not free regenerations) and non-unlimited roles.
+    # Fire-and-forget — never blocks the response.
+    try:
+        if _uid and not _is_regen and _role not in ("super_admin", "admin"):
+            from database import record_generation as _rg
+            _rg(_uid, _role)
+    except Exception:
+        pass
+    # ─────────────────────────────────────────────────────────────────────────
+
+    return result
 
 
 def generate_content_core(
