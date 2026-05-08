@@ -102,17 +102,12 @@ from auth import router as auth_router, get_current_user
 from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core
 from social import router as social_router
 
-from collectors.google_trends import fetch_google_trends
-from collectors.youtube_trends import fetch_youtube_trends
-from collectors.reddit_trends import fetch_reddit_trends
-from collectors.bing_trends import fetch_bing_trends
-from collectors.tiktok_trends import fetch_tiktok_trends
+
 
 from anthropic import Anthropic
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-COLLECTION_INTERVAL_SECONDS = int(os.getenv("TREND_INTERVAL_SECONDS", str(24 * 60 * 60)))
-TREND_ENABLED  = os.getenv("TREND_ENABLED",  "true").lower()  == "true"
+
 SIGNAL_ENABLED = os.getenv("SIGNAL_ENABLED", "false").lower() == "true"  # off by default — set SIGNAL_ENABLED=true in Render when ready to go live
 
 app = FastAPI(
@@ -252,9 +247,6 @@ async def startup_event():
         backfill_compliance_records()  # one-time, skips already-present records
     except Exception as _bf_e:
         print(f"[Startup] compliance_records backfill skipped: {_bf_e}")
-    print("[Startup] Starting background trend collector...")
-    t1 = threading.Thread(target=trend_collection_worker, daemon=True)
-    t1.start()
     print("[Startup] Starting content scheduler...")
     t2 = threading.Thread(target=content_scheduler_worker, daemon=True)
     t2.start()
@@ -889,52 +881,6 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
 
     except Exception as notify_err:
         print(f"[Scheduler] ✗ Notification error (content was saved): {notify_err}")
-
-
-def classify_topic_to_niches(topic: str) -> list:
-    """Classify a trend topic into real estate niches using Claude.
-    Uses Haiku — background classification task, not user-facing content generation."""
-    prompt = f"""You are a real estate niche classifier. Given a trend topic, return a JSON list of real estate niches it belongs to. No explanation, only JSON.\nTrend topic: "{topic}" """
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return json.loads(response.content[0].text)
-    except Exception:
-        return []
-
-
-def collect_all_trends() -> Dict[str, Any]:
-    raw = {"google": fetch_google_trends(), "youtube": fetch_youtube_trends(), "reddit": fetch_reddit_trends(), "bing": fetch_bing_trends(), "tiktok": fetch_tiktok_trends(), "timestamp": datetime.utcnow().isoformat()}
-    classified = {}
-    for source, items in raw.items():
-        if source == "timestamp": continue
-        for item in items:
-            topic = (item.get("topic") or item.get("title") or item.get("query") or json.dumps(item)) if isinstance(item, dict) else str(item)
-            niches = classify_topic_to_niches(topic)
-            for niche in niches:
-                if niche not in classified:
-                    classified[niche] = {"google": [], "youtube": [], "reddit": [], "bing": [], "tiktok": [], "timestamp": raw["timestamp"]}
-                classified[niche][source].append({"topic": topic})
-    return classified
-
-
-def trend_collection_worker():
-    while True:
-        if TREND_ENABLED:
-            try:
-                print("[Trend Collector] Collecting trends...")
-                classified = collect_all_trends()
-                for niche, niche_trends in classified.items():
-                    save_trends(niche_trends, niche)
-                print("[Trend Collector] Done.")
-            except Exception as e:
-                print(f"[Trend Collector] Error: {e}")
-        else:
-            print("[Trend Collector] DISABLED (TREND_ENABLED=false) — skipping this cycle.")
-        time.sleep(COLLECTION_INTERVAL_SECONDS)
 
 
 @app.get("/trends/latest")
