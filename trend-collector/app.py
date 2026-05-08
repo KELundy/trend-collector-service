@@ -77,6 +77,17 @@ from database import (
     market_report_delete,
     contact_save, contact_list_all,
     partner_get_by_code,
+    # Usage system — two-counter model (Session 36)
+    check_post_approval_allowed,
+    check_generation_backstop_allowed,
+    record_generation,
+    record_post_approval,
+    apply_addon_pack,
+    set_billing_reset_day,
+    activate_subscription,
+    cancel_subscription,
+    get_subscription_status,
+    _compute_next_billing_reset,
     DB_NAME,
 )
 
@@ -313,6 +324,45 @@ async def update_library_item(item_id: int, body: LibraryPatchRequest, current_u
     if body.copiedPlatforms is not None: updates["copied_platforms"] = body.copiedPlatforms
     if body.approvedAt is not None: updates["approved_at"] = body.approvedAt
     if body.publishedAt is not None: updates["published_at"] = body.publishedAt
+
+    # ── Post approval limit gate ───────────────────────────────────────────────
+    # Approval (CIR issuance) is the primary billing unit — not generation.
+    # Check and record only when this patch is setting status to 'approved'
+    # AND the item was previously 'pending' (first approval only, not re-approvals).
+    if body.status == "approved":
+        role = current_user.get("role", "agent")
+        plan = current_user.get("plan", "trial")
+        uid  = current_user["id"]
+        from database import check_post_approval_allowed, record_post_approval, get_conn as _gc_patch
+        # Check previous status — only gate and count on first approval
+        _conn_p = _gc_patch()
+        _c_p    = _conn_p.cursor()
+        _c_p.execute("SELECT status FROM content_library WHERE id = ? AND user_id = ?", (item_id, uid))
+        _prev   = _c_p.fetchone()
+        _conn_p.close()
+        _prev_status = _prev["status"] if _prev else None
+        if _prev_status == "pending":
+            # This is a first approval — check the limit
+            check = check_post_approval_allowed(uid, role, plan)
+            if not check["allowed"]:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error":      "post_limit_reached",
+                        "message":    f"You've approved {check['posts_used']} of {check['posts_limit']} posts included in your plan this month. Add more with an Add-on Pack or upgrade your plan.",
+                        "posts_used":  check["posts_used"],
+                        "posts_limit": check["posts_limit"],
+                        "resets_on":   check["resets_on"],
+                    }
+                )
+            # Limit OK — proceed, then record the approval after DB write
+            item = library_update(item_id, uid, updates)
+            if not item:
+                raise HTTPException(status_code=404, detail="Item not found")
+            record_post_approval(uid, role)
+            return {"success": True, "item": item}
+    # ─────────────────────────────────────────────────────────────────────────
+
     item = library_update(item_id, current_user["id"], updates)
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -365,41 +415,29 @@ async def delete_schedule(niche: str, current_user=Depends(get_current_user)):
     return {"success": True}
 
 
-# ── Usage limit check ──────────────────────────────────────────────────────────
-def check_generation_limit(user: dict) -> None:
-    """
-    Raises HTTP 429 if agent has exceeded their monthly generation limit.
-    super_admin and admin are always allowed.
-    Called before every generation endpoint.
-    """
-    from database import usage_check, usage_increment
-    role = user.get("role", "agent")
-    plan = user.get("plan", "trial")
-    uid  = user.get("id")
-    check = usage_check(uid, role, plan)
-    if not check["allowed"]:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error":      "generation_limit_reached",
-                "message":    f"You've used all {check['limit']} posts included in your plan this month.",
-                "used":       check["used"],
-                "limit":      check["limit"],
-                "resets_on":  check["resets_on"],
-                "upgrade_msg":"Contact us to add more generations or upgrade your plan.",
-            }
-        )
-    # Increment counter on the way through — only for non-unlimited roles
-    if role not in ("super_admin", "admin"):
-        usage_increment(uid)
-
-
+# ── Usage endpoints ────────────────────────────────────────────────────────────
 @app.get("/usage")
 async def get_usage(current_user=Depends(get_current_user)):
-    """Return current generation usage for the logged-in agent."""
-    from database import usage_check
-    check = usage_check(current_user["id"], current_user.get("role","agent"), current_user.get("plan","trial"))
-    return check
+    """
+    Return current usage for the logged-in agent.
+    Returns both post approval count (primary billing unit)
+    and generation backstop count (abuse guard).
+    """
+    uid  = current_user["id"]
+    role = current_user.get("role", "agent")
+    plan = current_user.get("plan", "trial")
+    post_check     = check_post_approval_allowed(uid, role, plan)
+    backstop_check = check_generation_backstop_allowed(uid, role, plan)
+    return {
+        "posts_used":      post_check["posts_used"],
+        "posts_limit":     post_check["posts_limit"],
+        "backstop_used":   backstop_check["backstop_used"],
+        "backstop_limit":  backstop_check["backstop_limit"],
+        "resets_on":       post_check["resets_on"],
+        "plan":            plan,
+        "role":            role,
+        "unlimited":       role in ("super_admin", "admin"),
+    }
 
 
 # ── Local signals endpoint ─────────────────────────────────────────────────────
@@ -706,16 +744,15 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 print(f"[Scheduler] User {user_id} not found, skipping niche '{niche}'.")
                 continue
 
-            # ── Usage limit check — never generate beyond plan limit ─────────
-            # Protects against free trial agents running 12 niches daily and
-            # burning API credits that far exceed their $99/month subscription value.
-            from database import usage_check, usage_increment
+            # ── Usage limit check — never generate beyond backstop limit ────────
+            # Protects against runaway token costs from auto-generation.
+            from database import check_generation_backstop_allowed, record_generation
             role = user_row["role"] or "agent"
             plan = user_row["plan"] or "trial"
             if role not in ("super_admin", "admin"):
-                usage = usage_check(user_id, role, plan)
-                if not usage["allowed"]:
-                    print(f"[Scheduler] ✗ User {user_id} at generation limit ({usage['used']}/{usage['limit']}) — skipping niche '{niche}'. Resets: {usage['resets_on']}")
+                backstop = check_generation_backstop_allowed(user_id, role, plan)
+                if not backstop["allowed"]:
+                    print(f"[Scheduler] ✗ User {user_id} at generation backstop ({backstop['backstop_used']}/{backstop['backstop_limit']}) — skipping niche '{niche}'. Resets: {backstop['resets_on']}")
                     failed_niches.append(niche)
                     schedule_mark_ran(sched_id, _compute_next_run(
                         sched.get("frequency", "weekly"),
@@ -783,9 +820,9 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
             item_id  = saved_item.get("id")
             headline = content_to_save.get("headline", "Your scheduled content is ready")
             saved_items.append((niche, item_id, headline))
-            # Count this generation against the agent's monthly limit
+            # Record this generation against the backstop counter
             if role not in ("super_admin", "admin"):
-                usage_increment(user_id)
+                record_generation(user_id, role)
             print(f"[Scheduler] ✓ Saved item {item_id} for user {user_id} / '{niche}'")
 
         except Exception as e:
@@ -1291,24 +1328,92 @@ async def stripe_webhook(request: Request):
     except Exception as e: raise HTTPException(400, f"Webhook error: {e}")
     etype = event["type"]
     obj   = event["data"]["object"]
+
     if etype == "checkout.session.completed":
         hb_uid    = int(obj.get("metadata", {}).get("hb_user_id", 0) or 0)
-        price_key = obj.get("metadata", {}).get("price_key", "agent_monthly")
-        if   "office_team"    in price_key: plan = "office_team"
-        elif "office_growth"  in price_key: plan = "office_growth"
-        elif "office_starter" in price_key: plan = "office_starter"
-        elif "office"         in price_key: plan = "office_starter"
-        else:                               plan = "agent"
+        price_key = obj.get("metadata", {}).get("price_key", "")
+        if not hb_uid:
+            return {"ok": True}
+
+        # ── Add-on Pack — one-time purchase, no subscription ─────────────────
+        if "addon" in price_key or "add_on" in price_key or "add-on" in price_key:
+            from database import apply_addon_pack
+            result = apply_addon_pack(hb_uid)
+            print(f"[Billing] Add-on Pack applied for user {hb_uid}: +30 posts, +90 backstop. New totals: {result}")
+            return {"ok": True}
+
+        # ── Subscription plan — map price_key to plan name ───────────────────
+        # price_key must match PLAN_LIMITS keys exactly.
+        # Format expected: "starter_monthly", "professional_annual", "power_monthly", etc.
+        if   "founding_member" in price_key: plan = "founding_member"
+        elif "power"           in price_key: plan = "power"
+        elif "professional"    in price_key: plan = "professional"
+        elif "starter"         in price_key: plan = "starter"
+        elif "office_team"     in price_key: plan = "office_team"
+        elif "office_growth"   in price_key: plan = "office_growth"
+        elif "office_starter"  in price_key: plan = "office_starter"
+        else:                                plan = "starter"  # safe default — not "agent" (wrong limits)
+
         cycle = "annual" if "annual" in price_key else "monthly"
-        if hb_uid: activate_subscription(hb_uid, plan, cycle, obj.get("customer",""), obj.get("subscription",""))
+
+        # Billing reset day — set from subscription's current_period_start day
+        # so the agent's counter resets on their actual billing anniversary.
+        billing_reset_day = 1
+        try:
+            sub_id = obj.get("subscription", "")
+            if sub_id:
+                sub = _stripe.Subscription.retrieve(sub_id)
+                from datetime import datetime as _dt_wh
+                period_start = sub.get("current_period_start")
+                if period_start:
+                    billing_reset_day = _dt_wh.utcfromtimestamp(period_start).day
+        except Exception as _brd_e:
+            print(f"[Billing] Could not retrieve billing day for user {hb_uid}: {_brd_e}")
+
+        activate_subscription(
+            hb_uid, plan, cycle,
+            obj.get("customer", ""),
+            obj.get("subscription", ""),
+            billing_reset_day=billing_reset_day,
+        )
+        print(f"[Billing] Subscription activated: user {hb_uid}, plan={plan}, cycle={cycle}, reset_day={billing_reset_day}")
+
     elif etype in ("customer.subscription.deleted", "customer.subscription.paused"):
-        cust_id = obj.get("customer","")
+        cust_id = obj.get("customer", "")
         conn = database.get_conn()
         c    = conn.cursor()
         c.execute("SELECT id FROM users WHERE stripe_customer_id=?", (cust_id,))
         row = c.fetchone()
         conn.close()
         if row: cancel_subscription(row["id"])
+
+    elif etype == "invoice.payment_succeeded":
+        # Monthly renewal — reset billing period counters
+        cust_id = obj.get("customer", "")
+        conn = database.get_conn()
+        c    = conn.cursor()
+        c.execute("SELECT id, billing_reset_day FROM users WHERE stripe_customer_id=?", (cust_id,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            uid       = row["id"]
+            reset_day = row["billing_reset_day"] or 1
+            from database import _compute_next_billing_reset
+            next_reset = _compute_next_billing_reset(reset_day)
+            conn2 = database.get_conn()
+            conn2.execute("""
+                UPDATE users
+                SET approved_post_count       = 0,
+                    generation_backstop_count = 0,
+                    generation_reset_date     = ?,
+                    addon_posts_limit         = 0,
+                    addon_backstop_limit      = 0
+                WHERE id = ?
+            """, (next_reset.isoformat(), uid))
+            conn2.commit()
+            conn2.close()
+            print(f"[Billing] Monthly renewal counters reset for user {uid}, next reset: {next_reset.date()}")
+
     return {"ok": True}
 
 @app.get("/broker/office-stats")
@@ -1707,10 +1812,7 @@ async def public_agent_profile(slug: str):
         except Exception:
             pass
 
-    # All approved/published/archived posts — FULL TEXT for SEO.
-    # Archived posts remain on the authority page — archiving is a housekeeping
-    # action inside the app, not a retraction of CIR-verified content.
-    # No LIMIT — agents accumulate hundreds of posts over time.
+    # All approved/published posts — FULL TEXT for SEO
     now       = datetime.utcnow()
     month_ago = (now - timedelta(days=30)).isoformat()
 
@@ -1718,20 +1820,19 @@ async def public_agent_profile(slug: str):
         SELECT id, niche, content, compliance, cir_id,
                approved_at, published_at, status
         FROM content_library
-        WHERE user_id = ? AND status IN ('approved','published','archived')
+        WHERE user_id = ? AND status IN ('approved','published')
         ORDER BY approved_at DESC
+        LIMIT 50
     """, (user_id,))
     items = [dict(r) for r in c.fetchall()]
 
-    # Stats — count only active (non-archived) posts for displayed metrics.
-    # CIR count includes archived — those records are permanent.
-    active_items  = [i for i in items if i.get("status") in ("approved", "published")]
-    posts_total   = len(active_items)
-    posts_30_days = sum(1 for i in active_items if (i.get("approved_at") or "") >= month_ago)
+    # Stats
+    posts_total   = len(items)
+    posts_30_days = sum(1 for i in items if (i.get("approved_at") or "") >= month_ago)
     cir_count     = sum(1 for i in items if i.get("cir_id"))
 
     clean_count = 0
-    for item in active_items:
+    for item in items:
         try:
             comp = _json.loads(item.get("compliance") or "{}")
             if comp.get("overallStatus") in ("compliant","pass"):
