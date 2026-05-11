@@ -855,7 +855,6 @@ def save_agent_setup(user_id: int, setup: dict):
     niche_limit = limits.get("niches", 999)
     # Onboarding saves niches under "primaryNiches"; identity panel may use "niches"
     niches      = setup.get("primaryNiches", setup.get("niches", [])) or []
-    print(f"[NicheCheck] plan={plan} limit={niche_limit} niches={len(niches)} sample={niches[:3]}")
     if len(niches) > niche_limit:
         raise ValueError(
             f"Your {plan} plan allows up to {niche_limit} niche{'s' if niche_limit != 1 else ''}. "
