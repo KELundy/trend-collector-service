@@ -839,6 +839,28 @@ def log_platform_post(user_id: int, library_item_id: int, platform: str,
 # ─────────────────────────────────────────────
 def save_agent_setup(user_id: int, setup: dict):
     """Save or update agent setup/identity data server-side."""
+    # ── Niche-count enforcement ──────────────────────────────────────────────
+    # Check the agent's plan limit before saving. Raises ValueError on violation
+    # so the caller (/setup/save route) can return a 400 with a clear message.
+    conn_check = get_conn()
+    try:
+        c_check = conn_check.cursor()
+        c_check.execute("SELECT plan FROM users WHERE id = ?", (user_id,))
+        row_check = c_check.fetchone()
+        plan = (row_check["plan"] if row_check else None) or "trial"
+    finally:
+        conn_check.close()
+
+    limits      = _get_plan_limits(plan)
+    niche_limit = limits.get("niches", 999)
+    niches      = setup.get("niches", []) or []
+    if len(niches) > niche_limit:
+        raise ValueError(
+            f"Your {plan} plan allows up to {niche_limit} niche{'s' if niche_limit != 1 else ''}. "
+            f"You submitted {len(niches)}. Please remove {len(niches) - niche_limit} before saving."
+        )
+    # ────────────────────────────────────────────────────────────────────────
+
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
@@ -2541,20 +2563,21 @@ def signals_purge_expired():
 # ─────────────────────────────────────────────
 
 PLAN_LIMITS = {
-    # plan_key: {"posts": N, "backstop": N*3}
+    # plan_key: {"posts": N, "backstop": N*3, "niches": N}
     # posts    = approved post limit per billing period
     # backstop = raw generation ceiling per billing period (abuse guard)
-    "trial":           {"posts": 10,   "backstop": 30,   "lifetime": True},
-    "founding_member": {"posts": 50,   "backstop": 150,  "lifetime": False},
-    "starter":         {"posts": 50,   "backstop": 150,  "lifetime": False},
-    "professional":    {"posts": 60,   "backstop": 200,  "lifetime": False},
-    "power":           {"posts": 100,  "backstop": 350,  "lifetime": False},
+    # niches   = max saved niches (enforced in save_agent_setup)
+    "trial":           {"posts": 10,   "backstop": 30,   "niches": 2,   "lifetime": True},
+    "founding_member": {"posts": 50,   "backstop": 150,  "niches": 999, "lifetime": False},
+    "starter":         {"posts": 50,   "backstop": 150,  "niches": 2,   "lifetime": False},
+    "professional":    {"posts": 60,   "backstop": 200,  "niches": 5,   "lifetime": False},
+    "power":           {"posts": 100,  "backstop": 350,  "niches": 999, "lifetime": False},
     # Legacy keys — kept so existing DB rows never break
-    "agent":           {"posts": 30,   "backstop": 90,   "lifetime": False},
-    "team":            {"posts": 75,   "backstop": 225,  "lifetime": False},
-    "office_starter":  {"posts": 150,  "backstop": 450,  "lifetime": False},
-    "office_growth":   {"posts": 400,  "backstop": 1200, "lifetime": False},
-    "enterprise":      {"posts": 9999, "backstop": 9999, "lifetime": False},
+    "agent":           {"posts": 30,   "backstop": 90,   "niches": 999, "lifetime": False},
+    "team":            {"posts": 75,   "backstop": 225,  "niches": 999, "lifetime": False},
+    "office_starter":  {"posts": 150,  "backstop": 450,  "niches": 999, "lifetime": False},
+    "office_growth":   {"posts": 400,  "backstop": 1200, "niches": 999, "lifetime": False},
+    "enterprise":      {"posts": 9999, "backstop": 9999, "niches": 999, "lifetime": False},
 }
 
 # Roles that are never limited — bypass all checks
