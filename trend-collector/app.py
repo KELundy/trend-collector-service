@@ -27,16 +27,21 @@ else:
     _stripe = None
 
 STRIPE_PRICES = {
-    "agent_monthly":           os.getenv("STRIPE_PRICE_AGENT_MONTHLY",          ""),
-    "agent_annual":            os.getenv("STRIPE_PRICE_AGENT_ANNUAL",           ""),
-    "team_monthly":            os.getenv("STRIPE_PRICE_TEAM_MONTHLY",           ""),
-    "team_annual":             os.getenv("STRIPE_PRICE_TEAM_ANNUAL",            ""),
-    "office_starter_monthly":  os.getenv("STRIPE_PRICE_OFFICE_STARTER_MONTHLY", ""),
-    "office_starter_annual":   os.getenv("STRIPE_PRICE_OFFICE_STARTER_ANNUAL",  ""),
-    "office_growth_monthly":   os.getenv("STRIPE_PRICE_OFFICE_GROWTH_MONTHLY",  ""),
-    "office_growth_annual":    os.getenv("STRIPE_PRICE_OFFICE_GROWTH_ANNUAL",   ""),
-    "office_team_monthly":     os.getenv("STRIPE_PRICE_OFFICE_TEAM_MONTHLY",    ""),
-    "office_team_annual":      os.getenv("STRIPE_PRICE_OFFICE_TEAM_ANNUAL",     ""),
+    # Individual agent plans
+    "starter_monthly":          os.getenv("STRIPE_PRICE_STARTER_MONTHLY",         ""),
+    "starter_annual":           os.getenv("STRIPE_PRICE_STARTER_ANNUAL",          ""),
+    "professional_monthly":     os.getenv("STRIPE_PRICE_PROFESSIONAL_MONTHLY",    ""),
+    "professional_annual":      os.getenv("STRIPE_PRICE_PROFESSIONAL_ANNUAL",     ""),
+    "power_monthly":            os.getenv("STRIPE_PRICE_POWER_MONTHLY",           ""),
+    "power_annual":             os.getenv("STRIPE_PRICE_POWER_ANNUAL",            ""),
+    "founding_member_monthly":  os.getenv("STRIPE_PRICE_FOUNDING_MEMBER_MONTHLY", ""),
+    # Office / team plans
+    "office_starter_monthly":   os.getenv("STRIPE_PRICE_OFFICE_STARTER_MONTHLY",  ""),
+    "office_starter_annual":    os.getenv("STRIPE_PRICE_OFFICE_STARTER_ANNUAL",   ""),
+    "office_growth_monthly":    os.getenv("STRIPE_PRICE_OFFICE_GROWTH_MONTHLY",   ""),
+    "office_growth_annual":     os.getenv("STRIPE_PRICE_OFFICE_GROWTH_ANNUAL",    ""),
+    "office_team_monthly":      os.getenv("STRIPE_PRICE_OFFICE_TEAM_MONTHLY",     ""),
+    "office_team_annual":       os.getenv("STRIPE_PRICE_OFFICE_TEAM_ANNUAL",      ""),
 }
 
 OFFICE_SEAT_LIMITS = {
@@ -909,7 +914,10 @@ class SetupSaveRequest(BaseModel):
 
 @app.post("/setup/save")
 async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_user)):
-    save_agent_setup(current_user["id"], body.setup)
+    try:
+        save_agent_setup(current_user["id"], body.setup)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "Plan limit exceeded", "message": str(e)})
 
     from database import get_conn as _gc_slug
     _conn_s = _gc_slug()
@@ -1245,7 +1253,7 @@ async def billing_status(current_user=Depends(get_current_user)):
 async def create_checkout(request: Request, current_user=Depends(get_current_user)):
     if not STRIPE_ENABLED: raise HTTPException(503, "Billing not yet configured — check back soon.")
     body      = await request.json()
-    price_key = body.get("price_key", "agent_monthly")
+    price_key = body.get("price_key", "starter_monthly")
     price_id  = STRIPE_PRICES.get(price_key, "")
     if not price_id: raise HTTPException(400, f"Unknown plan key: {price_key}")
     sub_data    = get_subscription_status(current_user["id"])
