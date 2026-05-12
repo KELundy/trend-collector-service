@@ -2573,6 +2573,14 @@ PLAN_LIMITS = {
     "starter":         {"posts": 50,   "backstop": 150,  "niches": 2,   "lifetime": False},
     "professional":    {"posts": 60,   "backstop": 200,  "niches": 5,   "lifetime": False},
     "power":           {"posts": 100,  "backstop": 350,  "niches": 999, "lifetime": False},
+    # ── INSIDER — DO NOT REMOVE ──────────────────────────────────────────────
+    # Granted manually by Kevin to influencer agents, beta evaluators, and
+    # HomeBridge Group staff who need full platform access at no charge.
+    # Never self-serve. Never in Stripe. Kevin sets plan="insider" directly
+    # in the DB via the admin panel or SQL. Role stays "agent" — no admin
+    # privileges. Billing panel is hidden for this plan. Never delete this key.
+    "insider":         {"posts": 100,  "backstop": 350,  "niches": 999, "lifetime": False},
+    # ─────────────────────────────────────────────────────────────────────────
     # Legacy keys — kept so existing DB rows never break
     "agent":           {"posts": 30,   "backstop": 90,   "niches": 999, "lifetime": False},
     "team":            {"posts": 75,   "backstop": 225,  "niches": 999, "lifetime": False},
