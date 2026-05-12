@@ -7,4 +7,4 @@ python-dotenv
 bcrypt
 PyJWT
 reportlab
-stripe>=7.0.0
+stripe>=7.0.0,<13.0.0
