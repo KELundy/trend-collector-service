@@ -1278,10 +1278,12 @@ async def stripe_webhook(request: Request):
     if not STRIPE_ENABLED: return {"ok": True}
     payload    = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
-    try: event = _stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    try:
+        event = _stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except Exception as e:
         print(f"[Webhook] Signature verification failed: {e}")
         print(f"[Webhook] Secret in use starts with: {STRIPE_WEBHOOK_SECRET[:12] if STRIPE_WEBHOOK_SECRET else 'EMPTY'}")
+        print(f"[Webhook] Payload length: {len(payload)} sig_header present: {bool(sig_header)}")
         raise HTTPException(400, f"Webhook error: {e}")
     etype = event["type"]
     obj   = event["data"]["object"]
