@@ -51,6 +51,8 @@ class AgentProfileModel(BaseModel):
     signaturePerspective: Optional[str] = Field(None)
     notForClient:      Optional[str] = Field(None)
     notificationEmail: Optional[str] = Field(None)
+    recruitingEnabled: Optional[bool] = Field(False)
+    recruitingCta:     Optional[str]  = Field(None)
 
 
 class ComplianceBadge(BaseModel):
@@ -243,6 +245,15 @@ def _build_content_prompt(payload):
         cta_instruction = (
             "CTA REQUIREMENT: Write a low-pressure genuine invitation to a conversation. "
             "Plant curiosity, not urgency. No 'call me today' commands."
+        )
+
+    # ── Recruiting CTA — append to cta_instruction if enabled ────────────────
+    recruiting_cta = (profile.recruitingCta or "").strip()
+    if profile.recruitingEnabled and recruiting_cta:
+        cta_instruction += (
+            "\n\nRECRUITING ADDENDUM: After the main CTA, add one natural sentence inviting "
+            "agents or people exploring a real estate career to reach out. Use this exact message "
+            "as the basis — keep it warm and non-pushy: \"" + recruiting_cta + "\""
         )
 
     # ── MLS data block ────────────────────────────────────────────────────────
