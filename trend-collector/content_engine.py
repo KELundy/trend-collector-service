@@ -4087,6 +4087,189 @@ IMPORTANT:
 # No new packages required — uses json, datetime, pathlib (stdlib).
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# VIDEO SCRIPT GENERATION
+# POST /content/video-script
+# ─────────────────────────────────────────────
+
+class VideoScriptRequest(BaseModel):
+    topic:        str
+    tone:         Optional[str] = "Warm"
+    niche:        Optional[str] = None
+    agentProfile: Optional[AgentProfileModel] = None
+
+
+def _build_video_script_prompt(topic: str, tone: str, agent_name: str,
+                                brokerage: str, market: str, niche: str,
+                                brand_voice: str, short_bio: str,
+                                origin_story: str, unfair_advantage: str,
+                                signature_perspective: str,
+                                words_avoid: str, words_prefer: str,
+                                service_areas: list) -> str:
+
+    market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+
+    agent_display = agent_name
+    if brokerage:
+        agent_display += f" with {brokerage}"
+
+    bio_text         = f"About {agent_name}: {short_bio}\n"         if short_bio         else ""
+    origin_text      = f"Why {agent_name} does this: {origin_story}\n" if origin_story   else ""
+    advantage_text   = f"Unfair advantage: {unfair_advantage}\n"    if unfair_advantage   else ""
+    perspective_text = f"Signature belief: {signature_perspective}\n" if signature_perspective else ""
+    avoid_text       = f"Never use these words or phrases: {words_avoid}.\n" if words_avoid else ""
+    prefer_text      = f"Naturally weave in these words or phrases: {words_prefer}.\n" if words_prefer else ""
+    niche_text       = f"Niche specialty: {niche}\n"                if niche              else ""
+
+    tone_instructions = {
+        "calm":         "Tone: Calm and steady. Measured. The agent is a trusted guide, not a salesperson. No hype.",
+        "bold":         "Tone: Bold and confident. The agent has a clear point of view and isn't afraid to say it.",
+        "empathetic":   "Tone: Empathetic and warm. The agent deeply understands what this moment feels like for the viewer. Lead with that feeling.",
+        "analytical":   "Tone: Analytical and data-informed. The agent backs their points with specifics. Precise language.",
+        "direct":       "Tone: Direct and no-nonsense. Get to the point fast. No filler. The viewer's time is respected.",
+        "warm":         "Tone: Warm and approachable. Feels like a conversation with a knowledgeable friend.",
+        "professional": "Tone: Professional and polished. Authoritative without being cold. Commands respect.",
+        "humorous":     "Tone: Humorous and light. The agent has personality. Use wit and a light touch — real estate can be funny. Never sarcastic or dismissive of the viewer.",
+    }
+    tone_instruction = tone_instructions.get((tone or "warm").lower(),
+                       f"Tone: {tone}. Write in this voice throughout.")
+
+    return f"""You are writing a spoken video script for {agent_display}, a licensed real estate professional in {market_display}.
+
+This is a talking-head video script — the agent will speak directly to camera. It must sound EXACTLY like {agent_name} talking, not like a polished narrator reading copy.
+
+WHO {agent_name.upper()} IS
+{"─" * 40}
+{bio_text}{origin_text}{advantage_text}{perspective_text}{niche_text}Brand voice: {brand_voice}
+{avoid_text}{prefer_text}
+VIDEO TOPIC
+{"─" * 40}
+{topic}
+
+TONE DIRECTION
+{"─" * 40}
+{tone_instruction}
+
+SCRIPT REQUIREMENTS — NON-NEGOTIABLE
+{"─" * 40}
+1. OPENING LINE: Start with the agent's name and brokerage naturally woven in within the first 2-3 sentences.
+   Example: "Hey, it's {agent_name} here with {brokerage} —" or "I'm {agent_name} with {brokerage}, and today I want to talk about something I see all the time..."
+   This is required for compliance — the agent must identify themselves and their brokerage.
+
+2. SPOKEN LANGUAGE ONLY: Write the way people actually talk, not the way they write.
+   - Contractions always: "I'm" not "I am", "you're" not "you are", "it's" not "it is"
+   - Short sentences. Natural pauses.
+   - No bullet points, no headers, no lists — this is spoken word only.
+   - No em-dashes mid-sentence for written emphasis — use natural spoken pauses instead.
+
+3. LENGTH: 60–90 seconds when read aloud at a natural conversational pace.
+   That is approximately 150–225 words. Count carefully. Do not exceed 225 words.
+
+4. STRUCTURE:
+   - Hook (first 10 seconds): One line that makes the viewer want to keep watching.
+   - Body (40–60 seconds): The agent's genuine take on the topic. Specific. Grounded in their market and niche.
+   - Close (10–15 seconds): Warm, low-pressure invitation to reach out. No "call me today" commands.
+
+5. VOICE AUTHENTICITY: This script must feel like it could ONLY come from {agent_name}.
+   Use their market ({market_display}), their niche ({niche or 'real estate'}), their perspective.
+   A viewer who knows {agent_name} personally should nod and think "yep, that sounds exactly like them."
+
+6. COMPLIANCE:
+   - No guaranteed outcomes ("you will sell for top dollar", "I guarantee results")
+   - No Fair Housing violations — no language implying preference for any protected class
+   - No superlatives that can't be substantiated ("the best agent in Denver")
+   - Agent must identify themselves and their brokerage (covered in rule 1)
+
+OUTPUT FORMAT — RETURN EXACTLY THIS STRUCTURE:
+Return plain spoken script only. No stage directions. No [PAUSE] markers. No headers.
+Just the words the agent will say, from first word to last.
+Start directly with the agent's opening line.
+"""
+
+
+@router.post("/video-script")
+async def generate_video_script(payload: VideoScriptRequest):
+    """
+    Generates a 60-90 second spoken video script in the agent's authentic voice.
+    Runs compliance check. Returns script text + compliance badge.
+    Same response shape as /generate-content for consistent frontend handling.
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    profile   = payload.agentProfile or AgentProfileModel()
+    agent_name  = profile.agentName  or "the agent"
+    brokerage   = profile.brokerage  or ""
+    market      = profile.market     or "their local market"
+    brand_voice = profile.brandVoice or "conversational and genuine"
+    short_bio   = profile.shortBio   or ""
+    origin      = profile.originStory          or ""
+    advantage   = profile.unfairAdvantage      or ""
+    perspective = profile.signaturePerspective or ""
+    words_avoid = profile.wordsAvoid or ""
+    words_prefer = profile.wordsPrefer or ""
+    service_areas = profile.serviceAreas or []
+    niche       = payload.niche or (profile.mlsNames[0] if profile.mlsNames else "") or "real estate"
+    tone        = payload.tone  or "Warm"
+    topic       = (payload.topic or "").strip()
+    state       = profile.state or ""
+
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic is required.")
+
+    prompt = _build_video_script_prompt(
+        topic=topic, tone=tone,
+        agent_name=agent_name, brokerage=brokerage, market=market,
+        niche=niche, brand_voice=brand_voice, short_bio=short_bio,
+        origin_story=origin, unfair_advantage=advantage,
+        signature_perspective=perspective,
+        words_avoid=words_avoid, words_prefer=words_prefer,
+        service_areas=service_areas,
+    )
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text_chunks = [b.text for b in (response.content or []) if getattr(b, "type", "") == "text"]
+        script_text = "\n\n".join(text_chunks).strip()
+        if not script_text:
+            raise ValueError("Empty script returned")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Script generation failed: {str(e)}")
+
+    # Run compliance on the script — same two-pass system as posts
+    try:
+        p1_badge, profile_name = _run_compliance_check(
+            script_text, agent_name, brokerage,
+            profile.mlsNames or [], niche=niche,
+            content_mode="agent", state=state,
+        )
+        semantic = _run_semantic_compliance_check(
+            script_text, profile_name=profile_name, state=state, niche=niche
+        )
+        compliance = _build_final_badge(
+            p1_badge, profile_name, semantic, state=state,
+            agent_name=agent_name, brokerage=brokerage,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Compliance check failed: {str(e)}")
+
+    return {
+        "script":     script_text,
+        "word_count": len(script_text.split()),
+        "topic":      topic,
+        "tone":       tone,
+        "niche":      niche,
+        "compliance": compliance.dict(),
+        "content_type": "video_script",
+    }
+
+
 from fastapi import APIRouter as _APIRouter
 
 admin_router = _APIRouter(prefix="/admin/compliance", tags=["admin-compliance"])
