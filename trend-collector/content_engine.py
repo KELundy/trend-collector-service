@@ -4270,6 +4270,83 @@ async def generate_video_script(payload: VideoScriptRequest):
     }
 
 
+# ─────────────────────────────────────────────
+# VIDEO TOPIC SUGGESTIONS
+# POST /content/video-topics
+# Returns 3 suggested video topics for agent's niche and market.
+# Lightweight — no compliance check needed.
+# ─────────────────────────────────────────────
+
+class VideoTopicsRequest(BaseModel):
+    niche:        Optional[str] = "real estate"
+    market:       Optional[str] = None
+    agentProfile: Optional[AgentProfileModel] = None
+
+
+@router.post("/video-topics")
+async def suggest_video_topics(payload: VideoTopicsRequest):
+    """
+    The Analyst suggests 3 timely, specific video topics for the agent's niche and market.
+    Agent taps one to send to the Writer for scripting.
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    profile  = payload.agentProfile or AgentProfileModel()
+    niche    = payload.niche or "real estate"
+    market   = payload.market or profile.market or "their local market"
+    agent_name = profile.agentName or "the agent"
+    service_areas = profile.serviceAreas or []
+    market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+    short_bio = profile.shortBio or ""
+    brand_voice = profile.brandVoice or "conversational and genuine"
+
+    prompt = f"""You are The Analyst — a research specialist working for {agent_name}, a licensed real estate professional in {market_display} specializing in {niche}.
+
+Your job: suggest exactly 3 video topics that would be genuinely useful and timely for their audience right now.
+
+WHAT MAKES A GOOD TOPIC:
+- Specific to their niche ({niche}) and market ({market_display})
+- Something their ideal client is actually wondering about right now
+- Concrete enough that the agent can talk about it for 60-90 seconds from personal experience
+- Not generic ("how to buy a home") — specific ("why {niche} transactions in {market} are taking longer right now — and what to do about it")
+- Feels like something only a local expert would know to say
+
+AGENT CONTEXT:
+{f'About {agent_name}: {short_bio}' if short_bio else ''}
+Voice: {brand_voice}
+
+OUTPUT FORMAT — CRITICAL:
+Return ONLY a JSON object. No preamble. No explanation. No markdown. No backticks.
+Exactly this structure:
+{{"topics": ["Topic one here", "Topic two here", "Topic three here"]}}
+
+Each topic should be one sentence, 15-25 words. Specific. Actionable. Grounded in {niche} in {market_display}."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text_chunks = [b.text for b in (response.content or []) if getattr(b, "type", "") == "text"]
+        raw = "\n\n".join(text_chunks).strip()
+        # Strip any accidental markdown fences
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        import json as _json_vt
+        parsed = _json_vt.loads(raw)
+        topics = parsed.get("topics", [])
+        if not topics or len(topics) < 1:
+            raise ValueError("No topics in response")
+        # Ensure exactly 3
+        topics = topics[:3]
+        return {"topics": topics, "niche": niche, "market": market_display}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Topic suggestion failed: {str(e)}")
+
+
 from fastapi import APIRouter as _APIRouter
 
 admin_router = _APIRouter(prefix="/admin/compliance", tags=["admin-compliance"])
