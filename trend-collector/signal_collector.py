@@ -456,7 +456,7 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
     Uses rss2json.com as a proxy — bypasses publisher-side SSL/403 blocks
     that direct urllib fetches hit on Render. Requires RSS2JSON_API_KEY env var.
 
-    Only returns items published after cutoff_dt (45-day hard limit).
+    Only returns items published after cutoff_dt (14-day hard limit).
     Never raises — individual feed failures are logged and skipped.
     Returns a list of signal dicts tagged with source_type='rss'.
     """
@@ -538,7 +538,7 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
                         pub_date_str = None  # No parseable date — allow through
                     else:
                         if pub_dt < cutoff_dt:
-                            continue  # Hard reject — older than 45 days
+                            continue  # Hard reject — older than 14 days
                         pub_date_str = pub_dt.strftime("%Y-%m-%d")
 
                     results.append({
@@ -557,7 +557,7 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
                     continue
 
             if feed_count:
-                print(f"[Signals/RSS] {label}: {feed_count} item(s) within 45 days.")
+                print(f"[Signals/RSS] {label}: {feed_count} item(s) within 14 days.")
 
         except Exception as feed_err:
             print(f"[Signals/RSS] Feed skipped — {label}: {feed_err}")
@@ -697,7 +697,7 @@ def _validate_published_date(raw_date: str, user_id: int, headline: str) -> tupl
         date_str = str(raw_date).strip()[:10]  # Take YYYY-MM-DD portion only
         parsed   = datetime.strptime(date_str, "%Y-%m-%d")
         age_days = (datetime.utcnow() - parsed).days
-        if age_days > 45:
+        if age_days > 14:
             print(f"[Signals] REJECTED stale signal ({age_days}d old): '{headline[:60]}' (user {user_id})")
             return None, True
         return date_str, False
@@ -711,7 +711,7 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
                   source_type: str = "claude") -> int:
     """Save signals to DB, tagging with tier and source_type. Returns count saved.
     source_type: 'rss' for Tier 0 RSS signals, 'claude' for Tier 1-3 Claude web search.
-    Rejects any signal with a published_date older than 45 days.
+    Rejects any signal with a published_date older than 14 days.
     Rejects duplicates (same source_url or near-identical headline within 30 days).
     Signals with no date are allowed through with a log warning.
     """
@@ -728,7 +728,7 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
             if not headline or len(headline) < 10:
                 continue
 
-            # Validate recency — hard reject if published_date is present and >45 days old
+            # Validate recency — hard reject if published_date is present and >14 days old
             pub_date, should_reject = _validate_published_date(
                 sig.get("published_date", ""), user_id, headline
             )
@@ -757,7 +757,7 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
         except Exception as e:
             print(f"[Signals] Save error: {e}")
     if rejected:
-        print(f"[Signals] {rejected} stale signal(s) rejected (>45 days) for user {user_id}.")
+        print(f"[Signals] {rejected} stale signal(s) rejected (>14 days) for user {user_id}.")
     if dupes:
         print(f"[Signals] {dupes} duplicate signal(s) skipped for user {user_id}.")
     return saved
@@ -800,7 +800,7 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     market_str = market or "the local area"
     niche_str  = primary_niches[0] if primary_niches else "Residential Real Estate"
     today_str  = datetime.utcnow().strftime("%B %d, %Y")  # e.g. "April 30, 2026"
-    cutoff_str = (datetime.utcnow() - __import__('datetime').timedelta(days=45)).strftime("%B %d, %Y")
+    cutoff_str = (datetime.utcnow() - __import__('datetime').timedelta(days=14)).strftime("%B %d, %Y")
     total_saved = 0
 
     # ── TIER 0: RSS feeds — real-time, no API cost ───────────────────────────
@@ -809,7 +809,7 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
     # from the agent's market string — zero agent configuration required.
     # If RSS yields enough strong signals, Claude searches are skipped entirely.
     from datetime import timedelta
-    cutoff_dt   = datetime.utcnow() - timedelta(days=45)
+    cutoff_dt   = datetime.utcnow() - timedelta(days=14)
     rss_signals = _fetch_rss_signals(market, cutoff_dt)
     strong0     = 0
     if rss_signals:
@@ -860,7 +860,7 @@ Search the web for very recent news specifically about: {area} in {market_str}.
 
 Focus your search on: {angle_desc}
 
-Your search MUST find stories published within the last 45 days (after {cutoff_str}).
+Your search MUST find stories published within the last 14 days (after {cutoff_str}).
 Do not return articles from before {cutoff_str} under any circumstances.
 If you cannot find anything published after {cutoff_str} specifically about {area},
 return an empty array [] — do not fall back to older stories.
@@ -906,7 +906,7 @@ Today's date is {today_str}. Only return news published on or after {cutoff_str}
 Search the web for very recent {market_str} metro real estate MARKET DATA:
 - New MLS reports, inventory statistics, median price changes
 - Days on market trends, absorption rates, list-to-sale ratios
-- REColorado, DMAR, or local MLS data releases from the last 45 days
+- REColorado, DMAR, or local MLS data releases from the last 14 days
 - Mortgage rate impacts on the {market_str} market specifically
 
 Only include data or reports published after {cutoff_str}.
