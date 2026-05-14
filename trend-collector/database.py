@@ -842,24 +842,27 @@ def save_agent_setup(user_id: int, setup: dict):
     # ── Niche-count enforcement ──────────────────────────────────────────────
     # Check the agent's plan limit before saving. Raises ValueError on violation
     # so the caller (/setup/save route) can return a 400 with a clear message.
+    # UNLIMITED_ROLES (super_admin, admin) bypass this check entirely.
     conn_check = get_conn()
     try:
         c_check = conn_check.cursor()
-        c_check.execute("SELECT plan FROM users WHERE id = ?", (user_id,))
+        c_check.execute("SELECT plan, role FROM users WHERE id = ?", (user_id,))
         row_check = c_check.fetchone()
         plan = (row_check["plan"] if row_check else None) or "trial"
+        role = (row_check["role"] if row_check else None) or ""
     finally:
         conn_check.close()
 
-    limits      = _get_plan_limits(plan)
-    niche_limit = limits.get("niches", 999)
-    # Onboarding saves niches under "primaryNiches"; identity panel may use "niches"
-    niches      = setup.get("primaryNiches", setup.get("niches", [])) or []
-    if len(niches) > niche_limit:
-        raise ValueError(
-            f"Your {plan} plan allows up to {niche_limit} niche{'s' if niche_limit != 1 else ''}. "
-            f"You submitted {len(niches)}. Please remove {len(niches) - niche_limit} before saving."
-        )
+    if role not in UNLIMITED_ROLES:
+        limits      = _get_plan_limits(plan)
+        niche_limit = limits.get("niches", 999)
+        # Onboarding saves niches under "primaryNiches"; identity panel may use "niches"
+        niches      = setup.get("primaryNiches", setup.get("niches", [])) or []
+        if len(niches) > niche_limit:
+            raise ValueError(
+                f"Your {plan} plan allows up to {niche_limit} niche{'s' if niche_limit != 1 else ''}. "
+                f"You submitted {len(niches)}. Please remove {len(niches) - niche_limit} before saving."
+            )
     # ────────────────────────────────────────────────────────────────────────
 
     conn = get_conn()
