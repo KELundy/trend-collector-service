@@ -2613,12 +2613,16 @@ async def admin_create_user(request: Request,
     role        = str(body.get("role","agent")).strip()
     brokerage   = str(body.get("brokerage","")).strip()
     is_licensed = int(body.get("is_licensed", 1))
+    plan        = str(body.get("plan","trial")).strip()
 
     if not email or not password or not agent_name:
         raise HTTPException(400, "email, password, and agent_name are required.")
     valid_roles = ("super_admin","admin","support","broker","team","agent","assistant","hb_marketer")
     if role not in valid_roles:
         raise HTTPException(400, f"Invalid role.")
+    valid_plans = ("trial","starter","professional","power","founding_member","insider")
+    if plan not in valid_plans:
+        plan = "trial"
 
     pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
 
@@ -2627,16 +2631,16 @@ async def admin_create_user(request: Request,
     c    = conn.cursor()
     try:
         c.execute("""
-            INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_licensed)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (email, pw_hash, agent_name, brokerage, role, is_licensed))
+            INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_licensed, plan)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (email, pw_hash, agent_name, brokerage, role, is_licensed, plan))
         conn.commit()
         new_id = c.lastrowid
     except Exception as e:
         conn.close()
         raise HTTPException(409, f"Could not create user: {str(e)}")
     conn.close()
-    return {"ok": True, "user_id": new_id, "email": email, "role": role}
+    return {"ok": True, "user_id": new_id, "email": email, "role": role, "plan": plan}
 
 
 # ── Startup: ensure user_id=2 is super_admin ──
