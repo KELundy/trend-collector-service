@@ -521,6 +521,96 @@ async def get_rss_status(current_user=Depends(get_current_user)):
 
 
 
+# ── Generate from signal — Home screen flow ─────────────────────────────────
+# Called when agent taps "Get Your Writer on this" on a Home signal card.
+# Generates content from signal context and saves as pending — same path as
+# scheduler-generated content. Agent reviews from the "waiting for you" queue.
+# Never routes through Studio or the broadcast panel.
+
+class GenerateFromSignalRequest(BaseModel):
+    signal_id:  Optional[int] = None
+    headline:   str = ""
+    summary:    str = ""
+    niche:      Optional[str] = None
+
+@app.post("/content/generate-from-signal")
+async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Depends(get_current_user)):
+    user_id = current_user["id"]
+    try:
+        from database import get_conn, signals_get_latest
+        conn = get_conn()
+        c    = conn.cursor()
+        c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        user_row = c.fetchone()
+        c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+        setup_row = c.fetchone()
+        setup = json.loads(setup_row["setup_json"]) if setup_row else {}
+        conn.close()
+
+        if not user_row:
+            raise HTTPException(400, "User not found.")
+
+        # Use first saved niche if none provided
+        niche = body.niche or (setup.get("primaryNiches") or ["Residential Buying & Selling"])[0]
+
+        # Build situation from signal context
+        context_parts = []
+        if body.headline: context_parts.append(body.headline)
+        if body.summary:  context_parts.append(body.summary)
+        situation = "Signal-driven post: " + " ".join(context_parts) if context_parts else "Market update and current conditions"
+
+        result = generate_content_core(
+            agent_name           = user_row["agent_name"],
+            brokerage            = user_row["brokerage"],
+            market               = setup.get("market", ""),
+            niche                = niche,
+            situation            = situation,
+            persona              = setup.get("defaultPersona") or "homeowners",
+            tone                 = setup.get("tone", "Professional"),
+            length               = setup.get("length", "Standard"),
+            trends               = setup.get("trends", []),
+            brand_voice          = setup.get("brandVoice", ""),
+            short_bio            = setup.get("shortBio", ""),
+            audience             = setup.get("audienceDescription", ""),
+            words_avoid          = setup.get("wordsAvoid", ""),
+            words_prefer         = setup.get("wordsPrefer", ""),
+            mls_names            = setup.get("mlsNames", []),
+            state                = setup.get("state", ""),
+            cta_type             = setup.get("ctaType", ""),
+            cta_url              = setup.get("ctaUrl", ""),
+            cta_label            = setup.get("ctaLabel", ""),
+            origin_story         = setup.get("originStory", ""),
+            unfair_advantage     = setup.get("unfairAdvantage", ""),
+            signature_perspective= setup.get("signaturePerspective", ""),
+            not_for_client       = setup.get("notForClient", ""),
+        )
+
+        content_to_save = dict(result["content"])
+        if "generated_at" in content_to_save:
+            from datetime import datetime as _dt
+            val = content_to_save["generated_at"]
+            if isinstance(val, _dt):
+                content_to_save["generated_at"] = val.isoformat()
+
+        compliance_to_save = dict(result["compliance"])
+
+        saved_item = library_save(
+            user_id    = user_id,
+            niche      = niche,
+            content    = content_to_save,
+            compliance = compliance_to_save,
+            source     = "signal",
+        )
+
+        return {"ok": True, "item_id": saved_item.get("id"), "niche": niche}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[SignalGenerate] Error for user {user_id}: {e}")
+        raise HTTPException(500, f"Generation failed: {str(e)}")
+
+
 class ScoreRequest(BaseModel):
     setup: dict = {}
 
@@ -2613,16 +2703,12 @@ async def admin_create_user(request: Request,
     role        = str(body.get("role","agent")).strip()
     brokerage   = str(body.get("brokerage","")).strip()
     is_licensed = int(body.get("is_licensed", 1))
-    plan        = str(body.get("plan","trial")).strip()
 
     if not email or not password or not agent_name:
         raise HTTPException(400, "email, password, and agent_name are required.")
     valid_roles = ("super_admin","admin","support","broker","team","agent","assistant","hb_marketer")
     if role not in valid_roles:
         raise HTTPException(400, f"Invalid role.")
-    valid_plans = ("trial","starter","professional","power","founding_member","insider")
-    if plan not in valid_plans:
-        plan = "trial"
 
     pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
 
@@ -2631,16 +2717,16 @@ async def admin_create_user(request: Request,
     c    = conn.cursor()
     try:
         c.execute("""
-            INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_licensed, plan)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (email, pw_hash, agent_name, brokerage, role, is_licensed, plan))
+            INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_licensed)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (email, pw_hash, agent_name, brokerage, role, is_licensed))
         conn.commit()
         new_id = c.lastrowid
     except Exception as e:
         conn.close()
         raise HTTPException(409, f"Could not create user: {str(e)}")
     conn.close()
-    return {"ok": True, "user_id": new_id, "email": email, "role": role, "plan": plan}
+    return {"ok": True, "user_id": new_id, "email": email, "role": role}
 
 
 # ── Startup: ensure user_id=2 is super_admin ──
