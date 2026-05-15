@@ -1659,12 +1659,19 @@ def lookup_approval_token_record(token: str) -> Optional[dict]:
 # ─────────────────────────────────────────────
 # IDENTITY STRENGTH SCORE
 # ─────────────────────────────────────────────
-def calculate_identity_score(user_id: int, setup: dict) -> dict:
+def calculate_identity_score(user_id: int, setup: dict = None) -> dict:
     from datetime import datetime, timedelta
     import json
 
+    # Always load setup from the database — never trust client-supplied data.
+    # This ensures the score is always calculated against the agent's actual
+    # saved identity, not whatever the frontend happens to have in localStorage.
     conn = get_conn()
     c    = conn.cursor()
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+    setup_row = c.fetchone()
+    setup = json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
+
     c.execute("""
         SELECT status, compliance, approved_at, published_at, saved_at, niche
         FROM content_library
@@ -1683,7 +1690,7 @@ def calculate_identity_score(user_id: int, setup: dict) -> dict:
     market_pts     = 5  if setup.get("market", "").strip()      else 0
     bio_pts        = 8  if len(setup.get("shortBio","").strip()) > 60  else (4 if len(setup.get("shortBio","").strip()) > 20 else 0)
     voice_pts      = 6  if len(setup.get("brandVoice","").strip()) > 30 else (3 if len(setup.get("brandVoice","").strip()) > 10 else 0)
-    niches_raw     = setup.get("selectedNiches", [])
+    niches_raw     = setup.get("primaryNiches", [])
     niches         = niches_raw if isinstance(niches_raw, list) else []
     niche_pts      = 6  if len(niches) >= 2 else (3 if len(niches) == 1 else 0)
     desig_raw      = setup.get("designations", [])
@@ -1695,7 +1702,7 @@ def calculate_identity_score(user_id: int, setup: dict) -> dict:
     areas_list     = areas_raw if isinstance(areas_raw, list) else []
     areas_pts      = min(len(areas_list), 4)
 
-    foundation = name_pts + market_pts + bio_pts + voice_pts + niche_pts + desig_pts + disclaimer_pts + areas_pts
+    foundation = min(name_pts + market_pts + bio_pts + voice_pts + niche_pts + desig_pts + disclaimer_pts + areas_pts, 30)
     foundation_breakdown = {
         "name":        {"pts": name_pts,       "max": 5,  "label": "Name"},
         "market":      {"pts": market_pts,      "max": 5,  "label": "Primary Market"},
