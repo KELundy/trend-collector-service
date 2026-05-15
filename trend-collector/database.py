@@ -1692,6 +1692,13 @@ def calculate_identity_score(user_id: int, setup: dict = None) -> dict:
         ORDER BY saved_at DESC
     """, (user_id,))
     rows = c.fetchall()
+
+    # Count CIR records from the permanent audit trail — this is the authoritative
+    # count shown on the authority page and in Jordan's briefing card.
+    c.execute("SELECT COUNT(*) as cnt FROM compliance_records WHERE user_id = ?", (user_id,))
+    cir_row = c.fetchone()
+    cir_count = cir_row["cnt"] if cir_row else 0
+
     conn.close()
 
     total_items     = len(rows)
@@ -1825,6 +1832,7 @@ def calculate_identity_score(user_id: int, setup: dict = None) -> dict:
 
     return {
         "total": total, "level": level,
+        "cir_count": cir_count,
         "pillars": {
             "foundation":  {"score": foundation,  "max": 30, "label": "Foundation",  "breakdown": foundation_breakdown},
             "integrity":   {"score": integrity,   "max": 25, "label": "Integrity",   "breakdown": integrity_breakdown},
