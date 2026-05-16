@@ -308,6 +308,19 @@ def _build_content_prompt(payload):
         + f"Specialization: {primary_categories}\n"
         + f"Areas of depth: {subniches_text}\n"
         + voice_profile_block
+        + (
+            f"\nAUDIENCE FILTER — NON-NEGOTIABLE\n"
+            + "─" * 40 + "\n"
+            + f"This post is written FOR: {audience}\n" if audience else
+            f"\nAUDIENCE FILTER — NON-NEGOTIABLE\n"
+            + "─" * 40 + "\n"
+            + f"This post is written FOR: people interested in {primary_categories} in {market}\n"
+        )
+        + f"Niche specialist lens: {primary_categories}\n"
+        + "Before writing a single word, ask: would a client dealing with this niche situation "
+        + "stop scrolling for this? If a general real estate professional finds this more useful "
+        + "than a client in this niche, the targeting is wrong. Rewrite until the niche client "
+        + "sees themselves in it.\n"
         + f"\nWHAT THIS CONTENT IS ABOUT\n"
         + "─" * 40 + "\n"
         + f"Situation: {payload.situation}\n"
@@ -325,15 +338,18 @@ def _build_content_prompt(payload):
         "1. Take a REAL POSITION. 'It depends' is not a position. Pick a side and defend it.\n"
         "2. Include ONE QUOTABLE LINE — a single sentence that stands alone as a screenshot-worthy insight. "
         "This is the sentence that gets shared. Make it specific, surprising, or counter-intuitive.\n"
-        f"3. End the POST with a GENUINE LOCAL QUESTION that only a {market} expert would ask, "
-        f"and that only people actually interested in {market} real estate would answer. "
-        f'Examples: "Are you one of the buyers I\'ve talked to this week who\'s still waiting?" '
+        f"3. End the POST with a GENUINE LOCAL QUESTION that only a {primary_categories} specialist "
+        f"in {market} would ask, and that only someone actually dealing with a {primary_categories} "
+        f"situation in {market} right now would stop and answer. "
+        f'Examples for context: "Are you one of the buyers I\'ve talked to this week who\'s still waiting?" '
         f'/ "Has your block felt different this spring?" '
+        f"The question must be specific to the {primary_categories} niche — not generic real estate. "
         "NOT: 'What do you think?' or 'Have any questions?'\n"
         "4. SOCIAL MEDIA IS A CONVERSATION, NOT A BILLBOARD. The post should invite a specific reply, "
         "not broadcast at an audience. Write to one person, not a crowd.\n\n"
         "SHAREABILITY RUBRIC — every post must pass all four:\n"
-        "- Would someone share this because it makes THEM look smart? (not because it promotes the agent)\n"
+        f"- Would a {primary_categories} client share this because it makes THEM look smart or informed? "
+        "(Not because it promotes the agent — because it says something true about their situation.)\n"
         "- Does it contain a specific, surprising insight that most people don't know?\n"
         "- Could the headline stand alone as something worth forwarding?\n"
         "- Is there zero hedge language? (remove 'it depends,' 'every situation is different,' 'consult a professional')\n\n"
