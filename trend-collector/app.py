@@ -2397,6 +2397,55 @@ async def set_user_role(request: Request, current_user: dict = Depends(get_curre
     }
 
 
+@app.post("/admin/set-plan")
+async def set_user_plan(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Super admin only — set any user's plan directly.
+    Used to grant insider access, founding member status, or manually
+    assign a plan outside of Stripe (e.g. HomeBridge staff, beta testers).
+    Stripe-managed plans (active subscriptions) should be changed via Stripe,
+    not here — this route does not touch Stripe at all.
+    """
+    _require_super_admin(current_user)
+    body = await request.json()
+
+    target_id = int(body.get("user_id", 0))
+    new_plan   = str(body.get("plan", "")).strip()
+
+    # Only plans that make sense to set manually.
+    # Stripe webhook handles subscription lifecycle — don't duplicate it here.
+    _admin_assignable_plans = (
+        "trial", "insider", "founding_member",
+        "starter", "professional", "power"
+    )
+    if new_plan not in _admin_assignable_plans:
+        raise HTTPException(400, f"Invalid plan. Must be one of: {', '.join(_admin_assignable_plans)}")
+
+    if not target_id:
+        raise HTTPException(400, "user_id required.")
+
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("SELECT id, email, agent_name, plan FROM users WHERE id = ?", (target_id,))
+    target = c.fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(404, "User not found.")
+
+    c.execute("UPDATE users SET plan = ? WHERE id = ?", (new_plan, target_id))
+    conn.commit()
+    conn.close()
+
+    return {
+        "ok":         True,
+        "user_id":    target_id,
+        "email":      target["email"],
+        "agent_name": target["agent_name"],
+        "new_plan":   new_plan,
+    }
+
+
 @app.get("/admin/users")
 async def list_all_users(current_user: dict = Depends(get_current_user)):
     """
@@ -2703,6 +2752,14 @@ async def admin_create_user(request: Request,
     role        = str(body.get("role","agent")).strip()
     brokerage   = str(body.get("brokerage","")).strip()
     is_licensed = int(body.get("is_licensed", 1))
+    # plan — defaults to "trial"; "insider" is set via the HomeBridge Team Member checkbox.
+    # Only allow plans that exist in PLAN_LIMITS. Never allow self-serve billing plans
+    # to be set here (those come from Stripe webhooks). Admin-assignable plans only.
+    _admin_assignable_plans = ("trial", "insider", "founding_member",
+                               "starter", "professional", "power")
+    plan = str(body.get("plan", "trial")).strip()
+    if plan not in _admin_assignable_plans:
+        plan = "trial"
 
     if not email or not password or not agent_name:
         raise HTTPException(400, "email, password, and agent_name are required.")
@@ -2717,16 +2774,16 @@ async def admin_create_user(request: Request,
     c    = conn.cursor()
     try:
         c.execute("""
-            INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_licensed)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (email, pw_hash, agent_name, brokerage, role, is_licensed))
+            INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_licensed, plan)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (email, pw_hash, agent_name, brokerage, role, is_licensed, plan))
         conn.commit()
         new_id = c.lastrowid
     except Exception as e:
         conn.close()
         raise HTTPException(409, f"Could not create user: {str(e)}")
     conn.close()
-    return {"ok": True, "user_id": new_id, "email": email, "role": role}
+    return {"ok": True, "user_id": new_id, "email": email, "role": role, "plan": plan}
 
 
 # ── Startup: ensure user_id=2 is super_admin ──
