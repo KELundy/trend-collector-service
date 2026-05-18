@@ -35,6 +35,7 @@ STRIPE_PRICES = {
     "power_monthly":            os.getenv("STRIPE_PRICE_POWER_MONTHLY",           ""),
     "power_annual":             os.getenv("STRIPE_PRICE_POWER_ANNUAL",            ""),
     "founding_member_monthly":  os.getenv("STRIPE_PRICE_FOUNDING_MEMBER_MONTHLY", ""),
+    "coach_monthly":            os.getenv("STRIPE_PRICE_COACH_MONTHLY",           ""),
     # Office / team plans
     "office_starter_monthly":   os.getenv("STRIPE_PRICE_OFFICE_STARTER_MONTHLY",  ""),
     "office_starter_annual":    os.getenv("STRIPE_PRICE_OFFICE_STARTER_ANNUAL",   ""),
@@ -1413,8 +1414,8 @@ async def create_checkout(request: Request, current_user=Depends(get_current_use
     if not customer_id:
         customer    = _stripe.Customer.create(email=current_user["email"], name=current_user.get("agent_name",""), metadata={"hb_user_id": str(current_user["id"])})
         customer_id = customer.id
-    # Founding Member gets a 20-day free trial — card required, not charged until day 21
-    subscription_data = {"trial_period_days": 20} if price_key == "founding_member_monthly" else {}
+    # Founding Member and Coach both get a 20-day free trial — card required, not charged until day 21
+    subscription_data = {"trial_period_days": 20} if price_key in ("founding_member_monthly", "coach_monthly") else {}
     session = _stripe.checkout.Session.create(customer=customer_id, mode="subscription", line_items=[{"price": price_id, "quantity": 1}], success_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}?billing=success", cancel_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}?billing=cancelled", metadata={"hb_user_id": str(current_user["id"]), "price_key": price_key}, allow_promotion_codes=True, subscription_data=subscription_data)
     return {"checkout_url": session.url}
 
@@ -1459,6 +1460,7 @@ async def stripe_webhook(request: Request):
         # price_key must match PLAN_LIMITS keys exactly.
         # Format expected: "starter_monthly", "professional_annual", "power_monthly", etc.
         if   "founding_member" in price_key: plan = "founding_member"
+        elif "coach"           in price_key: plan = "coach"
         elif "power"           in price_key: plan = "power"
         elif "professional"    in price_key: plan = "professional"
         elif "starter"         in price_key: plan = "starter"
@@ -2480,7 +2482,7 @@ async def set_user_plan(request: Request, current_user: dict = Depends(get_curre
     # Stripe webhook handles subscription lifecycle — don't duplicate it here.
     _admin_assignable_plans = (
         "trial", "insider", "founding_member",
-        "starter", "professional", "power"
+        "starter", "professional", "power", "coach"
     )
     if new_plan not in _admin_assignable_plans:
         raise HTTPException(400, f"Invalid plan. Must be one of: {', '.join(_admin_assignable_plans)}")
@@ -2682,7 +2684,7 @@ async def admin_set_role(user_id: int, request: Request,
     _require_super_admin(current_user)
     body = await request.json()
     new_role = str(body.get("role", "")).strip()
-    valid_roles = ("super_admin", "admin", "support", "broker", "team", "agent", "assistant", "hb_marketer")
+    valid_roles = ("super_admin", "admin", "support", "broker", "team", "agent", "coach", "assistant", "hb_marketer")
     if new_role not in valid_roles:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(valid_roles)}")
     # Cannot demote yourself
