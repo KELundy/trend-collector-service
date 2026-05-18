@@ -56,9 +56,10 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     agent_name: str
-    brokerage:   Optional[str] = ""
-    role:        Optional[str] = "agent"   # "agent" | "broker"
-    office_code: Optional[str] = ""        # broker's invite code for agent signup
+    brokerage:    Optional[str] = ""
+    role:         Optional[str] = "agent"   # "agent" | "broker"
+    office_code:  Optional[str] = ""        # broker's invite code for agent signup
+    referral_code: Optional[str] = ""       # partner referral code for attribution
 
 class LoginRequest(BaseModel):
     email: str
@@ -253,6 +254,23 @@ def register(body: RegisterRequest):
         set_trial(user["id"], days=14)
     except Exception:
         pass
+
+    # Record referral attribution if a partner code was provided — non-blocking
+    if body.referral_code:
+        try:
+            from database import partner_get_by_code, referral_attribute
+            ref_code = body.referral_code.upper().strip()
+            referring = partner_get_by_code(ref_code)
+            if referring:
+                referral_attribute(
+                    partner_id       = referring["id"],
+                    referred_user_id = user["id"],
+                    attribution_type = "code",
+                    referral_code    = ref_code,
+                )
+        except Exception as _ae:
+            # Attribution failure must never block registration
+            print(f"[Register] Attribution failed (non-blocking): {_ae}")
 
     token = create_token(user["id"], user["email"], user["role"])
     return {
