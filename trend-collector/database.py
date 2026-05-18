@@ -152,6 +152,11 @@ def init_db():
         # solo | member | lead | broker — professional configuration type
         # Does NOT replace the role field. Drives organizational feature activation only.
         ("org_config",             "TEXT DEFAULT NULL"),
+        # HB Marketing profile — added Session 46
+        # Stores HomeBridge company identity (voice, niches, market) separately from
+        # agent_setup so switching to the marketing context never contaminates the
+        # agent's personal profile. NULL until first save from marketing context.
+        ("hb_marketing_setup_json","TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
