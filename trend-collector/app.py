@@ -1055,6 +1055,68 @@ async def get_setup(current_user=Depends(get_current_user)):
     return {"setup": setup, "has_setup": bool(setup)}
 
 
+# ── HB Marketing profile — separate from agent_setup ──────────────────────────
+# These routes read/write users.hb_marketing_setup_json exclusively.
+# They never touch agent_setup. This is the server-side half of the
+# context separation that prevents marketing profile saves from
+# overwriting the agent's personal identity data.
+
+@app.post("/marketing-setup/save")
+async def save_marketing_setup(request: Request, current_user=Depends(get_current_user)):
+    """
+    Save the HB Marketing company profile for this user.
+    Writes to users.hb_marketing_setup_json — never touches agent_setup.
+    Available to super_admin and hb_marketer roles only.
+    """
+    allowed_roles = ("super_admin", "admin", "hb_marketer")
+    if current_user.get("role") not in allowed_roles:
+        raise HTTPException(403, "Marketing profile access requires super_admin or hb_marketer role.")
+    body  = await request.json()
+    setup = body.get("setup", {})
+    if not isinstance(setup, dict):
+        raise HTTPException(400, "setup must be a JSON object.")
+    from database import get_conn as _gc
+    import json as _json
+    conn = _gc()
+    try:
+        conn.execute(
+            "UPDATE users SET hb_marketing_setup_json = ? WHERE id = ?",
+            (_json.dumps(setup), current_user["id"])
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"success": True}
+
+
+@app.get("/marketing-setup/get")
+async def get_marketing_setup(current_user=Depends(get_current_user)):
+    """
+    Retrieve the HB Marketing company profile for this user.
+    Reads from users.hb_marketing_setup_json — never touches agent_setup.
+    Returns empty dict if not yet saved (first-time marketing context boot).
+    """
+    allowed_roles = ("super_admin", "admin", "hb_marketer")
+    if current_user.get("role") not in allowed_roles:
+        raise HTTPException(403, "Marketing profile access requires super_admin or hb_marketer role.")
+    from database import get_conn as _gc
+    import json as _json
+    conn = _gc()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT hb_marketing_setup_json FROM users WHERE id = ?", (current_user["id"],))
+        row = c.fetchone()
+    finally:
+        conn.close()
+    if not row or not row["hb_marketing_setup_json"]:
+        return {"setup": {}, "has_setup": False}
+    try:
+        setup = _json.loads(row["hb_marketing_setup_json"])
+        return {"setup": setup, "has_setup": True}
+    except Exception:
+        return {"setup": {}, "has_setup": False}
+
+
 @app.get("/results")
 async def get_results(current_user=Depends(get_current_user)):
     results = get_user_results(current_user["id"])
