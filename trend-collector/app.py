@@ -4079,6 +4079,7 @@ async def get_team_code(current_user: dict = Depends(get_current_user)):
 # POST /partner/enroll          — enroll in partner program
 # GET  /partner/payouts         — payout history for current partner
 # GET  /partner/referrals       — referred agents list
+# POST /partner/attribute       — record referral attribution for current user (post-registration)
 # POST /partner/approve/{id}    — admin: approve pending broker partner
 # GET  /admin/partners          — admin: list all enrolled partners
 # ─────────────────────────────────────────────────────────
@@ -4192,7 +4193,37 @@ async def get_my_partner_referrals(current_user: dict = Depends(get_current_user
     return {"referrals": referrals, "count": len(referrals)}
 
 
-@app.post("/partner/approve/{partner_id}")
+@app.post("/partner/attribute")
+async def attribute_referral(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Record referral attribution for the current user using a partner referral code.
+    Called from onboarding when a user enters a code after registration.
+    Non-destructive — silently succeeds if code is invalid or already attributed.
+    """
+    body         = await request.json()
+    referral_code = (body.get("referral_code") or "").upper().strip()
+
+    if not referral_code:
+        return {"ok": False, "message": "No referral code provided."}
+
+    try:
+        from database import referral_attribute, partner_get_by_code as _pgbc
+        referring = _pgbc(referral_code)
+        if not referring:
+            return {"ok": False, "message": "Referral code not found."}
+        referral_attribute(
+            partner_id       = referring["id"],
+            referred_user_id = current_user["id"],
+            attribution_type = "code",
+            referral_code    = referral_code,
+        )
+        return {"ok": True, "message": "Attribution recorded."}
+    except Exception as _ae:
+        print(f"[/partner/attribute] Failed (non-blocking): {_ae}")
+        return {"ok": False, "message": "Attribution could not be recorded."}
 async def approve_partner_application(
     partner_id: int,
     current_user: dict = Depends(get_current_user),
