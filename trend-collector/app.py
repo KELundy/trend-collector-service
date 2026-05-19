@@ -118,6 +118,7 @@ from database import (
     video_job_get,
     video_jobs_get_for_user,
     set_heygen_avatar_id,
+    set_heygen_photo_avatar_id,
     get_video_identity,
 )
 
@@ -5555,73 +5556,171 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
     if len(script) > 4800:
         raise HTTPException(status_code=400, detail="Script is too long. Please shorten it to under 4800 characters.")
 
-    # 3. Create pending job record (no signed token needed — we upload directly)
+    # 3. Create pending job record
     job = video_job_create(
-        user_id        = uid,
-        library_item_id= req.library_item_id,
-        script_preview = script[:200],
-        photo_token    = "",   # not used in direct-upload flow
+        user_id         = uid,
+        library_item_id = req.library_item_id,
+        script_preview  = script[:200],
+        photo_token     = "",   # not used in Photo Avatar flow
     )
     job_id = job["id"]
 
-    # 4. Read photo from disk and upload to HeyGen asset API.
-    #    HeyGen requires the photo be uploaded to their system first.
-    #    The upload returns an image_key used in the Avatar IV render call.
-    #    This is a direct binary upload — not a URL reference.
-    photo_path = profile_photo_get_path(uid)
-    if not photo_path:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error":   "no_photo",
-                "message": "Upload your profile photo first to generate a video. Go to your avatar in the top-right corner and tap 'Upload Photo'.",
-            }
+    # 4. Resolve talking_photo_id — create Photo Avatar on first render,
+    #    reuse stored ID on every subsequent render.
+    #
+    #    HeyGen Photo Avatar flow (v3 API — confirmed from docs Session 49):
+    #      Step A: POST /v3/avatars  { type:"photo", name:..., file:{type:"url", url:...} }
+    #              → response: avatar_item.id  (this is the talking_photo_id)
+    #              → status may be "processing" — poll until "completed" (max 60s)
+    #      Step B: POST /v2/video/generate  { video_inputs:[{ character:{ type:"talking_photo",
+    #              talking_photo_id: <id> }, voice:{...}, background:{...} }] }
+    #
+    #    Photo Avatar creation is one-time per agent. Once created, the ID is stored
+    #    in heygen_photo_avatar_id on the user record and reused forever.
+    #    This avoids re-uploading the photo on every render.
+
+    from database import get_conn as _gc_vid
+
+    # Look up stored heygen_photo_avatar_id
+    _vid_conn = _gc_vid()
+    _vid_c    = _vid_conn.cursor()
+    _vid_c.execute("SELECT heygen_photo_avatar_id FROM users WHERE id = ?", (uid,))
+    _vid_row  = _vid_c.fetchone()
+    _vid_conn.close()
+    stored_photo_avatar_id = _vid_row["heygen_photo_avatar_id"] if _vid_row else None
+
+    if stored_photo_avatar_id:
+        # Fast path — reuse existing Photo Avatar
+        talking_photo_id = stored_photo_avatar_id
+        print(f"[Video] Reusing stored Photo Avatar ID {talking_photo_id} for user {uid}")
+    else:
+        # First render — create Photo Avatar in HeyGen using a signed photo URL.
+        # The signed URL serves the agent's photo from our persistent disk
+        # for 30 minutes — long enough for HeyGen to fetch it during avatar creation.
+
+        # Step A1: Generate a signed photo token
+        token = photo_token_create(uid)
+        photo_url = f"{BACKEND_URL}/profile/photo/{token}"
+
+        # Fetch agent name for the avatar label (never shown to agent)
+        _name_conn = _gc_vid()
+        _name_c    = _name_conn.cursor()
+        _name_c.execute("SELECT agent_name FROM users WHERE id = ?", (uid,))
+        _name_row  = _name_c.fetchone()
+        _name_conn.close()
+        avatar_name = (_name_row["agent_name"] if _name_row else f"agent_{uid}") or f"agent_{uid}"
+
+        # Step A2: Create Photo Avatar via HeyGen /v3/avatars
+        create_payload = {
+            "type": "photo",
+            "name": avatar_name,
+            "file": {
+                "type": "url",
+                "url":  photo_url,
+            },
+        }
+
+        try:
+            async with _httpx.AsyncClient(timeout=30.0) as client:
+                create_resp = await client.post(
+                    "https://api.heygen.com/v3/avatars",
+                    headers={
+                        "X-Api-Key":    HEYGEN_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json=create_payload,
+                )
+            create_data = create_resp.json()
+        except Exception as e:
+            print(f"[Video] HeyGen Photo Avatar creation failed for user {uid}: {e}")
+            video_job_fail(str(job_id), f"Avatar creation failed: {str(e)[:200]}")
+            raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
+
+        if create_resp.status_code not in (200, 201) or not create_data.get("data"):
+            raw_err = create_data.get("error") or create_data.get("message") or f"Status {create_resp.status_code}"
+            err_msg = raw_err.get("message") if isinstance(raw_err, dict) else str(raw_err)
+            print(f"[Video] HeyGen /v3/avatars rejected for user {uid}: {err_msg} — {create_data}")
+            video_job_fail(str(job_id), f"Avatar creation rejected: {err_msg[:200]}")
+            raise HTTPException(status_code=502, detail=f"Video generation failed: {err_msg}")
+
+        # Extract avatar_item.id — this is the talking_photo_id
+        avatar_item  = create_data["data"].get("avatar_item") or create_data["data"]
+        new_avatar_id = (
+            avatar_item.get("id")
+            or avatar_item.get("avatar_id")
+            or create_data["data"].get("id")
         )
+        if not new_avatar_id:
+            print(f"[Video] HeyGen avatar creation returned no ID for user {uid}: {create_data}")
+            video_job_fail(str(job_id), "Avatar creation returned no ID")
+            raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
 
-    try:
-        with open(photo_path, "rb") as f:
-            photo_bytes = f.read()
-    except Exception as e:
-        print(f"[Video] Could not read photo for user {uid}: {e}")
-        raise HTTPException(status_code=500, detail="Could not read your profile photo. Please re-upload it and try again.")
+        # Step A3: Poll until avatar status is "completed" (max 60 seconds, every 5s)
+        avatar_status = create_data["data"].get("status", "processing")
+        if avatar_status != "completed":
+            print(f"[Video] Polling for Photo Avatar completion — id {new_avatar_id}, user {uid}")
+            import asyncio as _asyncio_vid
+            for _poll_attempt in range(12):   # 12 × 5s = 60s max
+                await _asyncio_vid.sleep(5)
+                try:
+                    async with _httpx.AsyncClient(timeout=15.0) as client:
+                        poll_resp = await client.get(
+                            f"https://api.heygen.com/v3/avatars/{new_avatar_id}",
+                            headers={"X-Api-Key": HEYGEN_API_KEY},
+                        )
+                    poll_data    = poll_resp.json()
+                    avatar_status = (
+                        poll_data.get("data", {}).get("status")
+                        or poll_data.get("data", {}).get("avatar_item", {}).get("status")
+                        or "processing"
+                    )
+                    print(f"[Video] Avatar poll {_poll_attempt+1}/12 — status: {avatar_status}")
+                    if avatar_status == "completed":
+                        break
+                    if avatar_status in ("failed", "error"):
+                        print(f"[Video] Avatar processing failed for user {uid}: {poll_data}")
+                        video_job_fail(str(job_id), "Avatar processing failed")
+                        raise HTTPException(status_code=502, detail="Video generation failed. Please re-upload your photo and try again.")
+                except HTTPException:
+                    raise
+                except Exception as poll_e:
+                    print(f"[Video] Avatar poll error for user {uid}: {poll_e}")
+                    # Continue polling — transient network error
 
-    image_key = None
-    try:
-        async with _httpx.AsyncClient(timeout=30.0) as client:
-            upload_resp = await client.post(
-                "https://upload.heygen.com/v1/asset",
-                headers={
-                    "X-Api-Key":    HEYGEN_API_KEY,
-                    "Content-Type": "image/jpeg",
-                },
-                content=photo_bytes,
-            )
-        upload_data = upload_resp.json()
-        image_key = (
-            upload_data.get("data", {}).get("image_key")
-            or upload_data.get("data", {}).get("id")
-            or upload_data.get("image_key")
-        )
-        print(f"[Video] Photo uploaded to HeyGen for user {uid} — image_key: {image_key}")
-    except Exception as e:
-        print(f"[Video] HeyGen photo upload failed for user {uid}: {e}")
-        raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
+            if avatar_status != "completed":
+                # Timed out — store the ID anyway and attempt render;
+                # HeyGen may accept it even while still processing.
+                print(f"[Video] Avatar poll timed out for user {uid} — attempting render with id {new_avatar_id}")
 
-    if not image_key:
-        err_detail = str(upload_data)[:300]
-        print(f"[Video] HeyGen photo upload returned no image_key for user {uid}: {err_detail}")
-        raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
+        # Store the Photo Avatar ID — reused on all future renders
+        set_heygen_photo_avatar_id(uid, new_avatar_id)
+        talking_photo_id = new_avatar_id
+        print(f"[Video] Photo Avatar created and stored — id {talking_photo_id}, user {uid}")
 
-    # 5. Submit Avatar IV render using the uploaded image_key.
-    #    POST /v2/video/av4/generate
-    #    Required top-level fields: image_key, video_title, input_text, voice_id
-    #    voice_id: "Liam - Professional" — confirmed English male professional HeyGen stock voice.
-    #    ElevenLabs voice cloning wired in when ready (Session 52+).
+        # Consume the photo token now that HeyGen has fetched the image
+        photo_token_consume(token)
+
+    # 5. Submit video render via /v2/video/generate
+    #    voice_id 1bd001e7e50f421d891986aad5158bc8 is HeyGen's confirmed English voice.
+    #    ElevenLabs voice cloning replaces voice_id in Session 52+.
     heygen_payload = {
-        "video_title": f"AutoMates Video {job_id}",
-        "image_key":   image_key,
-        "input_text":  script,
-        "voice_id":    "e17b99e1b86e47e8b7f4cae0f806aa78",  # Liam - Professional, English male
+        "video_inputs": [
+            {
+                "character": {
+                    "type":             "talking_photo",
+                    "talking_photo_id": talking_photo_id,
+                },
+                "voice": {
+                    "type":       "text",
+                    "input_text": script,
+                    "voice_id":   "1bd001e7e50f421d891986aad5158bc8",
+                },
+                "background": {
+                    "type":  "color",
+                    "value": "#F8F7F5",
+                },
+            }
+        ],
         "dimension": {
             "width":  1280,
             "height": 720,
@@ -5631,7 +5730,7 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
     try:
         async with _httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                "https://api.heygen.com/v2/video/av4/generate",
+                "https://api.heygen.com/v2/video/generate",
                 headers={
                     "X-Api-Key":    HEYGEN_API_KEY,
                     "Content-Type": "application/json",
@@ -5641,18 +5740,15 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
         resp_data = resp.json()
     except Exception as e:
         print(f"[Video] HeyGen render API call failed for job {job_id}: {e}")
-        video_job_fail("", f"API call failed: {str(e)[:200]}")
+        video_job_fail(str(job_id), f"API call failed: {str(e)[:200]}")
         raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
 
-    # Normalise error message — resp_data.error may be a dict or string
+    # Normalise error — resp_data.error may be a dict or string
     if resp.status_code != 200 or not resp_data.get("data", {}).get("video_id"):
         raw_err = resp_data.get("error") or resp_data.get("message") or f"Status {resp.status_code}"
-        if isinstance(raw_err, dict):
-            err_msg = raw_err.get("message") or str(raw_err)
-        else:
-            err_msg = str(raw_err)
-        print(f"[Video] HeyGen rejected job {job_id}: {err_msg} — full response: {resp_data}")
-        video_job_fail("", f"Rejected by render service: {err_msg[:200]}")
+        err_msg = raw_err.get("message") if isinstance(raw_err, dict) else str(raw_err)
+        print(f"[Video] HeyGen rejected render for job {job_id}: {err_msg} — full response: {resp_data}")
+        video_job_fail(str(job_id), f"Rejected by render service: {err_msg[:200]}")
         raise HTTPException(status_code=502, detail=f"Video generation failed: {err_msg}")
 
     heygen_video_id = resp_data["data"]["video_id"]
@@ -5660,21 +5756,161 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
     # 6. Store HeyGen video ID on job record
     video_job_set_heygen_id(job_id, heygen_video_id)
 
-    # 7. Consume photo token (render has been submitted — token no longer needed)
-    photo_token_consume(token)
-
-    # 8. Increment monthly video counter
+    # 7. Increment monthly video counter
     record_video_render(uid, role)
 
     print(f"[Video] Render submitted — job {job_id}, heygen_video_id {heygen_video_id}, user {uid}")
 
     return {
-        "success":        True,
-        "job_id":         job_id,
+        "success":         True,
+        "job_id":          job_id,
         "heygen_video_id": heygen_video_id,
-        "status":         "processing",
-        "message":        "Your video is being generated. This usually takes 1-3 minutes.",
+        "status":          "processing",
+        "message":         "Your video is being generated. This usually takes 1-3 minutes.",
     }
+
+
+# ── Jordan message generation — backend proxy ────────────────────────────────
+# Security fix (Session 50): Jordan's Anthropic API calls previously ran
+# directly from the browser, exposing the API key in client-side code.
+# All Jordan generation now routes through this endpoint.
+# The browser never touches api.anthropic.com directly.
+#
+# Two message types:
+#   "identity" — standing briefing for Identity panel. Cached by frontend.
+#   "home"     — daily briefing for Home screen. Never cached.
+#
+# Returns: { "message": "<generated text>" }
+# On any error: returns fallback message, never raises to the frontend.
+
+class JordanMessageRequest(BaseModel):
+    type:        str           # "identity" | "home"
+    data:        dict          # context data (varies by type)
+    jordan_name: str  = "Jordan"
+    jordan_brief: str = ""
+
+@app.post("/jordan/message")
+async def jordan_message(req: JordanMessageRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Generate a Jordan message via the Anthropic API — server-side only.
+    The API key never leaves the backend. Frontend receives the message text only.
+    Fallback message is returned on any error so Jordan is never blank.
+    """
+    name  = (req.jordan_name  or "Jordan").strip()
+    brief = (req.jordan_brief or "").strip()
+    data  = req.data or {}
+
+    # ── Build prompts based on message type ───────────────────────────────────
+    if req.type == "home":
+        pending   = int(data.get("pending",   0))
+        signals   = int(data.get("signals",   0))
+        schedules = int(data.get("schedules", 0))
+        published = int(data.get("published", 0))
+
+        context_parts = [
+            f"{pending} post{'s' if pending != 1 else ''} cleared by Your Auditor and waiting for the agent's approval." if pending else "Nothing waiting for the agent's approval right now.",
+            f"Your Analyst found {signals} market signal{'s' if signals != 1 else ''} worth writing about." if signals else "No new market signals today.",
+            "Schedule is active and running." if schedules else "No active schedule set.",
+            f"{published} post{'s' if published != 1 else ''} have been approved or published so far." if published else "No posts approved or published yet.",
+        ]
+        context_str = " ".join(context_parts)
+
+        system_prompt = " ".join([
+            f"You are {name}, the Chief of Staff for a real estate agent using a platform called AutoMates.",
+            "Your job is to give the agent a short, plain-spoken daily briefing about what their team has been doing.",
+            f"Your personality: {brief}." if brief else "Your personality: warm, clear, direct, and calm.",
+            "Rules you must always follow:",
+            "Write at a 9th grade reading level. No jargon. No fancy words.",
+            "Write exactly 1 to 2 sentences. Never longer.",
+            "Never use em dashes. Use plain sentences instead.",
+            "Never mention scores, ratings, grades, or numbers out of 100.",
+            "Never say the word integrity. Never imply the agent is failing at anything.",
+            "Focus on what the team has done and what needs the agent's attention today.",
+            "Refer to team members as Your Writer, Your Analyst, Your Auditor, Your Scheduler, Your Publisher.",
+            "Never use the agent's name. Speak to them directly but without using their name.",
+            "Never start with the word I.",
+            "Never use quotation marks around team member names.",
+            "Keep it brief. This is a daily operational update, not a speech.",
+        ])
+        user_prompt = f"Here is today's situation: {context_str} Write {name}'s daily briefing now."
+
+        # Fallback for home type
+        def _fallback():
+            if pending >= 3:
+                return f"Your Auditor cleared {pending} posts while you were away. They are ready for your review below."
+            if pending and signals:
+                return f"Your Auditor cleared {pending} post{'s' if pending > 1 else ''} and Your Analyst found a story worth writing about. Both are waiting below."
+            if pending:
+                return f"Your Auditor cleared {pending} post{'s' if pending > 1 else ''} while you were away. Ready when you are."
+            if signals:
+                return "Your Analyst found something in your market worth writing about. Nothing is waiting for your approval right now."
+            if schedules:
+                return "Your Scheduler has everything on track. Nothing needs your attention right now."
+            if published >= 5:
+                return "Your team has been working hard. Everything is in good shape."
+            return "Your whole team is standing by. Create a post or set a schedule and they will get to work."
+
+    else:
+        # type == "identity" (default)
+        cir_count         = int(data.get("cir_count",           0))
+        schedule_active   = bool(data.get("schedule_active",    False))
+        platforms_conn    = int(data.get("platforms_connected", 0))
+        identity_complete = bool(data.get("identity_complete",  False))
+
+        context_str = " ".join([
+            f"Agent has {cir_count} verified posts on file.",
+            "Schedule is active." if schedule_active else "Schedule is not set yet.",
+            f"{platforms_conn} platform{'s' if platforms_conn != 1 else ''} connected.",
+            "Agent profile is fully set up." if identity_complete else "Agent profile is not fully set up yet.",
+        ])
+
+        system_prompt = " ".join([
+            f"You are {name}, the Chief of Staff for a real estate agent using a platform called AutoMates.",
+            "Your job is to give the agent a short, warm, plain-spoken briefing about how their platform is working for them.",
+            f"Your personality: {brief}." if brief else "Your personality: warm, clear, encouraging, and direct.",
+            "Rules you must always follow:",
+            "Write at a 9th grade reading level. No jargon. No fancy words.",
+            "Keep it to 2 to 4 sentences maximum. Never longer.",
+            "Never use em dashes. Use plain sentences instead.",
+            "Never mention scores, ratings, grades, or numbers out of 100.",
+            "Never say the word integrity. Never imply the agent is failing at anything.",
+            "Focus on what IS working and what is being built for them.",
+            "Refer to team members as Your Writer, Your Analyst, Your Auditor, Your Scheduler, Your Publisher.",
+            "Verified posts are posts that have been reviewed and are helping the agent get found online. Explain it that way if you mention it.",
+            "Never start with the word I. Start with the agent's situation or accomplishment.",
+            "Never use quotation marks around team member names.",
+        ])
+        user_prompt = f"Here is the agent's current situation: {context_str} Write {name}'s briefing message now."
+
+        # Fallback for identity type
+        def _fallback():
+            if not identity_complete:
+                return f"{name} here. Your profile is not fully filled in yet. Once you add your voice, your market, and your niches, your whole team will know exactly how to work for you."
+            if cir_count == 0:
+                return "Your profile is all set and your team knows what to do. Approve your first post and you will have your first verified record on file. That is when your name really starts to get out there."
+            if cir_count < 10:
+                return f"You are off to a good start. Your team has {cir_count} verified post{'s' if cir_count != 1 else ''} on file, each one helping the right people find you. Keep going."
+            if cir_count < 50:
+                return f"{cir_count} posts are out there right now showing up in searches and building your name. Your Writer knows how you talk, your Analyst is watching your market, and your Auditor makes sure everything going out looks professional."
+            return f"{cir_count} posts. That is {cir_count} times your name showed up somewhere online when someone needed answers. Your whole team has been working hard for you and it shows. Keep approving content and that number keeps climbing."
+
+    # ── Call Anthropic API ────────────────────────────────────────────────────
+    try:
+        response = anthropic_client.messages.create(
+            model      = "claude-sonnet-4-20250514",
+            max_tokens = 300,
+            system     = system_prompt,
+            messages   = [{"role": "user", "content": user_prompt}],
+        )
+        message_text = ""
+        if response.content and len(response.content) > 0:
+            message_text = response.content[0].text.strip()
+        if not message_text:
+            return {"message": _fallback()}
+        return {"message": message_text}
+    except Exception as e:
+        print(f"[Jordan] Anthropic API error (type={req.type}, user={current_user['id']}): {e}")
+        return {"message": _fallback()}
 
 
 # ── Video status polling ──────────────────────────────────────────────────────
