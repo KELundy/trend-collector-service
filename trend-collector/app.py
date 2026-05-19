@@ -5555,54 +5555,88 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
     if len(script) > 4800:
         raise HTTPException(status_code=400, detail="Script is too long. Please shorten it to under 4800 characters.")
 
-    # 3. Create signed photo token (30-min expiry)
-    token    = photo_token_create(uid)
-    photo_url = f"{BACKEND_URL}/profile/photo/{token}"
-
-    # 4. Create pending job record
+    # 3. Create pending job record (no signed token needed — we upload directly)
     job = video_job_create(
         user_id        = uid,
         library_item_id= req.library_item_id,
         script_preview = script[:200],
-        photo_token    = token,
+        photo_token    = "",   # not used in direct-upload flow
     )
     job_id = job["id"]
 
-    # 5. Submit to HeyGen
-    # Using /v2/video/generate with a talking_photo avatar type.
-    # avatar_type "talking_photo" animates a still image with lip sync.
-    # voice_id: "en-US-GuyNeural" — neutral American male professional voice.
-    # This is a placeholder pending ElevenLabs voice cloning (future session).
-    # When the agent's cloned voice_id is available, substitute it here.
-    heygen_payload = {
-        "video_inputs": [
-            {
-                "character": {
-                    "type":       "talking_photo",
-                    "talking_photo_url": photo_url,
-                },
-                "voice": {
-                    "type":     "text",
-                    "input_text": script,
-                    "voice_id": "en-US-GuyNeural",   # neutral placeholder — ElevenLabs Session 52+
-                },
-                "background": {
-                    "type":  "color",
-                    "value": "#F8F7F5",   # matches AutoMates warm neutral background
-                },
+    # 4. Read photo from disk and upload to HeyGen asset API.
+    #    HeyGen requires the photo be uploaded to their system first.
+    #    The upload returns an image_key used in the Avatar IV render call.
+    #    This is a direct binary upload — not a URL reference.
+    photo_path = profile_photo_get_path(uid)
+    if not photo_path:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error":   "no_photo",
+                "message": "Upload your profile photo first to generate a video. Go to your avatar in the top-right corner and tap 'Upload Photo'.",
             }
-        ],
+        )
+
+    try:
+        with open(photo_path, "rb") as f:
+            photo_bytes = f.read()
+    except Exception as e:
+        print(f"[Video] Could not read photo for user {uid}: {e}")
+        raise HTTPException(status_code=500, detail="Could not read your profile photo. Please re-upload it and try again.")
+
+    image_key = None
+    try:
+        async with _httpx.AsyncClient(timeout=30.0) as client:
+            upload_resp = await client.post(
+                "https://upload.heygen.com/v1/asset",
+                headers={
+                    "X-Api-Key":    HEYGEN_API_KEY,
+                    "Content-Type": "image/jpeg",
+                },
+                content=photo_bytes,
+            )
+        upload_data = upload_resp.json()
+        image_key = (
+            upload_data.get("data", {}).get("image_key")
+            or upload_data.get("data", {}).get("id")
+            or upload_data.get("image_key")
+        )
+        print(f"[Video] Photo uploaded to HeyGen for user {uid} — image_key: {image_key}")
+    except Exception as e:
+        print(f"[Video] HeyGen photo upload failed for user {uid}: {e}")
+        raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
+
+    if not image_key:
+        err_detail = str(upload_data)[:300]
+        print(f"[Video] HeyGen photo upload returned no image_key for user {uid}: {err_detail}")
+        raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
+
+    # 5. Submit Avatar IV render using the uploaded image_key.
+    #    Avatar IV endpoint: POST /v2/video/av4/generate
+    #    Requires: image_key, script (called "input_text"), voice_id, video_title.
+    #    voice_id: "Liam - Professional" — confirmed English male professional HeyGen stock voice.
+    #    ElevenLabs voice cloning wired in when ready (Session 52+).
+    heygen_payload = {
+        "video_title":  f"AutoMates Video {job_id}",
+        "image_key":    image_key,
+        "script": {
+            "type":       "text",
+            "input_text": script,
+        },
+        "voice": {
+            "voice_id": "e17b99e1b86e47e8b7f4cae0f806aa78",  # Liam - Professional, English male
+        },
         "dimension": {
             "width":  1280,
             "height": 720,
         },
-        "callback_id": f"hb_job_{job_id}",
     }
 
     try:
         async with _httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                "https://api.heygen.com/v2/video/generate",
+                "https://api.heygen.com/v2/video/av4/generate",
                 headers={
                     "X-Api-Key":    HEYGEN_API_KEY,
                     "Content-Type": "application/json",
@@ -5611,13 +5645,18 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
             )
         resp_data = resp.json()
     except Exception as e:
-        print(f"[Video] HeyGen API call failed for job {job_id}: {e}")
+        print(f"[Video] HeyGen render API call failed for job {job_id}: {e}")
         video_job_fail("", f"API call failed: {str(e)[:200]}")
         raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
 
+    # Normalise error message — resp_data.error may be a dict or string
     if resp.status_code != 200 or not resp_data.get("data", {}).get("video_id"):
-        err_msg = resp_data.get("message") or resp_data.get("error") or f"Status {resp.status_code}"
-        print(f"[Video] HeyGen rejected job {job_id}: {err_msg} — payload: {resp_data}")
+        raw_err = resp_data.get("error") or resp_data.get("message") or f"Status {resp.status_code}"
+        if isinstance(raw_err, dict):
+            err_msg = raw_err.get("message") or str(raw_err)
+        else:
+            err_msg = str(raw_err)
+        print(f"[Video] HeyGen rejected job {job_id}: {err_msg} — full response: {resp_data}")
         video_job_fail("", f"Rejected by render service: {err_msg[:200]}")
         raise HTTPException(status_code=502, detail=f"Video generation failed: {err_msg}")
 
