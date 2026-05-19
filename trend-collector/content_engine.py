@@ -122,6 +122,18 @@ def _get_anthropic_client():
     return Anthropic(api_key=api_key)
 
 
+# ── Module-level prompt constants ─────────────────────────────────────────────
+# Defined here so every prompt builder function can reference them without
+# redefining them locally. Previously EM_DASH_RULE was a local variable inside
+# _build_content_prompt only, causing NameError in _build_b2b_content_prompt,
+# _build_freeform_content_prompt, and _build_video_script_prompt. — Session 49
+EM_DASH_RULE = (
+    "PUNCTUATION: Never use em dashes (—) anywhere in the content. "
+    "Use commas, periods, or restructure the sentence instead. "
+    "Em dashes are a well-known AI writing tell and undermine authenticity.\n"
+)
+
+
 def _build_content_prompt(payload):
     identity = payload.identity
     profile  = payload.agentProfile or AgentProfileModel()
@@ -182,7 +194,6 @@ def _build_content_prompt(payload):
         )
     avoid_text   = f"Never use these words or phrases: {words_avoid}.\n" if words_avoid else ""
     prefer_text  = f"Naturally weave in these words or phrases: {words_prefer}.\n" if words_prefer else ""
-    em_dash_rule = "PUNCTUATION: Never use em dashes (—) anywhere in the content. Use commas, periods, or restructure the sentence instead. Em dashes are a well-known AI writing tell and undermine authenticity.\n"
     bio_text     = f"About {agent_name}: {short_bio}\n" if short_bio else ""
     audience_text = f"Who reads this: {audience}\n" if audience else ""
     desig_list    = profile.designations or []
@@ -329,7 +340,7 @@ def _build_content_prompt(payload):
         + mls_block
         + f"\nVOICE & STYLE\n"
         + "─" * 40 + "\n"
-        + tone_text + length_text + em_dash_rule + avoid_text + prefer_text
+        + tone_text + length_text + EM_DASH_RULE + avoid_text + prefer_text
         + "\nTHE MOST IMPORTANT THING\n"
         + "─" * 40 + "\n"
         "This content must sound like a real person thinking out loud. The reader should feel like "
@@ -460,7 +471,7 @@ Relevant signals: {selected_trends}
 
 VOICE & STYLE
 {"─" * 40}
-{tone_text}{length_text}{em_dash_rule}{avoid_text}{prefer_text}
+{tone_text}{length_text}{EM_DASH_RULE}{avoid_text}{prefer_text}
 THE MOST IMPORTANT THING
 {"─" * 40}
 This content must position {company_name} as the company that actually understands what brokers are dealing with — not the company trying to sell them something. The reader should feel understood before they feel pitched.
@@ -606,7 +617,7 @@ def _build_freeform_content_prompt(payload):
         + bio_text
         + f"Voice: {brand_voice}\n"
         + (lang_instruction if lang_instruction else "")
-        + em_dash_rule + avoid_text + prefer_text
+        + EM_DASH_RULE + avoid_text + prefer_text
         + f"\nTHE AGENT'S RAW THOUGHT\n"
         + "─" * 40 + "\n"
         + f"\"{raw_thought}\"\n\n"
@@ -4169,7 +4180,7 @@ This is a talking-head video script — the agent will speak directly to camera.
 WHO {agent_name.upper()} IS
 {"─" * 40}
 {bio_text}{origin_text}{advantage_text}{perspective_text}{niche_text}Brand voice: {brand_voice}
-{em_dash_rule}{avoid_text}{prefer_text}
+{EM_DASH_RULE}{avoid_text}{prefer_text}
 VIDEO TOPIC
 {"─" * 40}
 {topic}
