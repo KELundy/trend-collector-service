@@ -157,6 +157,27 @@ def init_db():
         # agent_setup so switching to the marketing context never contaminates the
         # agent's personal profile. NULL until first save from marketing context.
         ("hb_marketing_setup_json","TEXT DEFAULT NULL"),
+        # ── VIDEO IDENTITY — added Session 49 ────────────────────────────────
+        # has_profile_photo: 1 = photo stored on persistent disk at
+        #   /data/profile_photos/{user_id}.jpg — served via GET /profile/photo/{user_id}
+        # profile_photo_updated_at: timestamp of last photo upload
+        # heygen_avatar_id: HeyGen Instant Avatar ID — NULL until agent activates
+        #   their Video Identity upgrade. When populated, used in place of photo avatar.
+        # video_consent_at: timestamp when agent consented to likeness use for video.
+        #   Required before any video render. Must be recorded before building
+        #   the Instant Avatar upgrade flow (future session).
+        # video_month_count: videos rendered (including regenerations) this calendar month.
+        #   Resets on the 1st of each month. This is the primary video billing counter.
+        # video_month_reset: ISO datetime of next monthly video counter reset.
+        # addon_video_limit: extra video renders from purchased Video Top-up Packs.
+        #   +10 per pack purchased. Stacks. Resets with video_month_count on billing reset.
+        ("has_profile_photo",       "INTEGER DEFAULT 0"),
+        ("profile_photo_updated_at","TEXT DEFAULT NULL"),
+        ("heygen_avatar_id",        "TEXT DEFAULT NULL"),
+        ("video_consent_at",        "TEXT DEFAULT NULL"),
+        ("video_month_count",       "INTEGER DEFAULT 0"),
+        ("video_month_reset",       "TEXT DEFAULT NULL"),
+        ("addon_video_limit",       "INTEGER DEFAULT 0"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -599,6 +620,70 @@ def init_db():
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_compliance_records_user "
             "ON compliance_records(user_id, approved_at DESC)"
+        )
+    except Exception:
+        pass
+
+    # ── VIDEO JOBS — Session 49 ───────────────────────────────────────────────
+    # Tracks every avatar video render request submitted to the video API.
+    # One row per render attempt — regenerations create new rows.
+    # heygen_video_id: the video_id returned by the HeyGen API on submission.
+    # library_item_id: the content_library item the script came from (nullable).
+    # status: pending | processing | completed | failed
+    # video_url: populated by webhook or poll when status = completed.
+    #   HeyGen video URLs expire after 7 days — store promptly after completion.
+    # photo_token: signed temporary token used for this render's photo URL.
+    #   Stored for audit only — never reused.
+    # script_preview: first 200 chars of script for display in admin/records.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS video_jobs (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL,
+            heygen_video_id  TEXT    DEFAULT NULL,
+            library_item_id  INTEGER DEFAULT NULL,
+            status           TEXT    NOT NULL DEFAULT 'pending',
+            video_url        TEXT    DEFAULT NULL,
+            photo_token      TEXT    DEFAULT NULL,
+            script_preview   TEXT    DEFAULT NULL,
+            error_message    TEXT    DEFAULT NULL,
+            created_at       TEXT    DEFAULT (datetime('now')),
+            completed_at     TEXT    DEFAULT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    try:
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_user "
+            "ON video_jobs(user_id, created_at DESC)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_heygen_id "
+            "ON video_jobs(heygen_video_id)"
+        )
+    except Exception:
+        pass
+
+    # ── PHOTO TOKENS — Session 49 ─────────────────────────────────────────────
+    # Short-lived signed tokens that make an agent's profile photo temporarily
+    # accessible to the video render API during avatar generation.
+    # token: random 32-char URL-safe string included in the photo URL.
+    # expires_at: 30 minutes from creation — fetched within this window.
+    # used: set to 1 after render job submitted (one-time use per render).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS photo_tokens (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            token      TEXT    NOT NULL UNIQUE,
+            expires_at TEXT    NOT NULL,
+            used       INTEGER DEFAULT 0,
+            created_at TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    try:
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_tokens_token "
+            "ON photo_tokens(token)"
         )
     except Exception:
         pass
@@ -2605,29 +2690,46 @@ def signals_purge_expired():
 # ─────────────────────────────────────────────
 
 PLAN_LIMITS = {
-    # plan_key: {"posts": N, "backstop": N*3, "niches": N}
+    # plan_key: {"posts": N, "backstop": N*3, "niches": N, "videos": N}
     # posts    = approved post limit per billing period
     # backstop = raw generation ceiling per billing period (abuse guard)
     # niches   = max saved niches (enforced in save_agent_setup)
-    "trial":           {"posts": 10,   "backstop": 30,   "niches": 2,   "lifetime": True},
-    "founding_member": {"posts": 50,   "backstop": 150,  "niches": 999, "lifetime": False},
-    "starter":         {"posts": 50,   "backstop": 150,  "niches": 2,   "lifetime": False},
-    "professional":    {"posts": 60,   "backstop": 200,  "niches": 5,   "lifetime": False},
-    "power":           {"posts": 100,  "backstop": 350,  "niches": 999, "lifetime": False},
+    # videos   = avatar video renders per calendar month (includes regenerations).
+    #            0 = video feature disabled for this plan.
+    #            Resets on the 1st of each month (video_month_reset in users table).
+    #            Top-up packs add to addon_video_limit (+10 per $19 pack).
+    #
+    # Video limit rationale — Session 49:
+    #   Trial: 0   — video is a paid-plan benefit, not a trial feature
+    #   Starter: 5 — enough to see value, not enough to abuse (~$7.50 cost/mo)
+    #   Founding Member: 10 — early adopter bonus (~$15 cost/mo)
+    #   Professional: 20 — primary use case for coaches/professionals (~$30 cost/mo)
+    #   Coach: 20 — same as professional, B2B content focus (~$30 cost/mo)
+    #   Power: 30 — highest tier, maximum value (~$45 cost/mo)
+    #   Insider: 30 — matches Power, manually granted accounts
+    "trial":           {"posts": 10,   "backstop": 30,   "niches": 2,   "videos": 0,  "lifetime": True},
+    "founding_member": {"posts": 50,   "backstop": 150,  "niches": 999, "videos": 10, "lifetime": False},
+    "starter":         {"posts": 50,   "backstop": 150,  "niches": 2,   "videos": 5,  "lifetime": False},
+    "professional":    {"posts": 60,   "backstop": 200,  "niches": 5,   "videos": 20, "lifetime": False},
+    "power":           {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 30, "lifetime": False},
+    # ── COACH — added Session 49 ─────────────────────────────────────────────
+    # B2B plan for real estate coaches. $199/month. Stripe product created
+    # Session 48. Nav/context built Session 50.
+    "coach":           {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 20, "lifetime": False},
     # ── INSIDER — DO NOT REMOVE ──────────────────────────────────────────────
     # Granted manually by Kevin to influencer agents, beta evaluators, and
     # HomeBridge Group staff who need full platform access at no charge.
     # Never self-serve. Never in Stripe. Kevin sets plan="insider" directly
     # in the DB via the admin panel or SQL. Role stays "agent" — no admin
     # privileges. Billing panel is hidden for this plan. Never delete this key.
-    "insider":         {"posts": 100,  "backstop": 350,  "niches": 999, "lifetime": False},
+    "insider":         {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 30, "lifetime": False},
     # ─────────────────────────────────────────────────────────────────────────
     # Legacy keys — kept so existing DB rows never break
-    "agent":           {"posts": 30,   "backstop": 90,   "niches": 999, "lifetime": False},
-    "team":            {"posts": 75,   "backstop": 225,  "niches": 999, "lifetime": False},
-    "office_starter":  {"posts": 150,  "backstop": 450,  "niches": 999, "lifetime": False},
-    "office_growth":   {"posts": 400,  "backstop": 1200, "niches": 999, "lifetime": False},
-    "enterprise":      {"posts": 9999, "backstop": 9999, "niches": 999, "lifetime": False},
+    "agent":           {"posts": 30,   "backstop": 90,   "niches": 999, "videos": 0,  "lifetime": False},
+    "team":            {"posts": 75,   "backstop": 225,  "niches": 999, "videos": 0,  "lifetime": False},
+    "office_starter":  {"posts": 150,  "backstop": 450,  "niches": 999, "videos": 0,  "lifetime": False},
+    "office_growth":   {"posts": 400,  "backstop": 1200, "niches": 999, "videos": 0,  "lifetime": False},
+    "enterprise":      {"posts": 9999, "backstop": 9999, "niches": 999, "videos": 999,"lifetime": False},
 }
 
 # Roles that are never limited — bypass all checks
@@ -3411,3 +3513,462 @@ def schedule_row_with_days(row) -> dict:
     _schedule_row already includes dayOfWeek; this is a pass-through.
     """
     return _schedule_row(row)
+
+
+# ─────────────────────────────────────────────
+# VIDEO IDENTITY — Session 49
+# Profile photo storage, signed tokens, video job tracking,
+# and monthly video limit enforcement.
+# ─────────────────────────────────────────────
+
+# ── Profile photo ────────────────────────────────────────────────────────────
+
+def profile_photo_save(user_id: int, photo_bytes: bytes) -> bool:
+    """
+    Save a JPEG profile photo to persistent disk at
+    /data/profile_photos/{user_id}.jpg and update the users table flag.
+    Creates the directory if it does not exist.
+    Returns True on success, False on failure.
+    """
+    import os
+    photo_dir = os.getenv("PROFILE_PHOTO_DIR", "/data/profile_photos")
+    try:
+        os.makedirs(photo_dir, exist_ok=True)
+        path = os.path.join(photo_dir, f"{user_id}.jpg")
+        with open(path, "wb") as f:
+            f.write(photo_bytes)
+        conn = get_conn()
+        conn.execute("""
+            UPDATE users
+            SET has_profile_photo       = 1,
+                profile_photo_updated_at = datetime('now')
+            WHERE id = ?
+        """, (user_id,))
+        conn.commit()
+        conn.close()
+        print(f"[Photo] Saved profile photo for user {user_id} ({len(photo_bytes)} bytes)")
+        return True
+    except Exception as e:
+        print(f"[Photo] Save failed for user {user_id}: {e}")
+        return False
+
+
+def profile_photo_get_path(user_id: int) -> Optional[str]:
+    """
+    Return the disk path to a user's profile photo if it exists, else None.
+    """
+    import os
+    photo_dir = os.getenv("PROFILE_PHOTO_DIR", "/data/profile_photos")
+    path = os.path.join(photo_dir, f"{user_id}.jpg")
+    return path if os.path.exists(path) else None
+
+
+def profile_photo_exists(user_id: int) -> bool:
+    """Return True if the user has a stored profile photo."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("SELECT has_profile_photo FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return bool(row and row["has_profile_photo"])
+
+
+# ── Signed photo tokens ───────────────────────────────────────────────────────
+
+def photo_token_create(user_id: int) -> str:
+    """
+    Create a signed temporary token for serving a user's profile photo
+    to the video render API. Token is valid for 30 minutes.
+    Any previously unused tokens for this user are invalidated first.
+    Returns the token string.
+    """
+    import secrets as _sec
+    from datetime import timedelta
+    token      = _sec.token_urlsafe(32)   # 43-char URL-safe token
+    expires_at = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
+    conn = get_conn()
+    # Invalidate any existing unused tokens for this user
+    conn.execute(
+        "UPDATE photo_tokens SET used = 1 WHERE user_id = ? AND used = 0",
+        (user_id,)
+    )
+    conn.execute(
+        "INSERT INTO photo_tokens (user_id, token, expires_at) VALUES (?, ?, ?)",
+        (user_id, token, expires_at)
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def photo_token_validate(token: str) -> Optional[int]:
+    """
+    Validate a photo token. Returns user_id if valid and unexpired, else None.
+    Does NOT consume (mark used) the token — that happens when render is submitted.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT user_id, expires_at FROM photo_tokens
+        WHERE token = ? AND used = 0
+    """, (token,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+            return None
+    except Exception:
+        return None
+    return row["user_id"]
+
+
+def photo_token_consume(token: str) -> None:
+    """Mark a photo token as used after the render job is submitted."""
+    conn = get_conn()
+    conn.execute("UPDATE photo_tokens SET used = 1 WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+
+
+# ── Video limit enforcement ───────────────────────────────────────────────────
+
+def _video_reset_if_due(conn, user_id: int, row: dict) -> dict:
+    """
+    Check whether the monthly video counter needs resetting.
+    Resets on the 1st of each calendar month (UTC).
+    Modifies DB in place if reset needed. Returns updated row dict.
+    Called internally by check_video_allowed and record_video_render.
+    """
+    now        = datetime.utcnow()
+    reset_date = row.get("video_month_reset")
+    needs_reset = False
+
+    if not reset_date:
+        needs_reset = True
+    else:
+        try:
+            if now >= datetime.fromisoformat(reset_date):
+                needs_reset = True
+        except Exception:
+            needs_reset = True
+
+    if needs_reset:
+        # Next reset: 1st of next month at midnight UTC
+        if now.month == 12:
+            next_reset = now.replace(year=now.year + 1, month=1, day=1,
+                                     hour=0, minute=0, second=0, microsecond=0)
+        else:
+            next_reset = now.replace(month=now.month + 1, day=1,
+                                     hour=0, minute=0, second=0, microsecond=0)
+        conn.execute("""
+            UPDATE users
+            SET video_month_count = 0,
+                addon_video_limit = 0,
+                video_month_reset = ?
+            WHERE id = ?
+        """, (next_reset.isoformat(), user_id))
+        conn.commit()
+        row = dict(row)
+        row["video_month_count"] = 0
+        row["addon_video_limit"] = 0
+        row["video_month_reset"] = next_reset.isoformat()
+    return row
+
+
+def check_video_allowed(user_id: int, role: str, plan: str) -> dict:
+    """
+    Check whether an agent can render one more video this month.
+    Called from POST /video/render before submitting to the video API.
+
+    Returns:
+        allowed       — bool
+        videos_used   — renders this calendar month (including regenerations)
+        videos_limit  — base plan limit + addon_video_limit
+        resets_on     — human-readable reset date string
+        plan_allows   — bool: False if this plan has 0 video limit (trial etc.)
+    """
+    if role in UNLIMITED_ROLES:
+        return {
+            "allowed": True, "videos_used": 0, "videos_limit": 999,
+            "resets_on": None, "plan_allows": True,
+        }
+
+    limits       = _get_plan_limits(plan)
+    base_videos  = limits.get("videos", 0)
+
+    # Plans with 0 video limit: block entirely with a plan-upgrade message
+    if base_videos == 0:
+        return {
+            "allowed": False, "videos_used": 0, "videos_limit": 0,
+            "resets_on": None, "plan_allows": False,
+        }
+
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT video_month_count, video_month_reset, addon_video_limit
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {"allowed": False, "videos_used": 0, "videos_limit": base_videos,
+                "resets_on": None, "plan_allows": True}
+
+    row = _video_reset_if_due(conn, user_id, row)
+    conn.close()
+
+    videos_used  = row["video_month_count"]  or 0
+    addon        = row["addon_video_limit"]  or 0
+    videos_limit = base_videos + addon
+
+    # Compute next reset for display
+    reset_str = row.get("video_month_reset")
+    resets_on = None
+    if reset_str:
+        try:
+            resets_on = datetime.fromisoformat(reset_str).strftime("%B 1, %Y")
+        except Exception:
+            pass
+
+    return {
+        "allowed":      videos_used < videos_limit,
+        "videos_used":  videos_used,
+        "videos_limit": videos_limit,
+        "resets_on":    resets_on,
+        "plan_allows":  True,
+    }
+
+
+def record_video_render(user_id: int, role: str) -> None:
+    """
+    Increment video_month_count by 1 for a render submission.
+    Called after a video job is successfully submitted to the video API.
+    Counts all renders including regenerations — pool is pool.
+    Never called for UNLIMITED_ROLES or demo mode.
+    """
+    if role in UNLIMITED_ROLES:
+        return
+    try:
+        conn = get_conn()
+        c    = conn.cursor()
+        c.execute("""
+            SELECT video_month_count, video_month_reset, addon_video_limit
+            FROM users WHERE id = ?
+        """, (user_id,))
+        row = c.fetchone()
+        if row:
+            _video_reset_if_due(conn, user_id, row)
+        conn.execute("""
+            UPDATE users
+            SET video_month_count = COALESCE(video_month_count, 0) + 1
+            WHERE id = ?
+        """, (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Video] record_video_render failed for user {user_id}: {e}")
+
+
+def apply_video_topup(user_id: int) -> dict:
+    """
+    Apply one Video Top-up Pack to a user's current month.
+    Adds 10 video renders to addon_video_limit.
+    Stackable — call once per pack purchased ($19/pack via Stripe).
+    Returns updated video counts for confirmation.
+    """
+    conn = get_conn()
+    conn.execute("""
+        UPDATE users
+        SET addon_video_limit = COALESCE(addon_video_limit, 0) + 10
+        WHERE id = ?
+    """, (user_id,))
+    conn.commit()
+    c = conn.cursor()
+    c.execute("""
+        SELECT video_month_count, addon_video_limit
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return {
+        "video_month_count": row["video_month_count"] if row else 0,
+        "addon_video_limit": row["addon_video_limit"] if row else 0,
+    }
+
+
+# ── Video jobs ────────────────────────────────────────────────────────────────
+
+def video_job_create(user_id: int, library_item_id: Optional[int],
+                     script_preview: str, photo_token: str) -> dict:
+    """
+    Create a new video job record in pending state.
+    Called immediately before submitting the render request to the video API.
+    Returns the created job as a dict.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        INSERT INTO video_jobs
+            (user_id, library_item_id, status, script_preview, photo_token, created_at)
+        VALUES (?, ?, 'pending', ?, ?, datetime('now'))
+    """, (user_id, library_item_id, script_preview[:200], photo_token))
+    conn.commit()
+    job_id = c.lastrowid
+    conn.close()
+    return video_job_get(job_id)
+
+
+def video_job_set_heygen_id(job_id: int, heygen_video_id: str) -> None:
+    """
+    Record the video ID returned by the video API after successful submission.
+    Called immediately after the API returns the video_id.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE video_jobs SET heygen_video_id = ?, status = 'processing' WHERE id = ?",
+        (heygen_video_id, job_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def video_job_complete(heygen_video_id: str, video_url: str) -> Optional[dict]:
+    """
+    Mark a video job as completed and store the render URL.
+    Called by the webhook handler when the video API notifies completion.
+    Returns the updated job dict, or None if job not found.
+    """
+    conn = get_conn()
+    conn.execute("""
+        UPDATE video_jobs
+        SET status       = 'completed',
+            video_url    = ?,
+            completed_at = datetime('now')
+        WHERE heygen_video_id = ?
+    """, (video_url, heygen_video_id))
+    conn.commit()
+    c = conn.cursor()
+    c.execute("SELECT id FROM video_jobs WHERE heygen_video_id = ?", (heygen_video_id,))
+    row = c.fetchone()
+    conn.close()
+    return video_job_get(row["id"]) if row else None
+
+
+def video_job_fail(heygen_video_id: str, error_message: str = "") -> None:
+    """
+    Mark a video job as failed. Called by webhook or poll on error status.
+    """
+    conn = get_conn()
+    conn.execute("""
+        UPDATE video_jobs
+        SET status        = 'failed',
+            error_message = ?,
+            completed_at  = datetime('now')
+        WHERE heygen_video_id = ?
+    """, (error_message[:500], heygen_video_id))
+    conn.commit()
+    conn.close()
+
+
+def video_job_get(job_id: int) -> Optional[dict]:
+    """Fetch a single video job by internal ID."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM video_jobs WHERE id = ?", (job_id,))
+    row = c.fetchone()
+    conn.close()
+    return _video_job_row(row) if row else None
+
+
+def video_job_get_by_heygen_id(heygen_video_id: str) -> Optional[dict]:
+    """Fetch a video job by its HeyGen video ID. Used in webhook handler."""
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM video_jobs WHERE heygen_video_id = ?", (heygen_video_id,))
+    row = c.fetchone()
+    conn.close()
+    return _video_job_row(row) if row else None
+
+
+def video_jobs_get_for_user(user_id: int, limit: int = 10) -> list:
+    """
+    Return recent video jobs for a user, newest first.
+    Used by the agent's Records panel to show video history.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT * FROM video_jobs
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (user_id, min(limit, 50)))
+    rows = c.fetchall()
+    conn.close()
+    return [_video_job_row(r) for r in rows]
+
+
+def _video_job_row(row) -> dict:
+    """Serialize a video_jobs DB row to a dict for API responses."""
+    return {
+        "id":             row["id"],
+        "userId":         row["user_id"],
+        "heygenVideoId":  row["heygen_video_id"],
+        "libraryItemId":  row["library_item_id"],
+        "status":         row["status"] or "pending",
+        "videoUrl":       row["video_url"],
+        "scriptPreview":  row["script_preview"] or "",
+        "errorMessage":   row["error_message"] or "",
+        "createdAt":      row["created_at"],
+        "completedAt":    row["completed_at"],
+    }
+
+
+# ── HeyGen avatar ID management ───────────────────────────────────────────────
+
+def set_heygen_avatar_id(user_id: int, avatar_id: str) -> None:
+    """
+    Store an agent's HeyGen Instant Avatar ID.
+    Set by admin panel when an agent's Video Identity upgrade is processed.
+    When present, video renders use this ID instead of the photo avatar path.
+    Never exposed to agents in UI — HeyGen is infrastructure, not a feature name.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET heygen_avatar_id = ? WHERE id = ?",
+        (avatar_id.strip() if avatar_id else None, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_video_identity(user_id: int) -> dict:
+    """
+    Return the video identity state for an agent.
+    Used by POST /video/render to determine render path:
+      - has_photo: True → use photo avatar (Session 49 path)
+      - heygen_avatar_id: set → use Instant Avatar (future upgrade path)
+      - neither → render not possible, agent needs to upload a photo
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT has_profile_photo, heygen_avatar_id, video_consent_at,
+               plan, role
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"has_photo": False, "heygen_avatar_id": None,
+                "has_consent": False, "plan": "trial", "role": "agent"}
+    return {
+        "has_photo":        bool(row["has_profile_photo"]),
+        "heygen_avatar_id": row["heygen_avatar_id"],
+        "has_consent":      bool(row["video_consent_at"]),
+        "plan":             row["plan"] or "trial",
+        "role":             row["role"] or "agent",
+    }
