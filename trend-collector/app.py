@@ -5613,20 +5613,15 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
         raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
 
     # 5. Submit Avatar IV render using the uploaded image_key.
-    #    Avatar IV endpoint: POST /v2/video/av4/generate
-    #    Requires: image_key, script (called "input_text"), voice_id, video_title.
+    #    POST /v2/video/av4/generate
+    #    Required top-level fields: image_key, video_title, input_text, voice_id
     #    voice_id: "Liam - Professional" — confirmed English male professional HeyGen stock voice.
     #    ElevenLabs voice cloning wired in when ready (Session 52+).
     heygen_payload = {
-        "video_title":  f"AutoMates Video {job_id}",
-        "image_key":    image_key,
-        "script": {
-            "type":       "text",
-            "input_text": script,
-        },
-        "voice": {
-            "voice_id": "e17b99e1b86e47e8b7f4cae0f806aa78",  # Liam - Professional, English male
-        },
+        "video_title": f"AutoMates Video {job_id}",
+        "image_key":   image_key,
+        "input_text":  script,
+        "voice_id":    "e17b99e1b86e47e8b7f4cae0f806aa78",  # Liam - Professional, English male
         "dimension": {
             "width":  1280,
             "height": 720,
