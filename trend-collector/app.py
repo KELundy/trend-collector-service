@@ -45,6 +45,12 @@ STRIPE_PRICES = {
     "office_team_annual":       os.getenv("STRIPE_PRICE_OFFICE_TEAM_ANNUAL",      ""),
 }
 
+# ── Video Identity — HeyGen API ──────────────────────────────────────────────
+# HEYGEN_API_KEY: added to Render env vars end of Session 48.
+# Never logged. Never returned to frontend. Backend use only.
+HEYGEN_API_KEY  = os.getenv("HEYGEN_API_KEY", "")
+BACKEND_URL     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
+
 OFFICE_SEAT_LIMITS = {
     "team":           5,   # $199/month — up to 5 agents, no broker required
     "office_starter": 5,
@@ -95,6 +101,24 @@ from database import (
     get_subscription_status,
     _compute_next_billing_reset,
     DB_NAME,
+    # Video Identity — Session 49
+    profile_photo_save,
+    profile_photo_get_path,
+    profile_photo_exists,
+    photo_token_create,
+    photo_token_validate,
+    photo_token_consume,
+    check_video_allowed,
+    record_video_render,
+    apply_video_topup,
+    video_job_create,
+    video_job_set_heygen_id,
+    video_job_complete,
+    video_job_fail,
+    video_job_get,
+    video_jobs_get_for_user,
+    set_heygen_avatar_id,
+    get_video_identity,
 )
 
 # ── Safe fallback in case database.py is older version ──
@@ -1454,6 +1478,12 @@ async def stripe_webhook(request: Request):
             from database import apply_addon_pack
             result = apply_addon_pack(hb_uid)
             print(f"[Billing] Add-on Pack applied for user {hb_uid}: +30 posts, +90 backstop. New totals: {result}")
+            return {"ok": True}
+
+        # ── Video Top-up Pack — one-time purchase, +10 video renders ────────
+        if "video_topup" in price_key or "video-topup" in price_key or "video_top_up" in price_key:
+            result = apply_video_topup(hb_uid)
+            print(f"[Billing] Video Top-up applied for user {hb_uid}: +10 renders. New totals: {result}")
             return {"ok": True}
 
         # ── Subscription plan — map price_key to plan name ───────────────────
@@ -5361,3 +5391,441 @@ async def generate_flyer(req: FlyerRequest, current_user: dict = Depends(get_cur
 # ─────────────────────────────────────────────
 # DIAGNOSTIC + MIGRATION — super_admin only
 # Debug endpoints removed — migrations complete, one-time use only.
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VIDEO IDENTITY — Session 49
+# Profile photo storage, signed token serving, video render pipeline,
+# monthly limit enforcement, and HeyGen avatar ID management.
+#
+# HeyGen is infrastructure — never referenced in agent-facing copy.
+# Agents see "Video Identity", "Generate Video", "Your video is ready."
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import httpx as _httpx
+
+# ── Profile photo upload ──────────────────────────────────────────────────────
+
+@app.post("/profile/photo")
+async def upload_profile_photo(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Accept a JPEG profile photo upload from the agent.
+    Stores to persistent disk at /data/profile_photos/{user_id}.jpg.
+    Also updates the in-browser display via the existing hb_profile_photo
+    localStorage flow — the frontend sends base64 which we decode here.
+
+    Accepts JSON: { "photo_b64": "<base64 JPEG string>" }
+    The base64 string may include a data URI prefix (data:image/jpeg;base64,...)
+    which we strip before decoding.
+    """
+    import base64 as _b64
+    body = await request.json()
+    photo_b64 = body.get("photo_b64", "")
+    if not photo_b64:
+        raise HTTPException(status_code=400, detail="photo_b64 is required")
+
+    # Strip data URI prefix if present
+    if "," in photo_b64:
+        photo_b64 = photo_b64.split(",", 1)[1]
+
+    try:
+        photo_bytes = _b64.b64decode(photo_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 image data")
+
+    # Enforce reasonable size limit — 8MB
+    if len(photo_bytes) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Photo too large. Please use a photo under 8MB.")
+
+    uid     = current_user["id"]
+    success = profile_photo_save(uid, photo_bytes)
+    if not success:
+        raise HTTPException(status_code=500, detail="Photo save failed. Please try again.")
+
+    return {"success": True, "message": "Photo saved."}
+
+
+# ── Signed photo token endpoint — serves photo to video render API ────────────
+
+@app.get("/profile/photo/{token}")
+async def serve_profile_photo(token: str):
+    """
+    Serve a profile photo using a signed temporary token.
+    Token is valid for 30 minutes and single-use per render.
+    No authentication required — token IS the auth for this endpoint.
+    Called by the video render API during avatar generation.
+    """
+    from fastapi.responses import FileResponse
+    uid = photo_token_validate(token)
+    if uid is None:
+        raise HTTPException(status_code=404, detail="Photo not found or link expired.")
+
+    path = profile_photo_get_path(uid)
+    if not path:
+        raise HTTPException(status_code=404, detail="No profile photo on file.")
+
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ── Video limit status ────────────────────────────────────────────────────────
+
+@app.get("/video/limit")
+async def get_video_limit(current_user: dict = Depends(get_current_user)):
+    """
+    Return the agent's current monthly video render usage and limit.
+    Called by the frontend before showing the Generate Video button.
+    """
+    uid  = current_user["id"]
+    role = current_user.get("role", "agent")
+    plan = current_user.get("plan", "trial")
+    return check_video_allowed(uid, role, plan)
+
+
+# ── Video render request ──────────────────────────────────────────────────────
+
+class VideoRenderRequest(BaseModel):
+    script:          str
+    library_item_id: Optional[int] = None
+
+@app.post("/video/render")
+async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Submit an avatar video render job.
+
+    Flow:
+    1. Check monthly video limit — hard block if exceeded
+    2. Verify agent has a profile photo
+    3. Create a signed 30-min photo token
+    4. Create a pending video_job record
+    5. Submit to HeyGen API (avatar video from photo + script)
+    6. Store the returned video_id on the job record
+    7. Increment the monthly video counter
+    8. Return job_id for frontend polling
+
+    The agent's face from their profile photo is animated with lip sync.
+    HeyGen is never mentioned to the agent.
+    """
+    if not HEYGEN_API_KEY:
+        raise HTTPException(status_code=503, detail="Video generation is not yet configured. Please contact support.")
+
+    uid  = current_user["id"]
+    role = current_user.get("role", "agent")
+    plan = current_user.get("plan", "trial")
+
+    # 1. Monthly limit check
+    limit_check = check_video_allowed(uid, role, plan)
+    if not limit_check["allowed"]:
+        if not limit_check["plan_allows"]:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error":   "plan_no_video",
+                    "message": "Video generation is available on Starter plans and above. Upgrade your plan to access this feature.",
+                }
+            )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error":        "video_limit_reached",
+                "message":      f"You've used {limit_check['videos_used']} of {limit_check['videos_limit']} videos included in your plan this month. Your limit resets on {limit_check['resets_on']}. Purchase a Video Top-up Pack for 10 more renders.",
+                "videos_used":  limit_check["videos_used"],
+                "videos_limit": limit_check["videos_limit"],
+                "resets_on":    limit_check["resets_on"],
+            }
+        )
+
+    # 2. Verify profile photo exists
+    if not profile_photo_exists(uid):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error":   "no_photo",
+                "message": "Upload your profile photo first to generate a video. Go to your avatar in the top-right corner and tap 'Upload Photo'.",
+            }
+        )
+
+    # Script length guard — HeyGen limit is 5000 chars
+    script = req.script.strip()
+    if not script:
+        raise HTTPException(status_code=400, detail="Script cannot be empty.")
+    if len(script) > 4800:
+        raise HTTPException(status_code=400, detail="Script is too long. Please shorten it to under 4800 characters.")
+
+    # 3. Create signed photo token (30-min expiry)
+    token    = photo_token_create(uid)
+    photo_url = f"{BACKEND_URL}/profile/photo/{token}"
+
+    # 4. Create pending job record
+    job = video_job_create(
+        user_id        = uid,
+        library_item_id= req.library_item_id,
+        script_preview = script[:200],
+        photo_token    = token,
+    )
+    job_id = job["id"]
+
+    # 5. Submit to HeyGen
+    # Using /v2/video/generate with a talking_photo avatar type.
+    # avatar_type "talking_photo" animates a still image with lip sync.
+    # voice_id: "en-US-GuyNeural" — neutral American male professional voice.
+    # This is a placeholder pending ElevenLabs voice cloning (future session).
+    # When the agent's cloned voice_id is available, substitute it here.
+    heygen_payload = {
+        "video_inputs": [
+            {
+                "character": {
+                    "type":       "talking_photo",
+                    "talking_photo_url": photo_url,
+                },
+                "voice": {
+                    "type":     "text",
+                    "input_text": script,
+                    "voice_id": "en-US-GuyNeural",   # neutral placeholder — ElevenLabs Session 52+
+                },
+                "background": {
+                    "type":  "color",
+                    "value": "#F8F7F5",   # matches AutoMates warm neutral background
+                },
+            }
+        ],
+        "dimension": {
+            "width":  1280,
+            "height": 720,
+        },
+        "callback_id": f"hb_job_{job_id}",
+    }
+
+    try:
+        async with _httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.heygen.com/v2/video/generate",
+                headers={
+                    "X-Api-Key":    HEYGEN_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json=heygen_payload,
+            )
+        resp_data = resp.json()
+    except Exception as e:
+        print(f"[Video] HeyGen API call failed for job {job_id}: {e}")
+        video_job_fail("", f"API call failed: {str(e)[:200]}")
+        raise HTTPException(status_code=502, detail="Video generation service unavailable. Please try again in a moment.")
+
+    if resp.status_code != 200 or not resp_data.get("data", {}).get("video_id"):
+        err_msg = resp_data.get("message") or resp_data.get("error") or f"Status {resp.status_code}"
+        print(f"[Video] HeyGen rejected job {job_id}: {err_msg} — payload: {resp_data}")
+        video_job_fail("", f"Rejected by render service: {err_msg[:200]}")
+        raise HTTPException(status_code=502, detail=f"Video generation failed: {err_msg}")
+
+    heygen_video_id = resp_data["data"]["video_id"]
+
+    # 6. Store HeyGen video ID on job record
+    video_job_set_heygen_id(job_id, heygen_video_id)
+
+    # 7. Consume photo token (render has been submitted — token no longer needed)
+    photo_token_consume(token)
+
+    # 8. Increment monthly video counter
+    record_video_render(uid, role)
+
+    print(f"[Video] Render submitted — job {job_id}, heygen_video_id {heygen_video_id}, user {uid}")
+
+    return {
+        "success":        True,
+        "job_id":         job_id,
+        "heygen_video_id": heygen_video_id,
+        "status":         "processing",
+        "message":        "Your video is being generated. This usually takes 1-3 minutes.",
+    }
+
+
+# ── Video status polling ──────────────────────────────────────────────────────
+
+@app.get("/video/status/{job_id}")
+async def video_status(job_id: int, current_user: dict = Depends(get_current_user)):
+    """
+    Poll the status of a video render job.
+    Called by the frontend every 5 seconds after submitting a render.
+    Returns status + video_url when completed.
+
+    If our DB shows completed/failed, returns immediately without hitting HeyGen.
+    If still processing, polls HeyGen for the latest status.
+    """
+    if not HEYGEN_API_KEY:
+        raise HTTPException(status_code=503, detail="Video service not configured.")
+
+    uid = current_user["id"]
+    job = video_job_get(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Video job not found.")
+    if job["userId"] != uid:
+        raise HTTPException(status_code=403, detail="Not your video job.")
+
+    # Already terminal — return from DB, no HeyGen call needed
+    if job["status"] in ("completed", "failed"):
+        return {
+            "job_id":   job_id,
+            "status":   job["status"],
+            "video_url": job["videoUrl"],
+            "error":    job["errorMessage"],
+        }
+
+    # Still processing — poll HeyGen
+    heygen_video_id = job.get("heygenVideoId")
+    if not heygen_video_id:
+        return {"job_id": job_id, "status": "pending", "video_url": None, "error": None}
+
+    try:
+        async with _httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"https://api.heygen.com/v1/video_status.get?video_id={heygen_video_id}",
+                headers={"X-Api-Key": HEYGEN_API_KEY},
+            )
+        resp_data = resp.json()
+    except Exception as e:
+        print(f"[Video] Status poll failed for job {job_id}: {e}")
+        return {"job_id": job_id, "status": "processing", "video_url": None, "error": None}
+
+    heygen_status = resp_data.get("data", {}).get("status", "processing")
+    video_url     = resp_data.get("data", {}).get("video_url")
+
+    if heygen_status == "completed" and video_url:
+        updated = video_job_complete(heygen_video_id, video_url)
+        return {
+            "job_id":    job_id,
+            "status":    "completed",
+            "video_url": video_url,
+            "error":     None,
+        }
+    elif heygen_status == "failed":
+        error_msg = resp_data.get("data", {}).get("error", {}).get("message", "Render failed")
+        video_job_fail(heygen_video_id, error_msg)
+        return {
+            "job_id":    job_id,
+            "status":    "failed",
+            "video_url": None,
+            "error":     error_msg,
+        }
+
+    # Still pending/processing
+    return {"job_id": job_id, "status": heygen_status, "video_url": None, "error": None}
+
+
+# ── HeyGen webhook handler ────────────────────────────────────────────────────
+
+@app.post("/video/webhook")
+async def video_webhook(request: Request):
+    """
+    Receives completion callbacks from HeyGen when a video finishes rendering.
+    Register this URL in HeyGen dashboard:
+      https://api.homebridgegroup.co/video/webhook
+
+    Expected event types:
+      avatar_video.success — video completed successfully
+      avatar_video.fail    — video render failed
+
+    No signature verification required by HeyGen for this endpoint type.
+    We validate that the video_id exists in our DB before acting on it.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    event_type = body.get("event_type", "")
+    data       = body.get("event_data", body.get("data", {}))
+
+    video_id  = data.get("video_id", "")
+    video_url = data.get("video_url", "")
+
+    print(f"[Video Webhook] event={event_type} video_id={video_id}")
+
+    if not video_id:
+        return {"ok": True}
+
+    if event_type in ("avatar_video.success", "video.completed", "completed"):
+        if video_url:
+            updated = video_job_complete(video_id, video_url)
+            if updated:
+                print(f"[Video Webhook] Completed: job {updated['id']} for user {updated['userId']}")
+    elif event_type in ("avatar_video.fail", "video.failed", "failed"):
+        error_msg = data.get("error", {}).get("message", "") if isinstance(data.get("error"), dict) else str(data.get("error", "Render failed"))
+        video_job_fail(video_id, error_msg[:200])
+        print(f"[Video Webhook] Failed: video_id {video_id} — {error_msg}")
+
+    return {"ok": True}
+
+
+# ── Video top-up pack checkout ────────────────────────────────────────────────
+
+@app.post("/billing/video-topup-checkout")
+async def video_topup_checkout(current_user: dict = Depends(get_current_user)):
+    """
+    Create a Stripe checkout session for a Video Top-up Pack.
+    $19 one-time purchase — adds 10 video renders to current month.
+    Uses STRIPE_PRICE_VIDEO_TOPUP env var.
+    """
+    if not STRIPE_ENABLED:
+        raise HTTPException(503, "Billing not yet configured.")
+
+    price_id = os.getenv("STRIPE_PRICE_VIDEO_TOPUP", "")
+    if not price_id:
+        raise HTTPException(400, "Video Top-up Pack is not yet available. Check back soon.")
+
+    sub_data    = get_subscription_status(current_user["id"])
+    customer_id = sub_data.get("stripe_customer_id")
+    if not customer_id:
+        customer    = _stripe.Customer.create(
+            email    = current_user["email"],
+            name     = current_user.get("agent_name", ""),
+            metadata = {"hb_user_id": str(current_user["id"])},
+        )
+        customer_id = customer.id
+
+    session = _stripe.checkout.Session.create(
+        customer   = customer_id,
+        mode       = "payment",
+        line_items = [{"price": price_id, "quantity": 1}],
+        success_url= f"{os.getenv('FRONTEND_URL', 'https://app.homebridgegroup.co')}?billing=video_topup_success",
+        cancel_url = f"{os.getenv('FRONTEND_URL', 'https://app.homebridgegroup.co')}?billing=cancelled",
+        metadata   = {"hb_user_id": str(current_user["id"]), "price_key": "video_topup"},
+    )
+    return {"checkout_url": session.url}
+
+
+# ── Admin: set HeyGen avatar ID for an agent ─────────────────────────────────
+
+@app.put("/admin/users/{user_id}/avatar-id")
+async def admin_set_avatar_id(user_id: int, request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Admin-only: set a HeyGen Instant Avatar ID for an agent.
+    Used when HomeBridge staff manually processes an agent's Video Identity upgrade.
+    HeyGen is never mentioned in agent-facing UI — this is internal admin tooling only.
+
+    Body: { "avatar_id": "string" }  — pass null or "" to clear.
+    """
+    if current_user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    body      = await request.json()
+    avatar_id = body.get("avatar_id", "")
+    set_heygen_avatar_id(user_id, avatar_id)
+    action = "set" if avatar_id else "cleared"
+    print(f"[Admin] Avatar ID {action} for user {user_id} by admin {current_user['id']}")
+    return {"success": True, "user_id": user_id, "avatar_id": avatar_id or None}
+
+
+# ── Video jobs history for agent ─────────────────────────────────────────────
+
+@app.get("/video/jobs")
+async def get_video_jobs(current_user: dict = Depends(get_current_user)):
+    """
+    Return the agent's recent video render jobs.
+    Used to show video history in Records panel (future session).
+    """
+    jobs = video_jobs_get_for_user(current_user["id"], limit=20)
+    return {"jobs": jobs, "count": len(jobs)}
