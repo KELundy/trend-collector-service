@@ -171,13 +171,20 @@ def init_db():
         # video_month_reset: ISO datetime of next monthly video counter reset.
         # addon_video_limit: extra video renders from purchased Video Top-up Packs.
         #   +10 per pack purchased. Stacks. Resets with video_month_count on billing reset.
-        ("has_profile_photo",       "INTEGER DEFAULT 0"),
-        ("profile_photo_updated_at","TEXT DEFAULT NULL"),
-        ("heygen_avatar_id",        "TEXT DEFAULT NULL"),
-        ("video_consent_at",        "TEXT DEFAULT NULL"),
-        ("video_month_count",       "INTEGER DEFAULT 0"),
-        ("video_month_reset",       "TEXT DEFAULT NULL"),
-        ("addon_video_limit",       "INTEGER DEFAULT 0"),
+        ("has_profile_photo",        "INTEGER DEFAULT 0"),
+        ("profile_photo_updated_at", "TEXT DEFAULT NULL"),
+        ("heygen_avatar_id",         "TEXT DEFAULT NULL"),
+        ("video_consent_at",         "TEXT DEFAULT NULL"),
+        ("video_month_count",        "INTEGER DEFAULT 0"),
+        ("video_month_reset",        "TEXT DEFAULT NULL"),
+        ("addon_video_limit",        "INTEGER DEFAULT 0"),
+        # ── heygen_photo_avatar_id — added Session 50 ─────────────────────────
+        # Stores the talking_photo_id returned by HeyGen after one-time Photo Avatar
+        # creation via POST /v3/avatars. Created on first render, reused on all
+        # subsequent renders so we never re-upload or re-create the avatar.
+        # NULL until agent's first video render completes the setup step.
+        # Cleared when agent deletes their profile photo (consent withdrawal).
+        ("heygen_photo_avatar_id",   "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -3945,30 +3952,50 @@ def set_heygen_avatar_id(user_id: int, avatar_id: str) -> None:
     conn.close()
 
 
+def set_heygen_photo_avatar_id(user_id: int, avatar_id: str) -> None:
+    """
+    Store the HeyGen Photo Avatar ID (talking_photo_id) for an agent.
+    Created once on the agent's first video render via POST /v3/avatars.
+    Reused on all subsequent renders — never re-created unless cleared.
+    Cleared when agent deletes their profile photo (consent withdrawal).
+    Never exposed to agents in UI — HeyGen is infrastructure, not a feature name.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET heygen_photo_avatar_id = ? WHERE id = ?",
+        (avatar_id.strip() if avatar_id else None, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_video_identity(user_id: int) -> dict:
     """
     Return the video identity state for an agent.
     Used by POST /video/render to determine render path:
-      - has_photo: True → use photo avatar (Session 49 path)
+      - heygen_photo_avatar_id: set → use stored Photo Avatar (fast path, Session 50+)
+      - has_photo: True → create Photo Avatar first, then render
       - heygen_avatar_id: set → use Instant Avatar (future upgrade path)
       - neither → render not possible, agent needs to upload a photo
     """
     conn = get_conn()
     c    = conn.cursor()
     c.execute("""
-        SELECT has_profile_photo, heygen_avatar_id, video_consent_at,
-               plan, role
+        SELECT has_profile_photo, heygen_avatar_id, heygen_photo_avatar_id,
+               video_consent_at, plan, role
         FROM users WHERE id = ?
     """, (user_id,))
     row = c.fetchone()
     conn.close()
     if not row:
         return {"has_photo": False, "heygen_avatar_id": None,
+                "heygen_photo_avatar_id": None,
                 "has_consent": False, "plan": "trial", "role": "agent"}
     return {
-        "has_photo":        bool(row["has_profile_photo"]),
-        "heygen_avatar_id": row["heygen_avatar_id"],
-        "has_consent":      bool(row["video_consent_at"]),
-        "plan":             row["plan"] or "trial",
-        "role":             row["role"] or "agent",
+        "has_photo":               bool(row["has_profile_photo"]),
+        "heygen_avatar_id":        row["heygen_avatar_id"],
+        "heygen_photo_avatar_id":  row["heygen_photo_avatar_id"],
+        "has_consent":             bool(row["video_consent_at"]),
+        "plan":                    row["plan"] or "trial",
+        "role":                    row["role"] or "agent",
     }
