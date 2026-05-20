@@ -185,6 +185,18 @@ def init_db():
         # NULL until agent's first video render completes the setup step.
         # Cleared when agent deletes their profile photo (consent withdrawal).
         ("heygen_photo_avatar_id",   "TEXT DEFAULT NULL"),
+        # ── VOICE IDENTITY — added Session 51 ────────────────────────────────
+        # lmnt_voice_id: voice clone ID returned by LMNT after agent submits
+        #   a voice recording. Used at render time to synthesize the script into
+        #   an audio file via LMNT, which is then passed to HeyGen as audio_url
+        #   instead of a stock voice_id. NULL until agent completes voice setup.
+        #   Cleared when agent deletes their voice (GDPR/CCPA requirement).
+        #   Never exposed to agents in UI — LMNT is infrastructure, not a feature name.
+        # voice_consent_at: timestamp when agent explicitly consented to voice
+        #   cloning. Separate from video_consent_at — voice cloning requires its
+        #   own distinct consent record. Required before voice setup can proceed.
+        ("lmnt_voice_id",            "TEXT DEFAULT NULL"),
+        ("voice_consent_at",         "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -3998,4 +4010,94 @@ def get_video_identity(user_id: int) -> dict:
         "has_consent":             bool(row["video_consent_at"]),
         "plan":                    row["plan"] or "trial",
         "role":                    row["role"] or "agent",
+    }
+
+
+# ── Voice Identity — LMNT voice cloning — Session 51 ─────────────────────────
+
+def set_lmnt_voice_id(user_id: int, voice_id: str) -> None:
+    """
+    Store the LMNT voice clone ID for an agent.
+    Set after the agent submits a voice recording and LMNT returns a voice_id.
+    Used at render time: LMNT synthesizes script audio using this ID, and that
+    audio is passed to HeyGen as audio_url instead of a stock voice_id.
+    Never exposed to agents in UI — LMNT is infrastructure, not a feature name.
+    Cleared by clear_lmnt_voice_id() when the agent deletes their voice.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET lmnt_voice_id = ? WHERE id = ?",
+        (voice_id.strip() if voice_id else None, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_voice_consent(user_id: int) -> None:
+    """
+    Record the timestamp when an agent explicitly consented to voice cloning.
+    Consent is separate from video_consent_at — voice cloning requires its own
+    distinct record. Must be stored before voice setup can proceed.
+    Called by POST /voice/consent endpoint.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET voice_consent_at = datetime('now') WHERE id = ?",
+        (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_lmnt_voice_id(user_id: int) -> None:
+    """
+    Clear the agent's LMNT voice clone ID from the database.
+    Called when agent deletes their voice (GDPR/CCPA requirement).
+    The caller (DELETE /voice/setup endpoint in app.py) is also responsible
+    for deleting the voice from LMNT's API before calling this function.
+    Does NOT clear voice_consent_at — consent record is permanent once given.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET lmnt_voice_id = NULL WHERE id = ?",
+        (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_voice_identity(user_id: int) -> dict:
+    """
+    Return the voice identity state for an agent.
+    Used by:
+      - POST /video/render: to decide whether to use LMNT voice or stock voice
+      - GET /voice/status: to drive the voice setup UI state in the Identity panel
+      - POST /voice/setup: to check consent before allowing voice creation
+
+    Returns dict with keys:
+      lmnt_voice_id  — str or None. Set after successful voice clone creation.
+      has_voice      — bool. True if lmnt_voice_id is set.
+      has_consent    — bool. True if voice_consent_at is set.
+      voice_consent_at — str or None. ISO timestamp of consent.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT lmnt_voice_id, voice_consent_at
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {
+            "lmnt_voice_id":    None,
+            "has_voice":        False,
+            "has_consent":      False,
+            "voice_consent_at": None,
+        }
+    return {
+        "lmnt_voice_id":    row["lmnt_voice_id"],
+        "has_voice":        bool(row["lmnt_voice_id"]),
+        "has_consent":      bool(row["voice_consent_at"]),
+        "voice_consent_at": row["voice_consent_at"],
     }
