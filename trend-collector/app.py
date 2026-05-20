@@ -5738,6 +5738,7 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
                     headers={
                         "X-API-Key":    LMNT_API_KEY,
                         "Content-Type": "application/json",
+                        "lmnt-version": "1.1",
                     },
                     json={
                         "voice":  lmnt_voice_id,
@@ -6269,16 +6270,21 @@ async def voice_setup(request: Request, current_user: dict = Depends(get_current
         print(f"[Voice] File read error for user {uid}: {e}")
         raise HTTPException(status_code=400, detail="Could not read audio file. Please try again.")
 
-    # 3. POST to LMNT /v1/ai/voice/clone
+    # 3. POST to LMNT POST /v1/ai/voice — correct endpoint per LMNT API spec
+    #    Field: "files" (array, not "file"). "enhance" is required. "name" is required.
+    #    Header: lmnt-version: 1.1 required on all voice operations.
     agent_name = current_user.get("agent_name", f"agent_{uid}")
     try:
         import httpx as _httpx_voice
         async with _httpx_voice.AsyncClient(timeout=120.0) as client:
             lmnt_resp = await client.post(
-                "https://api.lmnt.com/v1/ai/voice/clone",
-                headers={"X-API-Key": LMNT_API_KEY},
-                files={"file": (filename, audio_bytes)},
-                data={"name": agent_name},
+                "https://api.lmnt.com/v1/ai/voice",
+                headers={
+                    "X-API-Key":    LMNT_API_KEY,
+                    "lmnt-version": "1.1",
+                },
+                files={"files": (filename, audio_bytes)},
+                data={"name": agent_name, "enhance": "false"},
             )
         clone_data = lmnt_resp.json()
     except Exception as e:
@@ -6296,7 +6302,7 @@ async def voice_setup(request: Request, current_user: dict = Depends(get_current
             detail="Voice setup failed. Please ensure your recording is clear and at least 30 seconds long, then try again."
         )
 
-    # 4. Extract voice ID — LMNT returns { "id": "...", "name": "..." }
+    # 4. Extract voice ID — LMNT returns { "id": "...", "name": "...", "state": "ready", ... }
     voice_id = clone_data.get("id") or clone_data.get("voice_id")
     if not voice_id:
         print(f"[Voice] LMNT returned no voice ID for user {uid}: {clone_data}")
