@@ -51,6 +51,12 @@ STRIPE_PRICES = {
 HEYGEN_API_KEY  = os.getenv("HEYGEN_API_KEY", "")
 BACKEND_URL     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
 
+# ── Voice Identity — LMNT API — Session 51 ───────────────────────────────────
+# LMNT_API_KEY: add to Render env vars before voice setup goes live.
+# Never logged. Never returned to frontend. Backend use only.
+# LMNT is infrastructure — never mentioned in agent-facing UI.
+LMNT_API_KEY    = os.getenv("LMNT_API_KEY", "")
+
 OFFICE_SEAT_LIMITS = {
     "team":           5,   # $199/month — up to 5 agents, no broker required
     "office_starter": 5,
@@ -120,6 +126,11 @@ from database import (
     set_heygen_avatar_id,
     set_heygen_photo_avatar_id,
     get_video_identity,
+    # Voice Identity — LMNT — Session 51
+    set_lmnt_voice_id,
+    record_voice_consent,
+    clear_lmnt_voice_id,
+    get_voice_identity,
 )
 
 # ── Safe fallback in case database.py is older version ──
@@ -5700,9 +5711,70 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
         # Consume the photo token now that HeyGen has fetched the image
         photo_token_consume(token)
 
-    # 5. Submit video render via /v2/video/generate
-    #    voice_id 1bd001e7e50f421d891986aad5158bc8 is HeyGen's confirmed English voice.
-    #    ElevenLabs voice cloning replaces voice_id in Session 52+.
+    # 5. Build voice block for /v2/video/generate
+    #
+    #    If the agent has a cloned voice (lmnt_voice_id is set):
+    #      - Call LMNT to synthesize the script into an audio file
+    #      - Write audio bytes to /data/voice_audio/{job_id}.mp3 (temp, auto-cleaned)
+    #      - Serve the audio via a signed URL (same token pattern as photo tokens)
+    #      - Pass voice type "audio" with audio_url to HeyGen
+    #    If no cloned voice: fall back to stock HeyGen voice (existing behavior).
+    #
+    #    Stock voice 1bd001e7e50f421d891986aad5158bc8 is HeyGen's English voice.
+    #    It is female and wrong gender for Kevin — LMNT replaces it for any agent
+    #    who has completed voice setup. Session 51.
+
+    voice_identity  = get_voice_identity(uid)
+    lmnt_voice_id   = voice_identity.get("lmnt_voice_id")
+    voice_block     = None   # will be set below
+
+    if lmnt_voice_id and LMNT_API_KEY:
+        # ── LMNT path: synthesize script → temp audio → signed URL → HeyGen ──
+        import asyncio as _asyncio_voice
+        try:
+            async with _httpx.AsyncClient(timeout=60.0) as client:
+                lmnt_resp = await client.post(
+                    "https://api.lmnt.com/v1/ai/speech/bytes",
+                    headers={
+                        "X-API-Key":    LMNT_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "voice":  lmnt_voice_id,
+                        "text":   script,
+                        "format": "mp3",
+                    },
+                )
+            if lmnt_resp.status_code == 200 and lmnt_resp.content:
+                # Write audio to temp file on persistent disk
+                import pathlib as _pathlib
+                voice_audio_dir = _pathlib.Path("/data/voice_audio")
+                voice_audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = voice_audio_dir / f"{job_id}.mp3"
+                audio_path.write_bytes(lmnt_resp.content)
+
+                # Build a signed URL using same token infrastructure as photos
+                voice_token = photo_token_create(uid)
+                audio_url   = f"{BACKEND_URL}/voice/audio/{voice_token}/{job_id}"
+
+                voice_block = {
+                    "type":      "audio",
+                    "audio_url": audio_url,
+                }
+                print(f"[Video] LMNT voice synthesis successful — job {job_id}, user {uid}, {len(lmnt_resp.content)} bytes")
+            else:
+                print(f"[Video] LMNT synthesis failed (status {lmnt_resp.status_code}) — falling back to stock voice for job {job_id}")
+        except Exception as lmnt_e:
+            print(f"[Video] LMNT synthesis exception for job {job_id}: {lmnt_e} — falling back to stock voice")
+
+    if voice_block is None:
+        # Stock voice fallback — used when no cloned voice or LMNT call failed
+        voice_block = {
+            "type":       "text",
+            "input_text": script,
+            "voice_id":   "1bd001e7e50f421d891986aad5158bc8",
+        }
+
     heygen_payload = {
         "video_inputs": [
             {
@@ -5710,11 +5782,7 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
                     "type":             "talking_photo",
                     "talking_photo_id": talking_photo_id,
                 },
-                "voice": {
-                    "type":       "text",
-                    "input_text": script,
-                    "voice_id":   "1bd001e7e50f421d891986aad5158bc8",
-                },
+                "voice":      voice_block,
                 "background": {
                     "type":  "color",
                     "value": "#F8F7F5",
@@ -6099,3 +6167,239 @@ async def get_video_jobs(current_user: dict = Depends(get_current_user)):
     """
     jobs = video_jobs_get_for_user(current_user["id"], limit=20)
     return {"jobs": jobs, "count": len(jobs)}
+
+
+# ── Voice Identity — LMNT voice cloning — Session 51 ─────────────────────────
+#
+# Four endpoints manage the full voice lifecycle:
+#   GET  /voice/status   — returns current voice setup state for the UI
+#   POST /voice/consent  — records explicit voice cloning consent (required first)
+#   POST /voice/setup    — accepts audio upload, creates LMNT clone, stores voice ID
+#   DELETE /voice/setup  — deletes voice from LMNT + clears DB (GDPR/CCPA)
+#
+# Served audio endpoint (used during video renders only):
+#   GET  /voice/audio/{token}/{job_id} — serves synthesized MP3 to HeyGen
+#
+# LMNT is infrastructure. Never mentioned in agent-facing UI or error messages.
+# Agent-facing language: "Your Voice", "Set up your voice", "Voice is ready."
+
+@app.get("/voice/status")
+async def voice_status(current_user: dict = Depends(get_current_user)):
+    """
+    Return the agent's current voice identity state.
+    Called by the Identity panel on load to determine which UI state to show:
+      - No consent, no voice → show consent + setup prompt
+      - Consent given, no voice → show recording/upload UI
+      - Voice set up → show "Voice is ready" + delete option
+    """
+    uid   = current_user["id"]
+    state = get_voice_identity(uid)
+    return {
+        "has_voice":        state["has_voice"],
+        "has_consent":      state["has_consent"],
+        "voice_consent_at": state["voice_consent_at"],
+    }
+
+
+@app.post("/voice/consent")
+async def voice_consent_endpoint(current_user: dict = Depends(get_current_user)):
+    """
+    Record the agent's explicit consent to voice cloning.
+    Must be called before POST /voice/setup is permitted.
+    Consent is permanent once given — stored as voice_consent_at timestamp.
+    Idempotent: safe to call again if already consented (timestamp not overwritten
+    because record_voice_consent uses datetime('now') only on first meaningful call —
+    but we guard here so the agent knows consent is already on file).
+    """
+    uid   = current_user["id"]
+    state = get_voice_identity(uid)
+    if not state["has_consent"]:
+        record_voice_consent(uid)
+        print(f"[Voice] Consent recorded for user {uid}")
+    return {"success": True, "message": "Voice cloning consent recorded."}
+
+
+@app.post("/voice/setup")
+async def voice_setup(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Accept an audio file upload, create an LMNT voice clone, and store the
+    returned voice ID on the agent's record.
+
+    Flow:
+    1. Verify consent is on record (hard gate)
+    2. Verify LMNT API key is configured
+    3. Read multipart audio file from request
+    4. POST to LMNT /v1/ai/voice/clone with the audio file
+    5. Store returned voice ID via set_lmnt_voice_id()
+    6. Return success — no voice ID exposed to frontend
+
+    Accepts: multipart/form-data with field "audio" containing the recording.
+    Audio format: any format LMNT accepts (mp3, wav, m4a, webm).
+    Recommended: 2–3 minutes of clean speech.
+    """
+    if not LMNT_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Voice setup is not yet configured. Please contact support."
+        )
+
+    uid   = current_user["id"]
+    state = get_voice_identity(uid)
+
+    # 1. Consent gate — hard block, no exceptions
+    if not state["has_consent"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Voice cloning consent is required before setup. Please complete the consent step."
+        )
+
+    # 2. Read multipart audio file
+    try:
+        form = await request.form()
+        audio_file = form.get("audio")
+        if not audio_file:
+            raise HTTPException(status_code=400, detail="No audio file received. Please record or upload your voice sample.")
+        audio_bytes = await audio_file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Audio file is empty. Please try again.")
+        filename    = getattr(audio_file, "filename", None) or "voice_sample.mp3"
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Voice] File read error for user {uid}: {e}")
+        raise HTTPException(status_code=400, detail="Could not read audio file. Please try again.")
+
+    # 3. POST to LMNT /v1/ai/voice/clone
+    agent_name = current_user.get("agent_name", f"agent_{uid}")
+    try:
+        import httpx as _httpx_voice
+        async with _httpx_voice.AsyncClient(timeout=120.0) as client:
+            lmnt_resp = await client.post(
+                "https://api.lmnt.com/v1/ai/voice/clone",
+                headers={"X-API-Key": LMNT_API_KEY},
+                files={"file": (filename, audio_bytes)},
+                data={"name": agent_name},
+            )
+        clone_data = lmnt_resp.json()
+    except Exception as e:
+        print(f"[Voice] LMNT clone API call failed for user {uid}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Voice setup service is temporarily unavailable. Please try again in a moment."
+        )
+
+    if lmnt_resp.status_code not in (200, 201):
+        err_msg = clone_data.get("message") or clone_data.get("error") or f"Status {lmnt_resp.status_code}"
+        print(f"[Voice] LMNT rejected clone for user {uid}: {err_msg} — {clone_data}")
+        raise HTTPException(
+            status_code=502,
+            detail="Voice setup failed. Please ensure your recording is clear and at least 30 seconds long, then try again."
+        )
+
+    # 4. Extract voice ID — LMNT returns { "id": "...", "name": "..." }
+    voice_id = clone_data.get("id") or clone_data.get("voice_id")
+    if not voice_id:
+        print(f"[Voice] LMNT returned no voice ID for user {uid}: {clone_data}")
+        raise HTTPException(
+            status_code=502,
+            detail="Voice setup encountered an unexpected error. Please try again."
+        )
+
+    # 5. Store the voice ID
+    set_lmnt_voice_id(uid, voice_id)
+    print(f"[Voice] Voice clone created and stored for user {uid}")
+
+    return {
+        "success": True,
+        "message": "Your voice is set up. It will be used in your next video.",
+    }
+
+
+@app.delete("/voice/setup")
+async def voice_setup_delete(current_user: dict = Depends(get_current_user)):
+    """
+    Delete the agent's cloned voice.
+    GDPR/CCPA requirement — agents must be able to remove their voice data.
+
+    Flow:
+    1. Look up the stored lmnt_voice_id
+    2. Call LMNT DELETE /v1/ai/voice/{voice_id} to remove from LMNT's servers
+    3. Clear lmnt_voice_id in our DB regardless of LMNT response
+       (if LMNT already deleted it, we still need to clear our record)
+
+    Does NOT clear voice_consent_at — consent record is permanent once given.
+    Agent can re-consent and re-record a new voice sample at any time.
+    """
+    if not LMNT_API_KEY:
+        raise HTTPException(status_code=503, detail="Voice service is not configured.")
+
+    uid   = current_user["id"]
+    state = get_voice_identity(uid)
+
+    if not state["has_voice"]:
+        # Nothing to delete — idempotent
+        return {"success": True, "message": "No voice on file."}
+
+    voice_id = state["lmnt_voice_id"]
+
+    # 1. Delete from LMNT — best effort, do not block on failure
+    try:
+        import httpx as _httpx_voice_del
+        async with _httpx_voice_del.AsyncClient(timeout=30.0) as client:
+            del_resp = await client.delete(
+                f"https://api.lmnt.com/v1/ai/voice/{voice_id}",
+                headers={"X-API-Key": LMNT_API_KEY},
+            )
+        print(f"[Voice] LMNT delete response for user {uid}: {del_resp.status_code}")
+    except Exception as e:
+        # Log but do not block — we always clear our DB record
+        print(f"[Voice] LMNT delete call failed for user {uid}: {e} — clearing DB record anyway")
+
+    # 2. Clear from our DB regardless of LMNT response
+    clear_lmnt_voice_id(uid)
+    print(f"[Voice] Voice ID cleared from DB for user {uid}")
+
+    return {
+        "success": True,
+        "message": "Your voice has been removed.",
+    }
+
+
+@app.get("/voice/audio/{token}/{job_id}")
+async def serve_voice_audio(token: str, job_id: int):
+    """
+    Serve a synthesized voice audio file to HeyGen during video rendering.
+    Uses the same signed token infrastructure as photo tokens.
+
+    This endpoint is called by HeyGen's render pipeline, not by the agent browser.
+    The token is single-use and expires 30 minutes after creation.
+    The audio file is cleaned up after HeyGen fetches it.
+
+    Returns the MP3 audio bytes with appropriate Content-Type header.
+    """
+    # Validate the signed token
+    token_user_id = photo_token_validate(token)
+    if not token_user_id:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    # Locate the audio file
+    import pathlib as _pathlib_serve
+    audio_path = _pathlib_serve.Path(f"/data/voice_audio/{job_id}.mp3")
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    # Read and return
+    audio_bytes = audio_path.read_bytes()
+
+    # Consume the token (one-time use) and clean up the temp file
+    photo_token_consume(token)
+    try:
+        audio_path.unlink()
+    except Exception:
+        pass  # Non-fatal — file will be orphaned but won't affect anything
+
+    return StreamingResponse(
+        io.BytesIO(audio_bytes),
+        media_type="audio/mpeg",
+        headers={"Content-Length": str(len(audio_bytes))},
+    )
