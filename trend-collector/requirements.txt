@@ -8,3 +8,4 @@ bcrypt
 PyJWT
 reportlab
 stripe>=7.0.0,<13.0.0
+python-multipart
