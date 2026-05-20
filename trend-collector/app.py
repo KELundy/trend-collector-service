@@ -6283,7 +6283,7 @@ async def voice_setup(request: Request, current_user: dict = Depends(get_current
                     "X-API-Key":    LMNT_API_KEY,
                     "lmnt-version": "1.1",
                 },
-                files={"files": (filename, audio_bytes)},
+                files={"file": (filename, audio_bytes)},
                 data={"name": agent_name, "enhance": "false"},
             )
         clone_data = lmnt_resp.json()
