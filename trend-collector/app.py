@@ -131,6 +131,13 @@ from database import (
     record_voice_consent,
     clear_lmnt_voice_id,
     get_voice_identity,
+    # Partner program — Session 52
+    referral_mark_paying,
+    referral_mark_lapsed,
+    record_video_consent,
+    partner_set_insider,
+    partner_assign_override,
+    partner_remove_override,
 )
 
 # ── Safe fallback in case database.py is older version ──
@@ -587,6 +594,22 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
         if not user_row:
             raise HTTPException(400, "User not found.")
 
+        # Backstop check — this endpoint previously bypassed usage limits entirely
+        # (Opus N9 fix). Pattern mirrors the scheduler at app.py line 871.
+        role = current_user.get("role", "agent")
+        plan = current_user.get("plan", "trial")
+        if role not in ("super_admin", "admin"):
+            backstop = check_generation_backstop_allowed(user_id, role, plan)
+            if not backstop["allowed"]:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error":   "backstop_limit_reached",
+                        "message": f"You've reached your generation limit for this period. "                                    f"Review and approve what you have, then generate more "                                    f"after {backstop['resets_on']}.",
+                        "resets_on": backstop["resets_on"],
+                    }
+                )
+
         # Use first saved niche if none provided
         niche = body.niche or (setup.get("primaryNiches") or ["Residential Buying & Selling"])[0]
 
@@ -638,6 +661,13 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
             compliance = compliance_to_save,
             source     = "signal",
         )
+
+        # Record generation against backstop counter (Opus N9 fix)
+        if current_user.get("role") not in ("super_admin", "admin"):
+            try:
+                record_generation(user_id, current_user.get("role", "agent"))
+            except Exception as _rg_e:
+                print(f"[SignalGenerate] record_generation failed (non-blocking): {_rg_e}")
 
         return {"ok": True, "item_id": saved_item.get("id"), "niche": niche}
 
@@ -1535,6 +1565,14 @@ async def stripe_webhook(request: Request):
         )
         print(f"[Billing] Subscription activated: user {hb_uid}, plan={plan}, cycle={cycle}, reset_day={billing_reset_day}")
 
+        # Mark referral as actively paying — this is what makes partner tiers
+        # advance and payouts calculate. Without this, every partner stays at
+        # Starter forever and every payout is $0. (Opus N1 fix)
+        try:
+            referral_mark_paying(hb_uid)
+        except Exception as _rmp_e:
+            print(f"[Billing] referral_mark_paying failed for user {hb_uid} (non-blocking): {_rmp_e}")
+
     elif etype in ("customer.subscription.deleted", "customer.subscription.paused"):
         cust_id = obj.get("customer", "")
         conn = database.get_conn()
@@ -1542,7 +1580,13 @@ async def stripe_webhook(request: Request):
         c.execute("SELECT id FROM users WHERE stripe_customer_id=?", (cust_id,))
         row = c.fetchone()
         conn.close()
-        if row: cancel_subscription(row["id"])
+        if row:
+            cancel_subscription(row["id"])
+            # Mark referral as lapsed so partner tier counts drop at quarter-end
+            try:
+                referral_mark_lapsed(row["id"])
+            except Exception as _rml_e:
+                print(f"[Billing] referral_mark_lapsed failed for user {row['id']} (non-blocking): {_rml_e}")
 
     elif etype == "invoice.payment_succeeded":
         # Monthly renewal — reset billing period counters
@@ -1570,6 +1614,22 @@ async def stripe_webhook(request: Request):
             conn2.commit()
             conn2.close()
             print(f"[Billing] Monthly renewal counters reset for user {uid}, next reset: {next_reset.date()}")
+
+    elif etype == "invoice.payment_failed":
+        # After Stripe exhausts its retry grace period, mark the referral as
+        # lapsed so it stops counting toward partner tier and payout calculations.
+        cust_id = obj.get("customer", "")
+        if cust_id:
+            conn = database.get_conn()
+            c    = conn.cursor()
+            c.execute("SELECT id FROM users WHERE stripe_customer_id=?", (cust_id,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                try:
+                    referral_mark_lapsed(row["id"])
+                except Exception as _rml_f:
+                    print(f"[Billing] referral_mark_lapsed (payment_failed) for user {row['id']} (non-blocking): {_rml_f}")
 
     return {"ok": True}
 
@@ -2326,6 +2386,8 @@ async def public_verify_cir(cir_id: str):
         "profile_url":    f"https://{row.get('agent_slug','')}.homebridgegroup.co" if row.get("agent_slug") else "",
         "record_confirmed": True,
     }
+
+@app.post("/setup/slug")
 async def set_agent_slug(request: Request, current_user: dict = Depends(get_current_user)):
     """
     Let an agent set or customize their URL slug.
@@ -4268,6 +4330,8 @@ async def attribute_referral(
     except Exception as _ae:
         print(f"[/partner/attribute] Failed (non-blocking): {_ae}")
         return {"ok": False, "message": "Attribution could not be recorded."}
+
+@app.post("/admin/partners/{partner_id}/approve")
 async def approve_partner_application(
     partner_id: int,
     current_user: dict = Depends(get_current_user),
@@ -4394,6 +4458,138 @@ async def admin_reinstate_partner(
         detail    = f"Reinstated by {current_user.get('email','')}",
     )
     return {"ok": True, "partner_id": partner_id, "status": "active"}
+
+
+# ── Insider Partner management — Admin/SuperAdmin only ────────────────────────
+
+@app.post("/admin/partners/{partner_id}/set-insider")
+async def admin_set_partner_insider(
+    partner_id: int,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Elevate or demote a partner's Insider Partner status.
+    Admin/SuperAdmin only — Insider status is NEVER self-assigned.
+
+    When is_insider=True:
+      - Partner earns 25% on their own direct referrals (no tier threshold required)
+      - Partner earns 5% override on referrals generated by partners they recruited
+
+    Body: { "is_insider": true | false, "note": "optional reason" }
+    """
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    body      = await request.json()
+    is_insider = bool(body.get("is_insider", False))
+    note       = (body.get("note") or "").strip()[:500]
+
+    success = partner_set_insider(partner_id, is_insider, current_user["id"])
+    if not success:
+        raise HTTPException(404, "Partner not found.")
+
+    from database import log_audit_event as _lae_ins
+    action = "partner_insider_elevated" if is_insider else "partner_insider_demoted"
+    _lae_ins(
+        actor_id  = current_user["id"],
+        action    = action,
+        target_id = partner_id,
+        detail    = f"{'Elevated to' if is_insider else 'Removed from'} Insider Partner "
+                    f"by {current_user.get('email','')}. "
+                    + (f"Note: {note}" if note else ""),
+    )
+    return {
+        "ok":         True,
+        "partner_id": partner_id,
+        "is_insider": is_insider,
+        "action":     action,
+    }
+
+
+@app.post("/admin/partners/{partner_id}/assign-override")
+async def admin_assign_partner_override(
+    partner_id: int,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Manually assign an Insider Partner as the override earner for a partner's
+    referral attributions. Used when an Insider claims they recruited a partner
+    but the partner didn't enter the code at signup.
+
+    FORWARD-ONLY: only sets override on attribution rows where it is currently NULL.
+    Does not recalculate already-processed payouts.
+
+    Body: { "insider_partner_id": <partners.id>, "note": "reason for manual assignment" }
+    """
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    body               = await request.json()
+    insider_partner_id = int(body.get("insider_partner_id") or 0)
+    note               = (body.get("note") or "").strip()[:500]
+
+    if not insider_partner_id:
+        raise HTTPException(400, "insider_partner_id is required.")
+    if not note:
+        raise HTTPException(400, "A note explaining why this override is being assigned is required.")
+
+    success = partner_assign_override(partner_id, insider_partner_id, current_user["id"])
+    if not success:
+        raise HTTPException(
+            400,
+            "Assignment failed. Either the partner was not found, the insider_partner_id "
+            "does not belong to an active Insider Partner, or all attribution rows already "
+            "have overrides assigned."
+        )
+
+    from database import log_audit_event as _lae_ov
+    _lae_ov(
+        actor_id  = current_user["id"],
+        action    = "partner_override_assigned",
+        target_id = partner_id,
+        detail    = f"Override assigned to insider partner {insider_partner_id} "
+                    f"by {current_user.get('email','')}. Note: {note}",
+    )
+    return {
+        "ok":                 True,
+        "partner_id":         partner_id,
+        "insider_partner_id": insider_partner_id,
+    }
+
+
+@app.post("/admin/partners/{partner_id}/remove-override")
+async def admin_remove_partner_override(
+    partner_id: int,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Remove the Insider override assignment for a partner's referral attributions.
+    Used to correct a bad assignment or when the Insider relationship ends.
+
+    Body: { "note": "reason for removal" }
+    """
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    body = await request.json()
+    note = (body.get("note") or "").strip()[:500]
+
+    success = partner_remove_override(partner_id, current_user["id"])
+    if not success:
+        raise HTTPException(404, "Partner not found or no override to remove.")
+
+    from database import log_audit_event as _lae_rov
+    _lae_rov(
+        actor_id  = current_user["id"],
+        action    = "partner_override_removed",
+        target_id = partner_id,
+        detail    = f"Override removed by {current_user.get('email','')}. "
+                    + (f"Note: {note}" if note else "No note provided."),
+    )
+    return {"ok": True, "partner_id": partner_id}
 
 
 @app.post("/auth/profile/notification-email")
@@ -4937,7 +5133,7 @@ async def partner_public_enroll(body: PublicPartnerEnrollRequest, request: Reque
   <div style="background:#f5f5f7;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
     <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#86868b;margin-bottom:8px;">Your Referral Link</div>
     <div style="font-size:13px;font-family:monospace;color:#1749c9;word-break:break-all;margin-bottom:8px;">{referral_link}</div>
-    <div style="font-size:13px;color:#86868b;line-height:1.5;">60-day cookie. Anyone who signs up within 60 days of clicking your link is attributed to you.</div>
+    <div style="font-size:13px;color:#86868b;line-height:1.5;">20-day cookie. Anyone who signs up within 20 days of clicking your link is attributed to you.</div>
   </div>
 
   <div style="margin-bottom:24px;">
@@ -5483,6 +5679,30 @@ async def serve_profile_photo(token: str):
     )
 
 
+# ── Video consent endpoint ────────────────────────────────────────────────────
+
+@app.post("/video/consent")
+async def video_consent_endpoint(current_user: dict = Depends(get_current_user)):
+    """
+    Record the agent's explicit consent to video likeness use (face geometry
+    processed by HeyGen to create an animated avatar).
+
+    Must be called before POST /video/render is permitted.
+    Consent is permanent once given — stored as video_consent_at timestamp.
+    Idempotent: safe to call again if already consented.
+
+    This is a BIPA/CPRA requirement. The consent modal text must be
+    lawyer-reviewed before deploying to IL/TX/WA/CA agents.
+    """
+    uid   = current_user["id"]
+    # Check current state via get_video_identity
+    state = get_video_identity(uid)
+    if not state["has_consent"]:
+        record_video_consent(uid)
+        print(f"[Video] Consent recorded for user {uid}")
+    return {"success": True, "message": "Video consent recorded."}
+
+
 # ── Video limit status ────────────────────────────────────────────────────────
 
 @app.get("/video/limit")
@@ -5550,7 +5770,21 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
             }
         )
 
-    # 2. Verify profile photo exists
+    # 2. Verify video consent has been recorded (BIPA/CPRA gate — Opus N4 fix)
+    # ADD v4 claimed this was already enforced. It was not. Column existed but
+    # was never written and never checked. Every render was happening without
+    # recorded consent. This is the gate that was supposed to exist.
+    video_id_state = get_video_identity(uid)
+    if not video_id_state["has_consent"]:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error":   "no_video_consent",
+                "message": "Please complete the video consent step before generating your first video.",
+            }
+        )
+
+    # 3. Verify profile photo exists
     if not profile_photo_exists(uid):
         raise HTTPException(
             status_code=400,
@@ -5567,7 +5801,7 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
     if len(script) > 4800:
         raise HTTPException(status_code=400, detail="Script is too long. Please shorten it to under 4800 characters.")
 
-    # 3. Create pending job record
+    # 4. Create pending job record
     job = video_job_create(
         user_id         = uid,
         library_item_id = req.library_item_id,
@@ -5576,7 +5810,7 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
     )
     job_id = job["id"]
 
-    # 4. Resolve talking_photo_id — create Photo Avatar on first render,
+    # 5. Resolve talking_photo_id — create Photo Avatar on first render,
     #    reuse stored ID on every subsequent render.
     #
     #    HeyGen Photo Avatar flow (v3 API — confirmed from docs Session 49):
@@ -5711,7 +5945,7 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
         # Consume the photo token now that HeyGen has fetched the image
         photo_token_consume(token)
 
-    # 5. Build voice block for /v2/video/generate
+    # 6. Build voice block for /v2/video/generate
     #
     #    If the agent has a cloned voice (lmnt_voice_id is set):
     #      - Call LMNT to synthesize the script into an audio file
@@ -5822,10 +6056,10 @@ async def video_render(req: VideoRenderRequest, current_user: dict = Depends(get
 
     heygen_video_id = resp_data["data"]["video_id"]
 
-    # 6. Store HeyGen video ID on job record
+    # 7. Store HeyGen video ID on job record
     video_job_set_heygen_id(job_id, heygen_video_id)
 
-    # 7. Increment monthly video counter
+    # 8. Increment monthly video counter
     record_video_render(uid, role)
 
     print(f"[Video] Render submitted — job {job_id}, heygen_video_id {heygen_video_id}, user {uid}")
