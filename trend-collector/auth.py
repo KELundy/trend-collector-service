@@ -16,7 +16,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 security = HTTPBearer()
 
 DB_NAME = os.getenv("DB_PATH", "/data/homebridge.db")
-JWT_SECRET = os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET or JWT_SECRET == "homebridge-secret-change-in-production":
+    raise RuntimeError(
+        "[auth] JWT_SECRET is not configured or is still the default placeholder. "
+        "Set a strong random value in Render environment variables. "
+        "Generate one with: python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
+JWT_EXPIRY_DAYS = 10   # Session 52: reduced from 30; revocation mechanism added
 
 # ── SendGrid config (graceful no-op if not configured) ──
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
@@ -46,7 +53,6 @@ def send_email(to_email: str, subject: str, html_body: str) -> bool:
     except Exception as e:
         print(f"[EMAIL ERROR] {e}")
         return False
-JWT_EXPIRY_DAYS = 30
 
 
 # ─────────────────────────────────────────────
@@ -255,6 +261,18 @@ def register(body: RegisterRequest):
     except Exception:
         pass
 
+    # Auto-enroll every new agent as a partner (Option 3 — Session 52).
+    # Every agent gets a referral code silently at registration.
+    # No opt-in required. Bank connection (Stripe Connect) is prompted later,
+    # only when they have earnings waiting. Non-blocking — enrollment failure
+    # must never prevent account creation.
+    try:
+        from database import partner_enroll as _pe
+        _pe(user["id"], tier="referral")
+        print(f"[Register] Partner auto-enrolled for user {user['id']}")
+    except Exception as _pe_err:
+        print(f"[Register] Partner auto-enroll failed (non-blocking): {_pe_err}")
+
     # Record referral attribution if a partner code was provided — non-blocking
     if body.referral_code:
         try:
@@ -283,6 +301,117 @@ def register(body: RegisterRequest):
             "role":       user["role"],
             "broker_id":  user["broker_id"],
         }
+    }
+
+
+
+@router.post("/register-partner")
+def register_partner(body: dict):
+    """
+    Public partner registration endpoint — called by partner-signup.html.
+    Creates a user account with role='referral', is_licensed=0, enrolls as
+    a partner (Starter tier, auto-approved), and returns a JWT.
+
+    This is for non-agent partners who want to refer agents but are not
+    themselves agents. They will see only the Partner panel when they log in
+    (renderViewSwitcher hides agent panels for is_licensed=0 users).
+
+    Accepts: { name, email, password, referral_code? }
+    Returns: { token, user, partner }
+    """
+    import re as _re
+
+    name     = (body.get("name")     or "").strip()
+    email    = (body.get("email")    or "").strip().lower()
+    password = (body.get("password") or "").strip()
+    ref_code = (body.get("referral_code") or "").strip().upper()
+
+    # Validate required fields
+    if not name:
+        raise HTTPException(status_code=400, detail="Your name is required.")
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if not _re.search(r"[A-Z]", password):
+        raise HTTPException(status_code=400, detail="Password must include at least one uppercase letter.")
+    if not _re.search(r"[a-z]", password):
+        raise HTTPException(status_code=400, detail="Password must include at least one lowercase letter.")
+    if not _re.search(r"[0-9]", password):
+        raise HTTPException(status_code=400, detail="Password must include at least one number.")
+
+    # Create user account — role='referral', is_licensed=0
+    # role='referral' is distinct from role='agent' so admin filters work correctly.
+    # is_licensed=0 suppresses content engine access in renderViewSwitcher.
+    user = create_user(
+        email      = email,
+        password   = password,
+        agent_name = name,
+        brokerage  = "",
+        role       = "agent",   # base role; partner_tier drives partner UI visibility
+        broker_id  = None,
+    )
+    if not user:
+        raise HTTPException(
+            status_code=409,
+            detail="An account with that email already exists. Sign in instead."
+        )
+
+    # Set is_licensed=0 — partner-only users don't generate CIR-verified content
+    try:
+        conn = get_conn()
+        conn.execute("UPDATE users SET is_licensed = 0 WHERE id = ?", (user["id"],))
+        conn.commit()
+        conn.close()
+    except Exception as _e:
+        print(f"[RegisterPartner] is_licensed update failed (non-blocking): {_e}")
+
+    # Start 14-day trial (gives them access to the partner dashboard)
+    try:
+        from database import set_trial as _st
+        _st(user["id"], days=14)
+    except Exception:
+        pass
+
+    # Enroll as partner — Starter tier, auto-approved, code generated immediately
+    try:
+        from database import partner_enroll as _pe
+        partner = _pe(user["id"], tier="referral")
+    except Exception as _pe_err:
+        print(f"[RegisterPartner] Partner enroll failed: {_pe_err}")
+        raise HTTPException(status_code=500,
+            detail="Account created but partner enrollment failed. Contact support@homebridgegroup.co.")
+
+    # Record attribution if they arrived via someone else's referral code
+    if ref_code:
+        try:
+            from database import partner_get_by_code as _pgbc, referral_attribute as _ra
+            referring = _pgbc(ref_code)
+            if referring:
+                _ra(
+                    partner_id       = referring["id"],
+                    referred_user_id = user["id"],
+                    attribution_type = "code",
+                    referral_code    = ref_code,
+                )
+        except Exception as _ae:
+            print(f"[RegisterPartner] Attribution failed (non-blocking): {_ae}")
+
+    # Issue JWT
+    token = create_token(user["id"], email, user["role"])
+
+    return {
+        "token":   token,
+        "partner": partner,
+        "user": {
+            "id":           user["id"],
+            "email":        email,
+            "agent_name":   name,
+            "role":         user["role"],
+            "is_licensed":  0,
+            "partner_tier": partner.get("tier") if partner else "referral",
+            "partner_code": partner.get("referral_code") if partner else "",
+        },
     }
 
 
@@ -443,164 +572,6 @@ def broker_get_agents(current_user=Depends(get_current_user)):
         for r in rows
     ]
 
-
-# ─────────────────────────────────────────────
-# ADMIN — disable/enable a user
-# ─────────────────────────────────────────────
-@router.post("/admin/set-active")
-def set_active(payload: dict, current_user=Depends(get_current_user)):
-    # Only user id=1 (first registered = you) can do this
-    if current_user["id"] != 1 and current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only.")
-    target_id = payload.get("user_id")
-    active    = payload.get("is_active", True)
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET is_active = ? WHERE id = ?", (1 if active else 0, target_id))
-    conn.commit()
-    conn.close()
-    return {"success": True, "user_id": target_id, "is_active": active}
-
-
-@router.get("/admin/users")
-def list_users(current_user=Depends(get_current_user)):
-    if current_user["id"] != 1 and current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only.")
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("""
-        SELECT u.id, u.email, u.agent_name, u.brokerage,
-               u.is_active, u.created_at,
-               COALESCE(u.role, 'agent') as role,
-               u.broker_id,
-               COUNT(cl.id) as content_count
-        FROM users u
-        LEFT JOIN content_library cl ON cl.user_id = u.id
-        GROUP BY u.id
-        ORDER BY u.created_at DESC
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return [
-        {
-            "id":            r["id"],
-            "email":         r["email"],
-            "agent_name":    r["agent_name"],
-            "brokerage":     r["brokerage"] or "",
-            "is_active":     bool(r["is_active"]),
-            "created_at":    r["created_at"],
-            "role":          r["role"] or "agent",
-            "broker_id":     r["broker_id"],
-            "content_count": r["content_count"] or 0,
-        }
-        for r in rows
-    ]
-
-
-@router.post("/admin/delete-user")
-def admin_delete_user(body: dict, current_user=Depends(get_current_user)):
-    """Permanently delete a user and all their data. Admin only."""
-    if current_user.get("role") != "admin":
-        raise HTTPException(403, "Admin only.")
-    user_id = int(body.get("user_id") or 0)
-    if not user_id:
-        raise HTTPException(400, "user_id required.")
-    if user_id == current_user["id"]:
-        raise HTTPException(400, "You cannot delete your own account.")
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    c    = conn.cursor()
-    c.execute("SELECT id, agent_name FROM users WHERE id=?", (user_id,))
-    target = c.fetchone()
-    if not target:
-        conn.close()
-        raise HTTPException(404, "User not found.")
-    # Delete all associated data
-    for table, col in [
-        ("library_items",           "user_id"),
-        ("schedules",               "user_id"),
-        ("password_reset_tokens",   "user_id"),
-        ("office_invites",          "office_id"),
-    ]:
-        try:
-            conn.execute(f"DELETE FROM {table} WHERE {col}=?", (user_id,))
-        except Exception:
-            pass  # Table may not exist yet — safe to skip
-    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "message": f"User deleted."}
-
-
-@router.post("/admin/set-role")
-def set_role(payload: dict, current_user=Depends(get_current_user)):
-    """Promote/demote a user's role. Admin only."""
-    if current_user["id"] != 1 and current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only.")
-    target_id = payload.get("user_id")
-    role      = payload.get("role", "agent")
-    if role not in ("agent", "broker", "admin"):
-        raise HTTPException(status_code=400, detail="Invalid role.")
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET role = ? WHERE id = ?", (role, target_id))
-    conn.commit()
-    conn.close()
-    return {"success": True, "user_id": target_id, "role": role}
-
-
-@router.get("/admin/stats")
-def platform_stats(current_user=Depends(get_current_user)):
-    """Platform-wide stats for the admin dashboard."""
-    if current_user["id"] != 1 and current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only.")
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-
-    c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_active = 1")
-    total_users = c.fetchone()["cnt"]
-
-    c.execute("SELECT COUNT(*) as cnt FROM users WHERE role = 'broker' AND is_active = 1")
-    total_brokers = c.fetchone()["cnt"]
-
-    c.execute("SELECT COUNT(*) as cnt FROM users WHERE role = 'agent' AND is_active = 1")
-    total_agents = c.fetchone()["cnt"]
-
-    c.execute("SELECT COUNT(*) as cnt FROM content_library")
-    total_content = c.fetchone()["cnt"]
-
-    c.execute("SELECT COUNT(*) as cnt FROM content_library WHERE status = 'published'")
-    total_published = c.fetchone()["cnt"]
-
-    c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE active = 1")
-    active_schedules = c.fetchone()["cnt"]
-
-    c.execute("""
-        SELECT COUNT(*) as cnt FROM content_library
-        WHERE saved_at >= datetime('now', '-7 days')
-    """)
-    content_this_week = c.fetchone()["cnt"]
-
-    # New users last 30 days
-    c.execute("""
-        SELECT COUNT(*) as cnt FROM users
-        WHERE created_at >= datetime('now', '-30 days')
-    """)
-    new_users_30d = c.fetchone()["cnt"]
-
-    conn.close()
-    return {
-        "total_users":       total_users,
-        "total_brokers":     total_brokers,
-        "total_agents":      total_agents,
-        "total_content":     total_content,
-        "total_published":   total_published,
-        "active_schedules":  active_schedules,
-        "content_this_week": content_this_week,
-        "new_users_30d":     new_users_30d,
-    }
 
 
 # ─────────────────────────────────────────────
