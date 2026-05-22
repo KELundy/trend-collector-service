@@ -2697,6 +2697,41 @@ async def reinstate_user(request: Request, current_user: dict = Depends(get_curr
     return {"ok": True, "reinstated": target_id}
 
 
+@app.post("/admin/unlock-user")
+async def unlock_user(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Super admin only — clear login lockout on a user account.
+    Used when an agent contacts support after being locked out by failed login attempts.
+    Resets login_fail_count to 0 and clears login_locked_until.
+    Does not affect token_version or session state.
+    """
+    _require_super_admin(current_user)
+    body      = await request.json()
+    target_id = int(body.get("user_id", 0))
+    if not target_id:
+        raise HTTPException(400, "user_id required.")
+
+    from database import get_conn as _gc, log_audit_event as _lae
+    conn = _gc()
+    conn.execute(
+        "UPDATE users SET login_fail_count = 0, login_locked_until = NULL WHERE id = ?",
+        (target_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    try:
+        _lae(
+            actor_id = current_user["id"],
+            action   = "admin_unlock_user",
+            detail   = f"Admin cleared login lockout for user_id={target_id}.",
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "unlocked": target_id}
+
+
 @app.get("/admin/role-capabilities")
 async def my_role_capabilities(current_user: dict = Depends(get_current_user)):
     """
@@ -5027,7 +5062,15 @@ async def partner_public_enroll(body: PublicPartnerEnrollRequest, request: Reque
     Their is_licensed=0 flag suppresses content engine access in renderViewSwitcher.
     """
     import re as _re
-    from auth import create_user as _create_user, create_token as _create_token
+    from auth import create_user as _create_user, create_token as _create_token, _auth_check_rate_limit as _acrl, _get_client_ip as _gcip
+
+    # ── IP rate limit — Session 53 ────────────────────────────────────────────
+    if not _acrl(_gcip(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many signup attempts from this address. Please wait 15 minutes."
+        )
+
     from database import set_trial as _set_trial, partner_enroll as _partner_enroll, referral_attribute as _ref_attr
 
     # ── Validate required fields ──────────────────────────────────────────────
