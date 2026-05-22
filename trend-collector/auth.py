@@ -66,6 +66,7 @@ class RegisterRequest(BaseModel):
     role:         Optional[str] = "agent"   # "agent" | "broker"
     office_code:  Optional[str] = ""        # broker's invite code for agent signup
     referral_code: Optional[str] = ""       # partner referral code for attribution
+    consent_at:   Optional[str] = None      # ISO timestamp of ToS/Privacy consent — Session 53
 
 class LoginRequest(BaseModel):
     email: str
@@ -254,6 +255,16 @@ def register(body: RegisterRequest):
     if not user:
         raise HTTPException(status_code=409, detail="An account with that email already exists.")
 
+    # Record ToS/Privacy consent timestamp — Session 53
+    if body.consent_at:
+        try:
+            conn = sqlite3.connect(DB_NAME)
+            conn.execute("UPDATE users SET consent_at = ? WHERE id = ?", (body.consent_at, user["id"]))
+            conn.commit()
+            conn.close()
+        except Exception as _ce:
+            print(f"[Register] consent_at record failed (non-blocking): {_ce}")
+
     # Start 14-day trial automatically
     try:
         from database import set_trial
@@ -325,6 +336,7 @@ def register_partner(body: dict):
     email    = (body.get("email")    or "").strip().lower()
     password = (body.get("password") or "").strip()
     ref_code = (body.get("referral_code") or "").strip().upper()
+    consent_at = (body.get("consent_at") or "").strip()
 
     # Validate required fields
     if not name:
@@ -356,6 +368,16 @@ def register_partner(body: dict):
             status_code=409,
             detail="An account with that email already exists. Sign in instead."
         )
+
+    # Record ToS/Privacy consent timestamp — Session 53
+    if consent_at:
+        try:
+            conn = sqlite3.connect(DB_NAME)
+            conn.execute("UPDATE users SET consent_at = ? WHERE id = ?", (consent_at, user["id"]))
+            conn.commit()
+            conn.close()
+        except Exception as _ce:
+            print(f"[RegisterPartner] consent_at record failed (non-blocking): {_ce}")
 
     # Set is_licensed=0 — partner-only users don't generate CIR-verified content
     try:
