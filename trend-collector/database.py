@@ -204,6 +204,19 @@ def init_db():
         #   partner-signup.html. NULL for accounts created before Session 53.
         #   Required field going forward — frontend blocks submission without it.
         ("consent_at",               "TEXT DEFAULT NULL"),
+        # ── JWT REVOCATION — added Session 53 ────────────────────────────────
+        # token_version: incremented on password change or admin suspend.
+        #   Every JWT includes the version at issue time. get_current_user
+        #   rejects tokens whose version is lower than the DB value, forcing
+        #   re-login on all devices immediately rather than waiting for TTL.
+        ("token_version",            "INTEGER DEFAULT 1"),
+        # ── AUTH LOCKOUT — added Session 53 ──────────────────────────────────
+        # login_fail_count: consecutive failed login attempts since last reset.
+        # login_locked_until: ISO timestamp — account locked until this time.
+        #   Both reset to 0/NULL on successful login or admin unlock.
+        #   Lockout threshold: 5 failures in 15 minutes → locked 30 minutes.
+        ("login_fail_count",         "INTEGER DEFAULT 0"),
+        ("login_locked_until",       "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
