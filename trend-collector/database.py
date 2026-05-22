@@ -197,6 +197,13 @@ def init_db():
         #   own distinct consent record. Required before voice setup can proceed.
         ("lmnt_voice_id",            "TEXT DEFAULT NULL"),
         ("voice_consent_at",         "TEXT DEFAULT NULL"),
+        # ── TERMS CONSENT — added Session 53 ─────────────────────────────────
+        # consent_at: timestamp when agent or partner explicitly agreed to the
+        #   Terms of Service and Privacy Policy at registration. Recorded
+        #   server-side from the consent checkbox on login.html and
+        #   partner-signup.html. NULL for accounts created before Session 53.
+        #   Required field going forward — frontend blocks submission without it.
+        ("consent_at",               "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
