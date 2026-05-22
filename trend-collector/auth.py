@@ -8,7 +8,7 @@ import jwt
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 
@@ -194,11 +194,43 @@ def create_user(email: str, password: str, agent_name: str, brokerage: str,
 # ─────────────────────────────────────────────
 # JWT HELPERS
 # ─────────────────────────────────────────────
-def create_token(user_id: int, email: str, role: str = "agent") -> str:
+
+# ── AUTH RATE LIMITER — Session 53 ───────────────────────────────────────────
+# In-memory per-IP rate limiter for auth endpoints.
+# Mirrors the waitlist rate limiter pattern in app.py.
+# Resets on server restart — acceptable for auth (token TTL handles persistence).
+_auth_rate: dict = {}      # { ip: [unix_timestamp, ...] }
+_AUTH_MAX    = 20          # max auth attempts per window per IP
+_AUTH_WINDOW = 900         # 15-minute rolling window
+
+def _auth_check_rate_limit(ip: str) -> bool:
+    """Returns True (allowed) or False (rate limited). Prunes stale hits on each call."""
+    import time as _t
+    now          = _t.time()
+    window_start = now - _AUTH_WINDOW
+    hits         = [t for t in _auth_rate.get(ip, []) if t > window_start]
+    if len(hits) >= _AUTH_MAX:
+        return False
+    hits.append(now)
+    _auth_rate[ip] = hits
+    return True
+
+
+def _get_client_ip(request) -> str:
+    """Extract real client IP — Cloudflare passes it in x-forwarded-for."""
+    forwarded = request.headers.get("x-forwarded-for") if request else None
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request and request.client else "unknown"
+
+
+def create_token(user_id: int, email: str, role: str = "agent",
+                 token_version: int = 1) -> str:
     payload = {
         "sub":   str(user_id),
         "email": email,
         "role":  role,
+        "ver":   token_version,   # ── JWT revocation — Session 53
         "exp":   datetime.utcnow() + timedelta(days=JWT_EXPIRY_DAYS)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -218,6 +250,27 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="User not found.")
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="Account disabled. Contact support@homebridgegroup.co")
+    # ── JWT version check — Session 53 ───────────────────────────────────────
+    # If the token's version is older than the DB version, the user has changed
+    # their password or been suspended since this token was issued. Force re-login.
+    token_ver = payload.get("ver", 1)
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT token_version FROM users WHERE id = ?", (user["id"],))
+        row = c.fetchone()
+        conn.close()
+        db_ver = row["token_version"] if row and row["token_version"] is not None else 1
+        if token_ver < db_ver:
+            raise HTTPException(
+                status_code=401,
+                detail="Session expired. Please log in again."
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # DB check failed — non-blocking, let request through
     return user
 
 
@@ -438,17 +491,94 @@ def register_partner(body: dict):
 
 
 @router.post("/login")
-def login(body: LoginRequest):
+def login(body: LoginRequest, request: Request = None):
+    # ── IP rate limit ─────────────────────────────────────────────────────────
+    if request and not _auth_check_rate_limit(_get_client_ip(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts from this address. Please wait 15 minutes."
+        )
+
+    # Look up user — intentionally vague error to prevent email enumeration
     user = get_user_by_email(body.email)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-    if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="Account disabled. Contact support@homebridgegroup.co")
 
-    token = create_token(user["id"], user["email"], user.get("role", "agent"))
-    # Determine if this is a new user (no setup data saved yet)
+    # ── Per-account lockout check ─────────────────────────────────────────────
+    # Read lockout state directly from DB (not from _normalize_user which may
+    # not include these newer columns on older schema versions).
+    import time as _t
+    try:
+        _lc = sqlite3.connect(DB_NAME)
+        _lc.row_factory = sqlite3.Row
+        _lr = _lc.cursor()
+        _lr.execute(
+            "SELECT login_fail_count, login_locked_until, token_version FROM users WHERE id = ?",
+            (user["id"],)
+        )
+        _lrow = _lr.fetchone()
+        _lc.close()
+        fail_count   = _lrow["login_fail_count"]   if _lrow and _lrow["login_fail_count"]   is not None else 0
+        locked_until = _lrow["login_locked_until"] if _lrow and _lrow["login_locked_until"] is not None else None
+        token_ver    = _lrow["token_version"]       if _lrow and _lrow["token_version"]       is not None else 1
+    except Exception:
+        fail_count = 0; locked_until = None; token_ver = 1
+
+    if locked_until:
+        try:
+            lock_dt = datetime.fromisoformat(locked_until)
+            if datetime.utcnow() < lock_dt:
+                remaining = int((lock_dt - datetime.utcnow()).total_seconds() / 60) + 1
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many failed attempts. Account locked for {remaining} more minute(s). "
+                           f"Contact support@homebridgegroup.co if you need immediate access."
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Malformed timestamp — clear it and proceed
+
+    # ── Password check ────────────────────────────────────────────────────────
+    if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
+        # Increment fail count — lock after 5 failures
+        new_fail_count  = fail_count + 1
+        new_locked_until = None
+        if new_fail_count >= 5:
+            new_locked_until = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
+        try:
+            _fc = sqlite3.connect(DB_NAME)
+            _fc.execute(
+                "UPDATE users SET login_fail_count = ?, login_locked_until = ? WHERE id = ?",
+                (new_fail_count, new_locked_until, user["id"])
+            )
+            _fc.commit()
+            _fc.close()
+        except Exception:
+            pass
+        if new_locked_until:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed attempts. Account locked for 30 minutes. "
+                       "Contact support@homebridgegroup.co if you need immediate access."
+            )
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    # ── Successful login — clear lockout state ────────────────────────────────
+    try:
+        _sc = sqlite3.connect(DB_NAME)
+        _sc.execute(
+            "UPDATE users SET login_fail_count = 0, login_locked_until = NULL WHERE id = ?",
+            (user["id"],)
+        )
+        _sc.commit()
+        _sc.close()
+    except Exception:
+        pass
+
+    token = create_token(user["id"], user["email"], user.get("role", "agent"), token_ver)
     from database import get_agent_setup
     existing_setup = get_agent_setup(user["id"])
     is_new = not bool(existing_setup)
@@ -659,7 +789,13 @@ def change_password(body: PasswordChangeRequest, current_user=Depends(get_curren
     new_hash = bcrypt.hashpw(body.new_password.encode(), bcrypt.gensalt()).decode()
     conn = sqlite3.connect(DB_NAME)
     c    = conn.cursor()
-    c.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, current_user["id"]))
+    # Increment token_version — invalidates all existing sessions on other devices
+    c.execute("""
+        UPDATE users
+        SET password_hash  = ?,
+            token_version  = COALESCE(token_version, 1) + 1
+        WHERE id = ?
+    """, (new_hash, current_user["id"]))
     conn.commit()
     conn.close()
-    return {"success": True}
+    return {"success": True, "message": "Password updated. Other devices will be signed out."}
