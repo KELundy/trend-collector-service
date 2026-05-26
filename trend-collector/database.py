@@ -2741,11 +2741,274 @@ def signals_purge_expired():
 # UNLIMITED_ROLES: super_admin and admin bypass all checks entirely.
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# NICHE TAXONOMY — Session 54 — SINGLE SOURCE OF TRUTH
+# ─────────────────────────────────────────────
+# Structure: Asset Class → Primary Niche → Sub-niches
+# This constant is the canonical definition for the entire platform.
+# app.js, onboarding.html, and content_engine.py all derive from this.
+# Never define niche names anywhere else. Never use fuzzy matching.
+# If a niche name changes here, update all consuming files in the same session.
+#
+# Asset Classes: Residential, Commercial, Industrial & Infrastructure,
+#                Land, Special Purpose
+# Primary Niches: the named specialty an agent selects
+# Sub-niches: the specific client or situation focus within that primary
+# ─────────────────────────────────────────────
+
+NICHE_TAXONOMY = {
+
+    # ── RESIDENTIAL ───────────────────────────────────────────────────────────
+    "Residential": {
+
+        "Single Family": [
+            "First-time buyers",
+            "FHA & entry-level buyers",
+            "Move-up buyers",
+            "Growing families & school-district movers",
+            "Luxury buyers",
+            "High-end relocations & second-home buyers",
+            "Seniors 55+ & downsizers",
+            "Age-in-place transitions",
+            "Divorce & life transitions",
+            "Separation sales & major-life-change moves",
+            "Multigenerational families",
+            "Adult children & aging parents moving in",
+            "Relocation buyers",
+            "Corporate relocations & job-transfer moves",
+            "Single-family rental investors",
+            "Turnkey buyers & long-term rental investors",
+        ],
+
+        "Condominiums": [
+            "Urban lifestyle & walkable-neighborhood buyers",
+            "Downsizers & retirees",
+            "Low-maintenance living buyers",
+            "Vacation-home & resort-area buyers",
+            "Short-term-rental-friendly condo buyers",
+            "First-time condo buyers",
+            "Affordability-focused condo buyers",
+        ],
+
+        "Multifamily (2-4 Units)": [
+            "House hackers & owner-occupants",
+            "Duplex, triplex & quadplex buyers",
+            "Small investors & first rental-property buyers",
+            "Mom-and-pop landlords",
+            "Multigenerational households",
+            "Shared-cost family living",
+            "Value-add investors",
+            "Repositioning buyers & light-rehab operators",
+        ],
+
+        "Manufactured & Mobile Homes": [
+            "Affordable-housing & budget-conscious buyers",
+            "Land-lease community buyers",
+            "Manufactured-home community buyers",
+            "Senior mobile-home buyers",
+            "Retirement-community buyers",
+        ],
+
+        "Residential Specialty": [
+            "New construction buyers & builder-direct clients",
+            "Custom-home clients",
+            "Probate & inherited property sellers",
+            "Estate-sale families",
+            "Divorce sellers & court-driven transactions",
+            "Relocation sellers & job-transfer households",
+            "Probate and trust clients",
+            "Heirs managing inherited homes",
+            "Short-term rental investors",
+            "Vacation-rental operators",
+        ],
+    },
+
+    # ── COMMERCIAL ────────────────────────────────────────────────────────────
+    "Commercial": {
+
+        "Retail": [
+            "Small business owners & storefront tenants",
+            "Franchise buyers",
+            "Owner-operators & local service businesses",
+            "Boutique retailers",
+            "Passive investors & income-focused buyers",
+            "1031 exchange buyers",
+            "Shopping center investors",
+            "Strip-center investors & mixed retail buyers",
+        ],
+
+        "Office": [
+            "Professional service firms",
+            "Law firms & accounting firms",
+            "Medical groups & dental practices",
+            "Therapy practices & behavioral health",
+            "Small office users & coworking operators",
+            "Flex-office buyers",
+            "Corporate users & headquarters relocations",
+            "Satellite-office buyers",
+        ],
+
+        "Industrial": [
+            "Logistics operators & warehouse users",
+            "Distribution companies",
+            "Fulfillment operators & e-commerce sellers",
+            "Last-mile delivery companies",
+            "Manufacturers & light industrial users",
+            "Assembly operations",
+            "Cold storage users & food distributors",
+            "Temperature-controlled operators",
+        ],
+
+        "Hospitality": [
+            "Hotel investors & boutique-hotel buyers",
+            "Owner-operators & resort operators",
+            "Extended-stay operators",
+            "Short-term lodging investors",
+            "Leisure-market buyers",
+        ],
+
+        "Commercial Specialty": [
+            "1031 exchange investors & tax-deferred swap buyers",
+            "Mixed-use buyers & live-work property users",
+            "Business expansion buyers",
+            "Franchise expansion operators",
+        ],
+    },
+
+    # ── INDUSTRIAL & INFRASTRUCTURE ───────────────────────────────────────────
+    "Industrial & Infrastructure": {
+
+        "Data Centers": [
+            "Technology operators & cloud infrastructure users",
+            "Institutional investors",
+            "Specialized infrastructure buyers",
+            "Hyperscale campus buyers",
+            "Edge data center operators",
+            "Colocation facility users",
+        ],
+
+        "Light Industrial Flex": [
+            "Trades businesses & contractors",
+            "Repair businesses",
+            "Small manufacturers",
+            "Service-and-storage users",
+        ],
+
+        "Industrial Specialty": [
+            "Telecom & fiber infrastructure operators",
+            "Powered shell buyers",
+            "Network facility operators",
+        ],
+    },
+
+    # ── LAND ──────────────────────────────────────────────────────────────────
+    "Land": {
+
+        "Raw Land": [
+            "Rural lifestyle buyers & homesteaders",
+            "Off-grid buyers",
+            "Recreational land buyers",
+            "Agricultural users & ranch buyers",
+        ],
+
+        "Development Land": [
+            "Builders & subdivision developers",
+            "Infill developers",
+            "Entitlement buyers & land assemblers",
+            "Spec developers",
+        ],
+
+        "Agricultural Land": [
+            "Farmers & ranchers",
+            "Crop producers",
+            "Legacy family-land buyers",
+            "Conservation-minded buyers",
+        ],
+
+        "Land Specialty": [
+            "Recreational buyers & hunting land buyers",
+            "Timberland buyers",
+            "Conservation easement buyers",
+            "Transitional land investors",
+            "Future-development buyers",
+        ],
+    },
+
+    # ── SPECIAL PURPOSE ───────────────────────────────────────────────────────
+    "Special Purpose": {
+
+        "Healthcare": [
+            "Assisted living buyers & senior-care operators",
+            "Skilled nursing buyers",
+            "Medical campus buyers",
+            "Behavioral health buyers",
+            "Therapy-clinic users",
+        ],
+
+        "Institutional": [
+            "Schools & charter-school operators",
+            "Religious organizations & worship facilities",
+            "Nonprofits & community organizations",
+        ],
+
+        "Storage": [
+            "Self-storage investors",
+            "Value-add storage operators",
+            "Climate-controlled storage buyers",
+            "Small-market storage operators",
+        ],
+
+        "Special Purpose Specialty": [
+            "Daycare operators & childcare buyers",
+            "Government-use property buyers",
+            "Entertainment venues & event-center operators",
+        ],
+    },
+}
+
+# ── Compliance profile map — keyed to Asset Class ────────────────────────────
+# Used by content_engine.py to select the right compliance check profile.
+# Derived from NICHE_TAXONOMY asset class keys. Do not add keys here that
+# are not asset class names in NICHE_TAXONOMY.
+ASSET_CLASS_COMPLIANCE = {
+    "Residential":                "residential",
+    "Commercial":                 "commercial",
+    "Industrial & Infrastructure": "commercial",
+    "Land":                       "residential",
+    "Special Purpose":            "commercial",
+}
+
+# ── Helper: get all primary niche names across all asset classes ──────────────
+def get_all_primary_niches() -> list:
+    """Returns a flat list of all primary niche names from NICHE_TAXONOMY."""
+    result = []
+    for asset_class, primaries in NICHE_TAXONOMY.items():
+        result.extend(primaries.keys())
+    return result
+
+# ── Helper: get asset class for a given primary niche name ────────────────────
+def get_asset_class_for_niche(primary_niche: str) -> str:
+    """Returns the asset class name for a given primary niche. Empty string if not found."""
+    for asset_class, primaries in NICHE_TAXONOMY.items():
+        if primary_niche in primaries:
+            return asset_class
+    return ""
+
+# ── Helper: get compliance profile for a primary niche ───────────────────────
+def get_compliance_profile_for_niche(primary_niche: str) -> str:
+    """Returns the compliance profile string for a primary niche."""
+    asset_class = get_asset_class_for_niche(primary_niche)
+    return ASSET_CLASS_COMPLIANCE.get(asset_class, "residential")
+
+
 PLAN_LIMITS = {
     # plan_key: {"posts": N, "backstop": N*3, "niches": N, "videos": N}
     # posts    = approved post limit per billing period
     # backstop = raw generation ceiling per billing period (abuse guard)
-    # niches   = max saved niches (enforced in save_agent_setup)
+    # niches   = max saved niches (enforced in save_agent_setup for trial only)
+    #            Paid plans: unlimited. Token abuse is controlled by posts +
+    #            backstop limits. Niche limits on paid plans created UX friction
+    #            without meaningfully reducing abuse. — Session 54 decision.
     # videos   = avatar video renders per calendar month (includes regenerations).
     #            0 = video feature disabled for this plan.
     #            Resets on the 1st of each month (video_month_reset in users table).
@@ -2761,8 +3024,8 @@ PLAN_LIMITS = {
     #   Insider: 30 — matches Power, manually granted accounts
     "trial":           {"posts": 10,   "backstop": 30,   "niches": 2,   "videos": 0,  "lifetime": True},
     "founding_member": {"posts": 50,   "backstop": 150,  "niches": 999, "videos": 10, "lifetime": False},
-    "starter":         {"posts": 50,   "backstop": 150,  "niches": 2,   "videos": 5,  "lifetime": False},
-    "professional":    {"posts": 60,   "backstop": 200,  "niches": 5,   "videos": 20, "lifetime": False},
+    "starter":         {"posts": 50,   "backstop": 150,  "niches": 999, "videos": 5,  "lifetime": False},
+    "professional":    {"posts": 60,   "backstop": 200,  "niches": 999, "videos": 20, "lifetime": False},
     "power":           {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 30, "lifetime": False},
     # ── COACH — added Session 49 ─────────────────────────────────────────────
     # B2B plan for real estate coaches. $199/month. Stripe product created
