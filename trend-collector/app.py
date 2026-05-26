@@ -6243,7 +6243,7 @@ async def jordan_message(req: JordanMessageRequest, current_user: dict = Depends
     # ── Call Anthropic API ────────────────────────────────────────────────────
     try:
         response = anthropic_client.messages.create(
-            model      = "claude-sonnet-4-20250514",
+            model      = "claude-sonnet-4-6",
             max_tokens = 300,
             system     = system_prompt,
             messages   = [{"role": "user", "content": user_prompt}],
@@ -6257,6 +6257,113 @@ async def jordan_message(req: JordanMessageRequest, current_user: dict = Depends
     except Exception as e:
         print(f"[Jordan] Anthropic API error (type={req.type}, user={current_user['id']}): {e}")
         return {"message": _fallback()}
+
+
+# ── Jordan onboarding reflection — Session 54 ────────────────────────────────
+# Called by onboarding.html Block 3 after each of the six voice questions.
+# Receives the question number (1-6), the question text, and the agent's answer.
+# Returns a single warm, specific sentence that reflects back something from
+# the answer without evaluating it. Never starts with "Great" or "Wonderful".
+# Names something specific from what the agent said.
+#
+# No auth required — agent may not have a token yet during onboarding.
+# Rate limited by IP: 30 calls per hour per IP (6 questions x 5 retries max).
+
+_reflection_rate: Dict[str, list] = {}
+_reflection_lock = threading.Lock()
+
+def _reflection_rate_limit(ip: str) -> bool:
+    """Returns True if the request is allowed, False if rate limited."""
+    now = time.time()
+    window = 3600  # 1 hour
+    max_calls = 30
+    with _reflection_lock:
+        calls = _reflection_rate.get(ip, [])
+        calls = [t for t in calls if now - t < window]
+        if len(calls) >= max_calls:
+            return False
+        calls.append(now)
+        _reflection_rate[ip] = calls
+        return True
+
+
+class JordanReflectionRequest(BaseModel):
+    question_number: int        # 1-6
+    question_text:   str        # the question that was asked
+    answer:          str        # the agent's answer
+    agent_name:      Optional[str] = None
+
+
+@app.post("/jordan/onboarding-reflection")
+async def jordan_onboarding_reflection(req: JordanReflectionRequest, request: Request):
+    """
+    Generate Jordan's reflection after each onboarding voice question.
+    Called without auth — agent may not have a token yet during onboarding.
+    Returns: { "reflection": "<one sentence>" }
+    On any error: returns a safe fallback so onboarding never stalls.
+    """
+    client_ip = request.headers.get("X-Forwarded-For", request.client.host or "unknown").split(",")[0].strip()
+    if not _reflection_rate_limit(client_ip):
+        # Return a fallback silently rather than breaking onboarding flow
+        return {"reflection": "That's exactly the kind of thing that will make your content sound like you and not like every other agent out there."}
+
+    answer = (req.answer or "").strip()
+    question = (req.question_text or "").strip()
+    q_num = req.question_number
+
+    # Minimal answer guard — if they submitted almost nothing, acknowledge gently
+    if len(answer) < 15:
+        return {"reflection": "Take another swing at this one. Even a few sentences in your own words will give me more to work with than nothing."}
+
+    system_prompt = " ".join([
+        "You are Jordan, the Chief of Staff for a real estate agent setting up their AutoMates account.",
+        "The agent just answered one of six voice questions designed to capture their authentic voice.",
+        "Your job is to write exactly one sentence that reflects back something specific from what they said.",
+        "Rules you must always follow:",
+        "Write exactly one sentence. Never more.",
+        "Never start with 'Great', 'Wonderful', 'Amazing', 'Fantastic', 'Excellent', 'Perfect', or any generic praise word.",
+        "Never evaluate or grade the answer. Never say it was a good answer or a strong answer.",
+        "Name something specific from what they said — a word, a detail, a moment, a position they took.",
+        "The tone is warm and direct. Like a colleague who actually listened.",
+        "Never use em dashes. Use plain sentences instead.",
+        "Never ask a follow-up question.",
+        "Never use the agent's name.",
+        "This sentence will be shown on screen immediately after they finish typing. It should feel like someone heard them.",
+    ])
+
+    user_prompt = (
+        f"Question {q_num} of 6: {question}\n\n"
+        f"The agent answered: {answer}\n\n"
+        "Write Jordan's one-sentence reflection now."
+    )
+
+    fallbacks = [
+        "The way you described that is going to show up in your content in a way most agents can't replicate.",
+        "That specific experience is exactly what separates your voice from a generic real estate post.",
+        "The honesty in that answer is what makes content sound like a real person wrote it.",
+        "That detail is something your clients will recognize immediately as true.",
+        "Most agents would have given a much safer answer to that question.",
+        "That perspective is going to give your content a point of view that's hard to argue with.",
+    ]
+    import random
+    fallback_msg = fallbacks[(q_num - 1) % len(fallbacks)]
+
+    try:
+        response = anthropic_client.messages.create(
+            model      = "claude-sonnet-4-6",
+            max_tokens = 120,
+            system     = system_prompt,
+            messages   = [{"role": "user", "content": user_prompt}],
+        )
+        reflection = ""
+        if response.content and len(response.content) > 0:
+            reflection = response.content[0].text.strip()
+        if not reflection:
+            return {"reflection": fallback_msg}
+        return {"reflection": reflection}
+    except Exception as e:
+        print(f"[Jordan/reflection] Anthropic API error (q={q_num}): {e}")
+        return {"reflection": fallback_msg}
 
 
 # ── Video status polling ──────────────────────────────────────────────────────
