@@ -434,7 +434,7 @@ def register_partner(body: dict):
 
     # Set is_licensed=0 — partner-only users don't generate CIR-verified content
     try:
-        conn = get_conn()
+        conn = sqlite3.connect(DB_NAME)
         conn.execute("UPDATE users SET is_licensed = 0 WHERE id = ?", (user["id"],))
         conn.commit()
         conn.close()
@@ -611,7 +611,7 @@ def forgot_password(body: dict):
         reset_url = f"{FRONTEND_URL}/login.html?reset={token}"
         html_body = f"""
         <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;">
-          <div style="font-size:18px;font-weight:700;color:#0f0f0d;margin-bottom:4px;">Home<span style="color:#1749c9;">Bridge</span></div>
+          <div style="font-size:18px;font-weight:700;color:#0f0f0d;margin-bottom:4px;">Home<span style="color:#1972A8;">Bridge</span></div>
           <hr style="border:none;border-top:1px solid #e8e7e0;margin:16px 0;" />
           <p style="color:#0f0f0d;font-size:15px;font-weight:600;margin-bottom:8px;">Reset your password</p>
           <p style="color:#787870;font-size:14px;line-height:1.6;margin-bottom:24px;">
@@ -619,7 +619,7 @@ def forgot_password(body: dict):
             Click the button below to choose a new password. This link expires in 1 hour.
           </p>
           <a href="{reset_url}"
-             style="display:inline-block;background:#1749c9;color:#fff;font-weight:600;
+             style="display:inline-block;background:#1972A8;color:#fff;font-weight:600;
                     font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none;">
             Reset My Password
           </a>
