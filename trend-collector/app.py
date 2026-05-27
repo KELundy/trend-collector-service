@@ -80,7 +80,8 @@ from database import (
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
     schedule_delete, schedules_get_due, schedule_mark_ran,
-    calculate_identity_score,
+    schedule_deactivate, schedules_delete_for_user,
+    get_agent_guidance,
     generate_compliance_pdf,
     get_compliance_records,
     get_compliance_records_for_broker,
@@ -678,13 +679,17 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
         raise HTTPException(500, f"Generation failed: {str(e)}")
 
 
-class ScoreRequest(BaseModel):
-    setup: dict = {}
-
-@app.post("/identity/score")
-async def get_identity_score(req: ScoreRequest, current_user=Depends(get_current_user)):
-    score = calculate_identity_score(current_user["id"], req.setup)
-    return score
+@app.get("/identity/guidance")
+async def get_identity_guidance(current_user=Depends(get_current_user)):
+    """
+    Return actionable guidance for the current agent via the Next Action Engine.
+    Replaces the retired /identity/score endpoint (Session 56).
+    Never returns a numerical score or grade. Returns one actionable recommendation,
+    supporting data points, a milestone progress indicator, and the CIR count.
+    Used by Jordan's briefing card and the Next Action panel in index.html.
+    """
+    guidance = get_agent_guidance(current_user["id"])
+    return guidance
 
 
 def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America/Denver") -> str:
@@ -898,6 +903,18 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 print(f"[Scheduler] User {user_id} not found, skipping niche '{niche}'.")
                 continue
 
+            # ── Part C: Scheduler-Niche Lifecycle safety net ─────────────────────
+            # Verify the scheduled niche still exists in the agent's current
+            # primaryNiches before generating. If not, deactivate the schedule
+            # (do not delete -- admin may want to inspect) and skip.
+            # Spec: Niche Taxonomy v2.1 Specification, Scheduler-Niche Lifecycle Part C.
+            _current_niches = setup.get("primaryNiches", []) or []
+            if niche not in _current_niches:
+                print(f"[Scheduler] Stale schedule: '{niche}' not in user {user_id} active niches {_current_niches}. Deactivating.")
+                schedule_deactivate(sched_id)
+                failed_niches.append(niche)
+                continue
+
             # ── Usage limit check — never generate beyond backstop limit ────────
             # Protects against runaway token costs from auto-generation.
             from database import check_generation_backstop_allowed, record_generation
@@ -1071,8 +1088,30 @@ class SetupSaveRequest(BaseModel):
 
 @app.post("/setup/save")
 async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_user)):
+    uid = current_user["id"]
+
+    # ── Part A: Scheduler-Niche Lifecycle — clean up stale schedules ──────────
+    # Before saving the new setup, read the current primaryNiches from the DB.
+    # Any niche that was in the old list but is NOT in the new list gets its
+    # schedule record deleted. This prevents the scheduler from generating content
+    # for niches the agent is no longer practicing in.
+    # Spec: Niche Taxonomy v2.1 Specification, Scheduler-Niche Lifecycle Part A.
     try:
-        save_agent_setup(current_user["id"], body.setup)
+        _old_setup  = get_agent_setup(uid)
+        _old_niches = set(_old_setup.get("primaryNiches", []) or [])
+        _new_niches = set((body.setup or {}).get("primaryNiches", []) or [])
+        _removed    = _old_niches - _new_niches
+        if _removed:
+            for _removed_niche in _removed:
+                deleted = schedule_delete(uid, _removed_niche)
+                if deleted:
+                    print(f"[Setup] Cleared stale schedule for user {uid} / '{_removed_niche}'")
+    except Exception as _sched_cleanup_e:
+        # Never let schedule cleanup block the save
+        print(f"[Setup] Schedule cleanup error for user {uid} (non-blocking): {_sched_cleanup_e}")
+
+    try:
+        save_agent_setup(uid, body.setup)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": "Plan limit exceeded", "message": str(e)})
 
@@ -2938,6 +2977,87 @@ async def admin_get_assigned_agents(user_id: int,
     agents = [dict(r) for r in c.fetchall()]
     conn.close()
     return {"assistant_id": user_id, "agents": agents}
+
+
+@app.post("/admin/users/{user_id}/reset-niches")
+async def admin_reset_niches(user_id: int, current_user: dict = Depends(get_current_user)):
+    """
+    Super admin only — reset an agent's niche selections and clear all their schedules.
+    Used when an agent has stale niche data from a previous taxonomy version and needs
+    a clean slate to re-select niches from the current v2.1 taxonomy.
+
+    Part B of the Scheduler-Niche Lifecycle fix (Session 56).
+    Spec: Niche Taxonomy v2.1 Specification, Scheduler-Niche Lifecycle Part B.
+
+    Steps:
+    1. Load the agent's current setup_json
+    2. Clear primaryNiches and subNiches from setup_json
+    3. Save the cleaned setup_json back to agent_setup
+    4. DELETE all schedules for this user (clean slate)
+    5. Return counts for confirmation
+
+    The agent will need to re-select their niches and re-create their schedules.
+    Content in the library is not affected. CIR records are not affected.
+    """
+    _require_super_admin(current_user)
+
+    from database import get_conn as _gc_rn, get_agent_setup as _gas_rn, schedules_delete_for_user as _sdf
+
+    # Load current setup
+    current_setup = _gas_rn(user_id)
+    if not current_setup and not isinstance(current_setup, dict):
+        current_setup = {}
+
+    old_niches    = current_setup.get("primaryNiches", []) or []
+    old_sub_niches = current_setup.get("subNiches", []) or []
+
+    # Clear niche selections from setup
+    current_setup["primaryNiches"] = []
+    current_setup["subNiches"]     = []
+
+    # Save cleaned setup
+    conn_rn = _gc_rn()
+    try:
+        conn_rn.execute("""
+            INSERT INTO agent_setup (user_id, setup_json, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                setup_json = excluded.setup_json,
+                updated_at = excluded.updated_at
+        """, (user_id, json.dumps(current_setup)))
+        conn_rn.commit()
+    finally:
+        conn_rn.close()
+
+    # Delete all schedules for this user
+    cleared_schedules = _sdf(user_id)
+
+    from database import log_audit_event as _lae_rn
+    _lae_rn(
+        actor_id  = current_user["id"],
+        action    = "admin_reset_niches",
+        target_id = user_id,
+        detail    = (
+            f"Reset niches and cleared all schedules for user {user_id}. "
+            f"Removed niches: {old_niches}. "
+            f"Cleared {cleared_schedules} schedule record(s)."
+        ),
+    )
+
+    print(f"[Admin] Reset niches and cleared all schedules for user {user_id}. "
+          f"Old niches: {old_niches}. Schedules cleared: {cleared_schedules}.")
+
+    return {
+        "ok":               True,
+        "user_id":          user_id,
+        "niches_cleared":   old_niches,
+        "sub_niches_cleared": old_sub_niches,
+        "schedules_cleared": cleared_schedules,
+        "message": (
+            f"Niche selections cleared. {cleared_schedules} schedule record(s) deleted. "
+            "The agent must re-select their niches and re-create their schedules."
+        ),
+    }
 
 
 @app.post("/admin/create-user")
