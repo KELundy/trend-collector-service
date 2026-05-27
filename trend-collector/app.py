@@ -149,7 +149,7 @@ except ImportError:
         print("[Startup] migrate_context_column not available in this database.py version")
 
 from auth import router as auth_router, get_current_user
-from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core
+from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core, hb_marketing_router
 from social import router as social_router
 
 
@@ -183,6 +183,7 @@ app.include_router(auth_router)
 app.include_router(content_engine_router)
 app.include_router(social_router)
 app.include_router(compliance_admin_router)
+app.include_router(hb_marketing_router)  # HB Marketing content generation — super_admin only — Session 56
 
 
 def quarterly_evaluator_worker():
