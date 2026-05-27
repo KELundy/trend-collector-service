@@ -149,7 +149,7 @@ except ImportError:
         print("[Startup] migrate_context_column not available in this database.py version")
 
 from auth import router as auth_router, get_current_user
-from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core, hb_marketing_router
+from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core, hb_marketing_router, run_public_compliance_check
 from social import router as social_router
 
 
@@ -276,6 +276,119 @@ def quarterly_evaluator_worker():
         _time_qe.sleep(55 * 60)
 
 
+
+# =============================================================================
+# SQLITE BACKUP TO CLOUDFLARE R2 — Session 56, Phase 4, Item 12
+# =============================================================================
+# Runs daily. Copies /data/homebridge.db to R2 with a timestamped filename.
+# Retains 30 days of backups. Deletes older files automatically.
+# Uses S3-compatible API (boto3) — Cloudflare R2 is S3-compatible.
+# Required env vars: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+#                    R2_BUCKET_NAME (default: automates-db-backup)
+# If any env var is missing, worker logs a warning and exits cleanly.
+# Never crashes the server. Always fire-and-forget.
+# =============================================================================
+
+def r2_backup_worker():
+    """
+    Daily SQLite backup to Cloudflare R2.
+    Wakes every 24 hours. On each wake:
+      1. Copies homebridge.db to R2 as homebridge-YYYY-MM-DD-HHMMSS.db
+      2. Lists all backups in the bucket and deletes any older than 30 days.
+    """
+    import os as _os
+    import time as _time
+    from datetime import datetime as _dt, timedelta as _td
+
+    R2_ACCOUNT_ID    = _os.getenv("R2_ACCOUNT_ID", "")
+    R2_ACCESS_KEY    = _os.getenv("R2_ACCESS_KEY_ID", "")
+    R2_SECRET_KEY    = _os.getenv("R2_SECRET_ACCESS_KEY", "")
+    R2_BUCKET        = _os.getenv("R2_BUCKET_NAME", "automates-db-backup")
+    DB_PATH          = _os.getenv("DB_PATH", "/data/homebridge.db")
+    BACKUP_INTERVAL  = 24 * 60 * 60   # 24 hours
+    RETAIN_DAYS      = 30
+
+    if not all([R2_ACCOUNT_ID, R2_ACCESS_KEY, R2_SECRET_KEY]):
+        print("[R2Backup] R2 credentials not configured — backup worker will not run. "
+              "Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY in environment.")
+        return
+
+    # Cloudflare R2 S3-compatible endpoint
+    endpoint_url = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+    print(f"[R2Backup] Worker started. Bucket: {R2_BUCKET}. Interval: 24h. Retaining: {RETAIN_DAYS} days.")
+
+    while True:
+        try:
+            _run_r2_backup(DB_PATH, R2_BUCKET, endpoint_url, R2_ACCESS_KEY, R2_SECRET_KEY, RETAIN_DAYS)
+        except Exception as _e:
+            print(f"[R2Backup] Backup cycle error (non-fatal): {_e}")
+        _time.sleep(BACKUP_INTERVAL)
+
+
+def _run_r2_backup(db_path, bucket, endpoint_url, access_key, secret_key, retain_days):
+    """
+    Execute one backup cycle:
+      - Upload current DB file with timestamp
+      - Prune backups older than retain_days
+    """
+    import os as _os
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    if not _os.path.exists(db_path):
+        print(f"[R2Backup] DB file not found at {db_path} — skipping this cycle.")
+        return
+
+    db_size_mb = _os.path.getsize(db_path) / (1024 * 1024)
+
+    try:
+        import boto3 as _boto3
+        from botocore.config import Config as _BotoConfig
+    except ImportError:
+        print("[R2Backup] boto3 not installed. Run: pip install boto3")
+        return
+
+    s3 = _boto3.client(
+        "s3",
+        endpoint_url         = endpoint_url,
+        aws_access_key_id    = access_key,
+        aws_secret_access_key= secret_key,
+        config               = _BotoConfig(signature_version="s3v4"),
+        region_name          = "auto",
+    )
+
+    # ── Upload ────────────────────────────────────────────────────────────────
+    now       = _dt.now(_tz.utc)
+    timestamp = now.strftime("%Y-%m-%d-%H%M%S")
+    key       = f"homebridge-{timestamp}.db"
+
+    try:
+        with open(db_path, "rb") as f:
+            s3.upload_fileobj(f, bucket, key)
+        print(f"[R2Backup] Uploaded {key} ({db_size_mb:.2f} MB) to {bucket}.")
+    except Exception as _upload_err:
+        print(f"[R2Backup] Upload failed: {_upload_err}")
+        return   # Do not prune if upload failed
+
+    # ── Prune backups older than retain_days ──────────────────────────────────
+    cutoff = now - _td(days=retain_days)
+    deleted = 0
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket):
+            for obj in page.get("Contents", []):
+                obj_key      = obj["Key"]
+                last_modified = obj["LastModified"]
+                # LastModified is timezone-aware from R2
+                if last_modified < cutoff:
+                    s3.delete_object(Bucket=bucket, Key=obj_key)
+                    print(f"[R2Backup] Pruned old backup: {obj_key}")
+                    deleted += 1
+    except Exception as _prune_err:
+        print(f"[R2Backup] Prune error (non-fatal): {_prune_err}")
+
+    print(f"[R2Backup] Cycle complete. Uploaded: {key}. Pruned: {deleted} old backup(s).")
+
 @app.on_event("startup")
 async def startup_event():
     # Ensure super admin account is always set correctly
@@ -313,6 +426,9 @@ async def startup_event():
     print("[Startup] Starting quarterly partner tier evaluator...")
     t3 = threading.Thread(target=quarterly_evaluator_worker, daemon=True)
     t3.start()
+    print("[Startup] Starting R2 database backup worker...")
+    t4 = threading.Thread(target=r2_backup_worker, daemon=True)
+    t4.start()
     print("[Startup] Ready.")
 
 
@@ -3581,6 +3697,140 @@ class ContactRequest(BaseModel):
     email:   str
     type:    str = "other"   # agent | team | broker | partner | other
     message: str = ""
+
+
+# =============================================================================
+# PUBLIC COMPLIANCE CHECKER — Session 56, Phase 4, Item 11
+# POST /public/compliance-check
+# =============================================================================
+# Unauthenticated lead-gen endpoint. Runs an 8-rule compliance check
+# against a pasted social media post after email capture.
+# Rate limited: 3 requests per hour per IP.
+# One check per email: enforced by compliance_checker_leads table.
+# =============================================================================
+
+_comp_check_rate: dict = {}   # { ip: [unix_timestamp, ...] }
+_COMP_CHECK_MAX    = 3
+_COMP_CHECK_WINDOW = 3600     # 1 hour rolling window
+
+def _comp_check_rate_limit(ip: str) -> bool:
+    """Returns True (allowed) or False (rate limited)."""
+    import time as _t
+    now          = _t.time()
+    window_start = now - _COMP_CHECK_WINDOW
+    hits = [t for t in _comp_check_rate.get(ip, []) if t > window_start]
+    if len(hits) >= _COMP_CHECK_MAX:
+        return False
+    hits.append(now)
+    _comp_check_rate[ip] = hits
+    return True
+
+
+@app.post("/public/compliance-check")
+async def public_compliance_check(request: Request):
+    """
+    Public-facing compliance check endpoint for compliance-check.html.
+    Flow:
+      1. Validate post_text and email are present.
+      2. Check IP rate limit (3/hour).
+      3. Check email against compliance_checker_leads (one check per email).
+      4. Run 8-rule compliance check via run_public_compliance_check().
+      5. Save lead record to compliance_checker_leads.
+      6. Return results.
+    No authentication required. CORS-permissive for Bluehost cross-origin requests.
+    """
+    # ── IP extraction ─────────────────────────────────────────────────────────
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    # ── IP rate limit ─────────────────────────────────────────────────────────
+    if not _comp_check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please try again in an hour."
+        )
+
+    # ── Parse body ─────────────────────────────────────────────────────────────
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid request body.")
+
+    post_text = str(body.get("post_text", "")).strip()[:5000]
+    email     = str(body.get("email",     "")).strip().lower()[:200]
+
+    if not post_text:
+        raise HTTPException(400, "post_text is required.")
+    if not email or "@" not in email:
+        raise HTTPException(400, "A valid email address is required.")
+
+    # ── DB: ensure table exists and check email uniqueness ───────────────────
+    from database import get_conn as _gc_pub
+    try:
+        conn = _gc_pub()
+        c    = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS compliance_checker_leads (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                email       TEXT NOT NULL UNIQUE,
+                post_text   TEXT NOT NULL,
+                results_json TEXT,
+                ip_address  TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+
+        # Check email uniqueness
+        c.execute("SELECT id FROM compliance_checker_leads WHERE email = ?", (email,))
+        existing = c.fetchone()
+        conn.close()
+    except Exception as _db_err:
+        print(f"[ComplianceCheck] DB setup error: {_db_err}")
+        existing = None
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error":   "email_already_used",
+                "message": (
+                    "You have already used your free check. "
+                    "Sign up for AutoMates to check every post before you publish."
+                ),
+                "signup_url": "https://app.homebridgegroup.co",
+            }
+        )
+
+    # ── Run the 8-rule compliance check ──────────────────────────────────────
+    try:
+        check_result = run_public_compliance_check(post_text)
+    except HTTPException:
+        raise
+    except Exception as _ce:
+        raise HTTPException(500, f"Compliance check failed: {str(_ce)}")
+
+    # ── Save lead record ──────────────────────────────────────────────────────
+    import json as _json_cl
+    try:
+        conn = _gc_pub()
+        conn.execute(
+            """INSERT INTO compliance_checker_leads
+               (email, post_text, results_json, ip_address)
+               VALUES (?, ?, ?, ?)""",
+            (email, post_text, _json_cl.dumps(check_result), client_ip)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as _save_err:
+        print(f"[ComplianceCheck] Lead save error (non-blocking): {_save_err}")
+
+    return {
+        "ok":      True,
+        "results": check_result.get("results", []),
+    }
 
 
 @app.post("/contact")
