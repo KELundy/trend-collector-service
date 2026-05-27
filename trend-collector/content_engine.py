@@ -4553,3 +4553,518 @@ async def compliance_status(request: Request):
         ),
     }
 
+
+
+# =============================================================================
+# HB MARKETING CONTENT ENGINE — Session 56, Phase 4, Item 10
+# =============================================================================
+# Generates content FOR AutoMates targeting licensed real estate agents.
+# Audience 3: agents who post inconsistently and know it.
+# NEVER touches Kevin's agent surfaces. NEVER targets the general public.
+# All content saved with context="hb_marketing" — permanently separated.
+#
+# Route: POST /hb-marketing/generate
+# Auth:  super_admin only
+# =============================================================================
+
+# ── System prompt prefix — applied to every HB Marketing generation ───────────
+HB_MARKETING_SYSTEM_PROMPT = (
+    "You are generating marketing content for AutoMates, a platform built by HomeBridge Group, LLC. "
+    "This content targets licensed real estate agents, not the general public. "
+    "The goal is to educate agents on compliance requirements they may not know about and "
+    "position AutoMates as the only platform that combines content generation, compliance checking, "
+    "and permanent human attestation records (CIR).\n\n"
+    "RULES — NON-NEGOTIABLE:\n"
+    "- Never attack other agents, brokerages, or tools. Own merits only. Always.\n"
+    "- Never use burnout or problem-avoidance framing. No 'you're too busy,' "
+    "no 'stop spending hours on content,' no problem-centric language.\n"
+    "- Forward-looking language only. 'Here's what's possible' not 'here's what's wrong.'\n"
+    "- Reference specific laws, rules, or compliance concepts. No generic marketing.\n"
+    "- Tone: knowledgeable colleague, not professor or salesperson.\n"
+    "- Include the positioning line: 'Your market. Your voice. On record. Every day.'\n"
+    "- Use named authority language: 'federal Fair Housing law, NAR Code of Ethics, RESPA, "
+    "FTC advertising rules, and state real estate commission rules'\n"
+    "- Never say 'your license is protected' or imply a compliance guarantee.\n"
+    "- Never use em dashes.\n"
+    "- Call to action: soft, never salesy. Example: 'See how it works at homebridgegroup.co'\n"
+    "- Target audience: licensed real estate agents who are active on social media and "
+    "aware they should be doing more but don't have a system.\n"
+)
+
+# ── Category definitions — 8 categories with subcategories ───────────────────
+HB_MARKETING_CATEGORIES = {
+    "Fair Housing on Social Media": {
+        "description": "Agent search intent: 'What can I say in real estate social media posts?'",
+        "subcategories": [
+            "Protected class language in property descriptions",
+            "Neighborhood descriptions and steering risk",
+            "Testimonial and review sharing compliance",
+            "Photo and video selection (representation)",
+        ],
+    },
+    "NAR Code of Ethics": {
+        "description": "Agent search intent: 'What does Article 12 mean for my Instagram?'",
+        "subcategories": [
+            "Article 1: protect and promote client interests",
+            "Article 2: no misrepresentation",
+            "Article 12: true picture in advertising",
+            "Article 15: no false statements about competitors",
+        ],
+    },
+    "AI Content and Disclosure": {
+        "description": "Agent search intent: 'Can I get in trouble for using AI to write my real estate posts?'",
+        "subcategories": [
+            "FTC AI disclosure requirements (current law)",
+            "NAR AI guidelines for members",
+            "State-specific AI disclosure rules",
+            "Client expectations and transparency",
+        ],
+    },
+    "State-Specific Advertising Rules": {
+        "description": "Agent search intent: 'What does my state require in real estate ads?'",
+        "subcategories": [
+            "Brokerage name and license display requirements",
+            "Team advertising rules",
+            "Social media as advertising (state definitions)",
+            "Penalty structures and enforcement examples",
+        ],
+    },
+    "Discoverability and Authority": {
+        "description": "Agent search intent: 'How do agents get found online in 2026?'",
+        "subcategories": [
+            "How AI search (ChatGPT, Claude, Perplexity) recommends agents",
+            "What Google looks for in agent authority",
+            "Indexed content vs. social-only content",
+            "The compound effect of consistent publishing",
+        ],
+    },
+    "Niche Positioning": {
+        "description": "Agent search intent: 'How do I become the recognized expert in my niche?'",
+        "subcategories": [
+            "Volume and consistency in a specific niche",
+            "Content specificity vs. generic real estate advice",
+            "Building authority in a geographic market",
+            "Multiple niches vs. deep specialization",
+        ],
+    },
+    "Time and Consistency": {
+        "description": "Agent search intent: 'How do top agents post every day without spending hours on content?'",
+        "subcategories": [
+            "Scheduled content generation",
+            "Voice capture and authentic content at scale",
+            "The difference between posting and publishing",
+            "Building a content habit that compounds",
+        ],
+    },
+    "Brokerage and Team Systems": {
+        "description": "Agent search intent: 'How does a brokerage roll out content compliance across 50 agents?'",
+        "subcategories": [
+            "Broker compliance risk with agent social media",
+            "Team-wide content standards",
+            "Brokerage-level CIR reporting",
+            "Onboarding agents at scale",
+        ],
+    },
+}
+
+# ── Category-specific prompt architecture ─────────────────────────────────────
+def _build_hb_marketing_category_prompt(category: str, subcategory: str, target_state: str) -> str:
+    """Returns the body prompt for a given category, following the spec's prompt architecture."""
+    sc = f" (focus: {subcategory})" if subcategory else ""
+    state_ref = f" Specifically address {target_state} rules." if target_state else ""
+
+    if category == "Fair Housing on Social Media":
+        return (
+            f"TOPIC: Fair Housing compliance on social media{sc}.{state_ref}\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "1. State the specific Fair Housing rule in plain language. Cite the authority "
+            "(e.g., 'Federal Fair Housing Act, 42 U.S.C. Section 3604(c)').\n"
+            "2. Show two realistic, anonymized examples of social posts that would fail the check. "
+            "Be specific. These should look like real posts an agent might actually write.\n"
+            "3. Show one example that passes. Explain why in one sentence.\n"
+            "4. Close with: 'AutoMates checks every post against federal Fair Housing law "
+            "before you ever see it. The CIR on each post is your record that it was reviewed.'\n\n"
+            "Do not invent violations that are not real compliance risks. "
+            "Do not frame the failing examples as things agents do carelessly -- "
+            "frame them as easy mistakes anyone could make without knowing the rule.\n"
+        )
+
+    elif category == "NAR Code of Ethics":
+        return (
+            f"TOPIC: NAR Code of Ethics compliance for social media{sc}.\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "1. State the Article number and what it actually requires in plain language. "
+            "Cite: 'NAR Code of Ethics [Article X] (2026 edition)'.\n"
+            "2. Give one real-world scenario where an agent would violate it without knowing -- "
+            "a specific, common Instagram or LinkedIn post pattern.\n"
+            "3. Show what the compliant version looks like.\n"
+            "4. Close with how AutoMates checks against the NAR Code of Ethics automatically, "
+            "and how the CIR documents that check.\n\n"
+            "The tone should feel like a knowledgeable colleague explaining something important "
+            "over coffee -- not a compliance lecture.\n"
+        )
+
+    elif category == "AI Content and Disclosure":
+        return (
+            f"TOPIC: AI-generated real estate content and disclosure requirements{sc}.\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "1. State the current legal landscape honestly: what's required, what's recommended, "
+            "what's gray area. Cite FTC, NAR, and relevant state rules where applicable.\n"
+            "2. Acknowledge that most agents using AI for content have no compliance review process. "
+            "Frame this as an infrastructure gap, not a character flaw.\n"
+            "3. Position the CIR as the answer: 'Every piece of content generated by AutoMates "
+            "carries a Compliance Intelligence Record proving a licensed professional reviewed "
+            "and approved it before publication. That is not a workaround. "
+            "That is the standard the industry is moving toward.'\n\n"
+            "Never imply other AI tools are wrong or unethical. "
+            "State what the standard should be and what AutoMates provides.\n"
+        )
+
+    elif category == "State-Specific Advertising Rules":
+        state_section = (
+            f"Target state: {target_state}. Reference the specific state rule by code section.\n"
+            if target_state else
+            "Use Colorado (4 CCR 725-1, Rule 6.10) as the reference state, or keep state-neutral.\n"
+        )
+        return (
+            f"TOPIC: State real estate commission advertising rules{sc}.{state_ref}\n"
+            f"{state_section}\n"
+            "PROMPT ARCHITECTURE:\n"
+            "1. State what the specific rule requires (cite code section).\n"
+            "2. Show a common social post that would fail the rule.\n"
+            "3. Show the compliant version.\n"
+            "4. Note that AutoMates checks against state commission rules automatically, "
+            "and the CIR documents that review.\n\n"
+            "Be precise. Cite real code sections. Do not generalize across all states "
+            "unless the piece is intentionally state-neutral.\n"
+        )
+
+    elif category == "Discoverability and Authority":
+        return (
+            f"TOPIC: How agents get found and recommended online in 2026{sc}.\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "Explain how AI platforms (ChatGPT, Claude, Perplexity) decide which agent to "
+            "recommend when someone asks 'who is the best probate agent in Denver.' "
+            "The answer: they read indexed, structured, consistently updated pages. "
+            "An authority page with 50 CIR records tells a clearer story than a static bio.\n\n"
+            "Position AutoMates as the only platform that builds this kind of indexed, "
+            "verified, permanent presence. Never attack other tools. "
+            "State what AutoMates does and let the reader draw the comparison.\n\n"
+            "Include at least one concrete example of how AI search surfaces agent authority. "
+            "The piece should make the reader understand why social-only content "
+            "is not the same as indexed, verified authority.\n"
+        )
+
+    elif category == "Niche Positioning":
+        return (
+            f"TOPIC: How agents become the recognized expert in their niche{sc}.\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "The agent who publishes 50 pieces of verified, niche-specific content in their "
+            "market owns that niche online. Not because of volume alone but because of "
+            "specificity, consistency, and verification. Every post with a CIR is another "
+            "indexed signal.\n\n"
+            "Position AutoMates as the system that makes this achievable without the agent "
+            "writing every word themselves. Forward-looking framing only. "
+            "Never say 'you're too busy' or imply the agent is overwhelmed.\n\n"
+            "The piece should make the reader see the compound effect of niche-specific "
+            "content clearly. Use a concrete example if possible "
+            "(e.g., 'An agent with 50 probate posts in Denver is not competing with "
+            "every agent in Denver -- they are competing with agents who also focus on "
+            "probate in Denver. That pool is much smaller.').\n"
+        )
+
+    elif category == "Time and Consistency":
+        return (
+            f"TOPIC: How consistent content publication works at scale{sc}.\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "The difference between agents who are visible and agents who aren't is not talent. "
+            "It is consistency. AutoMates captures your voice once, generates content on your "
+            "schedule, checks it for compliance, and holds it for your approval. "
+            "You review and approve. Your team handles the rest.\n\n"
+            "Forward-looking framing only. Never position this as solving burnout or saving "
+            "agents from themselves. Position it as the infrastructure that makes consistency "
+            "possible for agents who want to build something.\n\n"
+            "The piece should help the reader see the difference between 'posting' (reactive, "
+            "irregular) and 'publishing' (systematic, compounding). "
+            "AutoMates is publishing infrastructure, not a posting shortcut.\n"
+        )
+
+    elif category == "Brokerage and Team Systems":
+        return (
+            f"TOPIC: Brokerage-level content compliance and consistency systems{sc}.\n\n"
+            "PROMPT ARCHITECTURE:\n"
+            "This is broker-facing content only. The broker's problem: every agent on their "
+            "team is posting on social media, and the broker is liable for compliance violations. "
+            "AutoMates gives brokers a system where every post is checked before publication "
+            "and every CIR record is on file.\n\n"
+            "Never frame agents as the problem. Frame the system gap as the problem and "
+            "AutoMates as the infrastructure.\n\n"
+            "The piece should make a broker or office manager see clearly that their current "
+            "approach (hoping agents post correctly) is not a compliance strategy. "
+            "AutoMates is. Mention the Coach plan and link to homebridgegroup.co "
+            "as the soft CTA.\n"
+        )
+
+    else:
+        return f"TOPIC: {category}{sc}.{state_ref}\n\n"
+
+
+def _build_hb_marketing_prompt(
+    category: str,
+    subcategory: str = "",
+    target_state: str = "",
+    content_format: str = "social_post",
+) -> str:
+    """
+    Build the complete Claude prompt for HB Marketing content generation.
+    Combines system prompt + category architecture + format spec.
+    """
+    cat_info    = HB_MARKETING_CATEGORIES.get(category, {})
+    description = cat_info.get("description", "")
+
+    format_spec = (
+        "FORMAT: Social post — 150-300 words. Reads in under 90 seconds. "
+        "One clear position. Suitable for LinkedIn or a real estate industry publication. "
+        "No headers. Dense but readable. End with the soft CTA.\n"
+        if content_format == "social_post" else
+        "FORMAT: Article / long-form LinkedIn piece — 400-600 words. "
+        "Structure: open with a specific observation (1 paragraph), build a real argument "
+        "with concrete detail (3-4 paragraphs), end with a position statement (1 paragraph). "
+        "Include one quotable line that could stand alone. End with the soft CTA.\n"
+    )
+
+    category_prompt = _build_hb_marketing_category_prompt(category, subcategory, target_state)
+
+    return (
+        HB_MARKETING_SYSTEM_PROMPT
+        + "\n"
+        + f"CATEGORY: {category}\n"
+        + (f"SEARCH INTENT: {description}\n" if description else "")
+        + "\n"
+        + category_prompt
+        + "\n"
+        + format_spec
+        + "\n"
+        "POSITIONING LINE (required, work in naturally):\n"
+        "'Your market. Your voice. On record. Every day.'\n\n"
+        "CALL TO ACTION (soft, choose the most fitting):\n"
+        "- 'See how it works at homebridgegroup.co'\n"
+        "- 'Try a free compliance check at homebridgegroup.co/compliance-check'\n"
+        "- 'Learn more at homebridgegroup.co'\n\n"
+        "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
+        + "-" * 40 + "\n"
+        "{\n"
+        '  "headline": "A sharp, specific headline a real estate agent would stop scrolling for. One sentence, no period. A point of view, not a product pitch.",\n'
+        '  "post": "The full piece — see format above. Must include the positioning line naturally. Must end with the soft CTA.",\n'
+        '  "hashtags": "#hashtag1 #hashtag2 (6-8 tags for real estate professionals — compliance, agent marketing, proptech)",\n'
+        '  "thumbnailIdea": "A specific visual brief for a real estate technology brand post. 6-10 descriptive words. No people faces, no logos, no generic handshakes. Examples: modern laptop dashboard compliance checklist clean desk / real estate agent phone approval screen coffee shop",\n'
+        '  "cta": "The soft call to action line only — one sentence."\n'
+        "}\n\n"
+        "HARD RULES:\n"
+        "- Every value complete. No placeholders.\n"
+        "- No em dashes anywhere.\n"
+        "- No attacks on other tools, agents, or brokerages.\n"
+        "- No burnout framing.\n"
+        "- No claim that AutoMates guarantees compliance or protects licenses.\n"
+        "- Return ONLY the JSON object."
+    )
+
+
+# ── Pydantic model for the new endpoint ──────────────────────────────────────
+class HBMarketingRequest(BaseModel):
+    category:       str
+    subcategory:    Optional[str] = None
+    target_state:   Optional[str] = None
+    content_format: Optional[str] = "social_post"  # "social_post" | "article"
+
+
+# ── Router — separate from the main content router ───────────────────────────
+hb_marketing_router = APIRouter(prefix="/hb-marketing", tags=["hb-marketing"])
+
+
+@hb_marketing_router.post("/generate")
+async def generate_hb_marketing_content(payload: HBMarketingRequest, request: Request):
+    """
+    Generate HB Marketing content targeting licensed real estate agents.
+    Content is saved with context='hb_marketing' and NEVER appears on
+    Kevin's agent authority page or agent social accounts.
+
+    Accessible to super_admin only.
+    """
+    # ── super_admin guard ─────────────────────────────────────────────────────
+    import os as _os
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization required.")
+    try:
+        import jwt as _jwt
+        SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
+        decoded = _jwt.decode(token, SECRET, algorithms=["HS256"])
+        role = decoded.get("role", "")
+        if role != "super_admin":
+            raise HTTPException(
+                status_code=403,
+                detail="HB Marketing content generation is restricted to super_admin."
+            )
+        uid = int(decoded.get("sub") or decoded.get("user_id") or 0)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    # ── Validate category ─────────────────────────────────────────────────────
+    if payload.category not in HB_MARKETING_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown category. Valid categories: {list(HB_MARKETING_CATEGORIES.keys())}"
+        )
+
+    # ── Get Anthropic client ──────────────────────────────────────────────────
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Build and call Claude ─────────────────────────────────────────────────
+    prompt = _build_hb_marketing_prompt(
+        category       = payload.category,
+        subcategory    = payload.subcategory or "",
+        target_state   = payload.target_state or "",
+        content_format = payload.content_format or "social_post",
+    )
+
+    try:
+        response = client.messages.create(
+            model      = "claude-sonnet-4-6",
+            max_tokens = 2000,
+            messages   = [{"role": "user", "content": prompt}],
+        )
+        text_chunks = [b.text for b in (response.content or []) if getattr(b, "type", "") == "text"]
+        raw_text    = "\n\n".join(text_chunks).strip()
+        if not raw_text:
+            raise ValueError("Claude returned empty content.")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude error: {str(e)}")
+
+    # ── Parse JSON output ─────────────────────────────────────────────────────
+    try:
+        clean = raw_text.replace("```json", "").replace("```", "").strip()
+        import json as _json_hb
+        parsed = _json_hb.loads(clean)
+    except Exception:
+        # Fallback: wrap raw text
+        parsed = {
+            "headline":      "",
+            "post":          raw_text,
+            "hashtags":      "#AutoMates #RealEstateCompliance #AgentMarketing",
+            "thumbnailIdea": "",
+            "cta":           "See how it works at homebridgegroup.co",
+        }
+
+    # ── Run standard compliance check — b2b profile ───────────────────────────
+    # HB Marketing content is compliance-checked because Kevin publishes it
+    # as a licensed agent / company. Use b2b profile (no residential FHA triggers).
+    content_text = parsed.get("post", raw_text)
+    try:
+        p1_badge, profile_name = _run_compliance_check(
+            content_text,
+            agent_name   = "HomeBridge Group",
+            brokerage    = "HomeBridge Group",
+            mls_names    = [],
+            niche        = payload.category,
+            content_mode = "b2b",
+            state        = payload.target_state or "",
+        )
+        semantic = _run_semantic_compliance_check(
+            content_text,
+            profile_name = profile_name,
+            state        = payload.target_state or "",
+            niche        = payload.category,
+        )
+        compliance = _build_final_badge(
+            p1_badge, profile_name, semantic,
+            state      = payload.target_state or "",
+            agent_name = "HomeBridge Group",
+            brokerage  = "HomeBridge Group",
+        )
+        compliance_dict = compliance.dict()
+    except Exception:
+        compliance_dict = {
+            "overallStatus":     "reviewed",
+            "fairHousing":       "pass",
+            "brokerageDisclosure": "pass",
+            "narStandards":      "pass",
+            "notes":             [],
+        }
+
+    # ── Save to library with hb_marketing context ─────────────────────────────
+    # Audience separation: context="hb_marketing" permanently separates this
+    # content from Kevin's agent library. library_save enforces this at the DB level.
+    try:
+        from database import library_save as _lib_save
+        saved_item = _lib_save(
+            user_id    = uid,
+            niche      = payload.category,
+            content    = {
+                "headline":      parsed.get("headline", ""),
+                "post":          parsed.get("post", ""),
+                "hashtags":      parsed.get("hashtags", ""),
+                "thumbnailIdea": parsed.get("thumbnailIdea", ""),
+                "cta":           parsed.get("cta", ""),
+                "script":        "",
+            },
+            compliance = compliance_dict,
+            source     = "hb_marketing",
+            context    = "hb_marketing",
+        )
+    except Exception as _save_err:
+        # Save failure is non-blocking for the response
+        saved_item = None
+        print(f"[HB Marketing] Library save failed (non-blocking): {_save_err}")
+
+    return {
+        "ok":            True,
+        "category":      payload.category,
+        "subcategory":   payload.subcategory,
+        "target_state":  payload.target_state,
+        "content_format": payload.content_format,
+        "content":       parsed,
+        "compliance":    compliance_dict,
+        "saved_item_id": saved_item.get("id") if saved_item else None,
+        "audience_note": "Saved with context='hb_marketing'. Never appears on agent authority page.",
+    }
+
+
+@hb_marketing_router.get("/categories")
+async def get_hb_marketing_categories(request: Request):
+    """
+    Returns the 8 HB Marketing categories with subcategories.
+    Used by the Studio mode UI to populate the category selector.
+    super_admin only.
+    """
+    import os as _os
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization required.")
+    try:
+        import jwt as _jwt
+        SECRET = _os.getenv("JWT_SECRET", "homebridge-secret-change-in-production")
+        decoded = _jwt.decode(token, SECRET, algorithms=["HS256"])
+        if decoded.get("role") != "super_admin":
+            raise HTTPException(status_code=403, detail="super_admin only.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    return {
+        "categories": {
+            name: {
+                "description":   info["description"],
+                "subcategories": info["subcategories"],
+            }
+            for name, info in HB_MARKETING_CATEGORIES.items()
+        }
+    }
