@@ -5068,3 +5068,98 @@ async def get_hb_marketing_categories(request: Request):
             for name, info in HB_MARKETING_CATEGORIES.items()
         }
     }
+
+
+# =============================================================================
+# PUBLIC COMPLIANCE CHECKER — Session 56, Phase 4, Item 11
+# =============================================================================
+# Lightweight 8-rule compliance check for the public-facing lead gen tool.
+# Does NOT use the full compliance pipeline. Does NOT generate a CIR.
+# Called by POST /public/compliance-check in app.py.
+# =============================================================================
+
+PUBLIC_CHECKER_SYSTEM_PROMPT = """You are a real estate content compliance checker. Analyze the following social media post against these 8 rules. For each rule, return one of three statuses:
+- PASS: No issues detected
+- REVIEW: Potential issue that warrants the agent's attention
+- FLAG: Clear violation that should be corrected before publishing
+
+For each rule, provide a one-sentence explanation of your finding.
+
+Rules to check:
+1. Fair Housing Act (42 U.S.C. 3604): Look for protected-class language including references to race, color, religion, sex, national origin, disability, or familial status in property descriptions or neighborhood characterizations.
+2. NAR Code of Ethics Article 12: Look for misleading claims, exaggerated descriptions, or claims that do not present a "true picture."
+3. NAR Code of Ethics Article 15: Look for false or misleading statements about competitors or other agents.
+4. Advertising Disclosure: Check whether the post includes an agent name and brokerage name. Many states require both in all advertising.
+5. RESPA Section 8: Look for language suggesting kickbacks, undisclosed referral fees, or quid pro quo arrangements.
+6. Guarantee/Promise Language: Look for absolute guarantees ("guaranteed sale," "I promise," "100% satisfaction") that could be considered deceptive.
+7. Investment/Financial Advice: Look for return projections, ROI claims, appreciation predictions, or financial advice that would require a securities license.
+8. Deceptive Comparison: Look for unsubstantiated ranking claims ("#1 agent," "best in the area") without verifiable data source.
+
+Respond in JSON format only. No preamble. No markdown backticks.
+{
+  "results": [
+    {"rule": 1, "name": "Fair Housing Act", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 2, "name": "NAR Article 12", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 3, "name": "NAR Article 15", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 4, "name": "Advertising Disclosure", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 5, "name": "RESPA Section 8", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 6, "name": "Guarantee Language", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 7, "name": "Investment/Financial Advice", "status": "PASS|REVIEW|FLAG", "explanation": "..."},
+    {"rule": 8, "name": "Deceptive Comparison", "status": "PASS|REVIEW|FLAG", "explanation": "..."}
+  ]
+}"""
+
+
+def run_public_compliance_check(post_text: str) -> dict:
+    """
+    Lightweight 8-rule compliance check for the public lead gen tool.
+    Returns structured results per rule: pass/review/flag + one-sentence explanation.
+    Does NOT generate a CIR. Does NOT touch the full compliance pipeline.
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    prompt = (
+        PUBLIC_CHECKER_SYSTEM_PROMPT
+        + "\n\nPost to check:\n"
+        + post_text.strip()
+    )
+
+    try:
+        response = client.messages.create(
+            model      = "claude-sonnet-4-6",
+            max_tokens = 1200,
+            messages   = [{"role": "user", "content": prompt}],
+        )
+        text_chunks = [b.text for b in (response.content or []) if getattr(b, "type", "") == "text"]
+        raw         = "\n\n".join(text_chunks).strip()
+        # Strip accidental markdown fences
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        import json as _json_pc
+        parsed = _json_pc.loads(raw)
+        results = parsed.get("results", [])
+        # Validate all 8 rules present and statuses are valid
+        valid_statuses = {"PASS", "REVIEW", "FLAG"}
+        for r in results:
+            if r.get("status") not in valid_statuses:
+                r["status"] = "REVIEW"
+        return {"results": results}
+    except Exception as e:
+        # Return a safe fallback — never expose internal errors to the public endpoint
+        return {
+            "results": [
+                {
+                    "rule": i + 1,
+                    "name": name,
+                    "status": "REVIEW",
+                    "explanation": "Unable to complete this check. Please try again."
+                }
+                for i, name in enumerate([
+                    "Fair Housing Act", "NAR Article 12", "NAR Article 15",
+                    "Advertising Disclosure", "RESPA Section 8", "Guarantee Language",
+                    "Investment/Financial Advice", "Deceptive Comparison"
+                ])
+            ]
+        }
