@@ -24,9 +24,8 @@ def _compliance_verdict(comp_raw) -> str:
     """
     Parse raw compliance JSON and return a normalized verdict string.
     Centralizes the compliance-parsing logic that was previously duplicated
-    in 6 separate functions (get_user_results, calculate_identity_score,
-    generate_compliance_pdf, get_broker_office_stats, get_team_stats,
-    get_broker_agent_content).
+    in 6 separate functions (get_user_results, generate_compliance_pdf,
+    get_broker_office_stats, get_team_stats, get_broker_agent_content).
 
     Returns: 'pass' | 'warn' | 'fail' | 'pending'
 
@@ -64,11 +63,11 @@ def _compliance_verdict(comp_raw) -> str:
 
 def _calc_lightweight_identity(c, uid: int, compliance_rate, published_count: int) -> int:
     """
-    Compute a lightweight identity score (0–100) for broker/team dashboards.
+    Compute a lightweight identity score (0-100) for broker/team dashboards.
     Uses agent_setup JSON + published count + compliance rate.
     Centralizes logic previously duplicated in get_broker_office_stats
     and get_team_stats.
-    The full score engine is in calculate_identity_score().
+    Internal use only — never exposed to agents in UI.
     """
     score = 0
     try:
@@ -135,7 +134,7 @@ def init_db():
         # Approved post tracking — primary billing unit (Session 36)
         # approved_post_count: posts approved (CIR issued) this billing period
         # generation_backstop_count: raw generations this billing period (abuse guard)
-        # billing_reset_day: day-of-month the agent's billing cycle resets (1–28)
+        # billing_reset_day: day-of-month the agent's billing cycle resets (1-28)
         # addon_posts_limit: extra approved posts from purchased Add-on Packs this period
         # addon_backstop_limit: extra backstop credits from Add-on Packs this period
         # last_generation_hash: MD5 of last generation inputs — detects free regenerations
@@ -157,7 +156,7 @@ def init_db():
         # agent_setup so switching to the marketing context never contaminates the
         # agent's personal profile. NULL until first save from marketing context.
         ("hb_marketing_setup_json","TEXT DEFAULT NULL"),
-        # ── VIDEO IDENTITY — added Session 49 ────────────────────────────────
+        # VIDEO IDENTITY — added Session 49
         # has_profile_photo: 1 = photo stored on persistent disk at
         #   /data/profile_photos/{user_id}.jpg — served via GET /profile/photo/{user_id}
         # profile_photo_updated_at: timestamp of last photo upload
@@ -178,14 +177,14 @@ def init_db():
         ("video_month_count",        "INTEGER DEFAULT 0"),
         ("video_month_reset",        "TEXT DEFAULT NULL"),
         ("addon_video_limit",        "INTEGER DEFAULT 0"),
-        # ── heygen_photo_avatar_id — added Session 50 ─────────────────────────
+        # heygen_photo_avatar_id — added Session 50
         # Stores the talking_photo_id returned by HeyGen after one-time Photo Avatar
         # creation via POST /v3/avatars. Created on first render, reused on all
         # subsequent renders so we never re-upload or re-create the avatar.
         # NULL until agent's first video render completes the setup step.
         # Cleared when agent deletes their profile photo (consent withdrawal).
         ("heygen_photo_avatar_id",   "TEXT DEFAULT NULL"),
-        # ── VOICE IDENTITY — added Session 51 ────────────────────────────────
+        # VOICE IDENTITY — added Session 51
         # lmnt_voice_id: voice clone ID returned by LMNT after agent submits
         #   a voice recording. Used at render time to synthesize the script into
         #   an audio file via LMNT, which is then passed to HeyGen as audio_url
@@ -197,24 +196,24 @@ def init_db():
         #   own distinct consent record. Required before voice setup can proceed.
         ("lmnt_voice_id",            "TEXT DEFAULT NULL"),
         ("voice_consent_at",         "TEXT DEFAULT NULL"),
-        # ── TERMS CONSENT — added Session 53 ─────────────────────────────────
+        # TERMS CONSENT — added Session 53
         # consent_at: timestamp when agent or partner explicitly agreed to the
         #   Terms of Service and Privacy Policy at registration. Recorded
         #   server-side from the consent checkbox on login.html and
         #   partner-signup.html. NULL for accounts created before Session 53.
         #   Required field going forward — frontend blocks submission without it.
         ("consent_at",               "TEXT DEFAULT NULL"),
-        # ── JWT REVOCATION — added Session 53 ────────────────────────────────
+        # JWT REVOCATION — added Session 53
         # token_version: incremented on password change or admin suspend.
         #   Every JWT includes the version at issue time. get_current_user
         #   rejects tokens whose version is lower than the DB value, forcing
         #   re-login on all devices immediately rather than waiting for TTL.
         ("token_version",            "INTEGER DEFAULT 1"),
-        # ── AUTH LOCKOUT — added Session 53 ──────────────────────────────────
+        # AUTH LOCKOUT — added Session 53
         # login_fail_count: consecutive failed login attempts since last reset.
         # login_locked_until: ISO timestamp — account locked until this time.
         #   Both reset to 0/NULL on successful login or admin unlock.
-        #   Lockout threshold: 5 failures in 15 minutes → locked 30 minutes.
+        #   Lockout threshold: 5 failures in 15 minutes — locked 30 minutes.
         ("login_fail_count",         "INTEGER DEFAULT 0"),
         ("login_locked_until",       "TEXT DEFAULT NULL"),
     ]:
@@ -321,7 +320,7 @@ def init_db():
         )
     """)
 
-    # Assistant → Agent linking table
+    # Assistant Agent linking table
     c.execute("""
         CREATE TABLE IF NOT EXISTS assistant_agents (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -468,7 +467,7 @@ def init_db():
         )
     """)
 
-    # ── PARTNER PROGRAM — Session 12 ──────────────────────────────────────────
+    # PARTNER PROGRAM — Session 12
     # Always "Partner Program" — never "affiliate program"
     # Earnings are "Partner Rewards" — never "commissions"
 
@@ -523,7 +522,7 @@ def init_db():
         )
     """)
 
-    # ── ACCOUNT IDENTITY & ORGANIZATIONAL AFFILIATION — Session 18 (ADD v6 §2.5–2.6) ──────────
+    # ACCOUNT IDENTITY & ORGANIZATIONAL AFFILIATION — Session 18 (ADD v6 §2.5-2.6)
 
     # user_contact_methods — multiple verified contact methods per user.
     # Email is a contact address, not an identity key. user_id is the permanent anchor.
@@ -550,7 +549,7 @@ def init_db():
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             type          TEXT    NOT NULL,           -- team | office | brokerage
             name          TEXT    NOT NULL,
-            owner_user_id INTEGER NOT NULL,           -- declaring authority (FK → users.id)
+            owner_user_id INTEGER NOT NULL,           -- declaring authority (FK users.id)
             billing_plan  TEXT    NOT NULL DEFAULT 'individual', -- individual | sponsored | organizational
             created_at    TEXT    DEFAULT (datetime('now')),
             FOREIGN KEY (owner_user_id) REFERENCES users(id)
@@ -563,20 +562,20 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_organizations (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL,           -- FK → users.id
-            organization_id INTEGER NOT NULL,           -- FK → organizations.id
+            user_id         INTEGER NOT NULL,           -- FK users.id
+            organization_id INTEGER NOT NULL,           -- FK organizations.id
             role_within_org TEXT    NOT NULL DEFAULT 'member', -- member | lead | owner | broker
             joined_at       TEXT    DEFAULT (datetime('now')),
             left_at         TEXT    DEFAULT NULL,       -- NULL = currently affiliated
             billing_model   TEXT    NOT NULL DEFAULT 'individual', -- individual | sponsored | organizational
-            invited_by      INTEGER DEFAULT NULL,       -- FK → users.id (who invited them)
+            invited_by      INTEGER DEFAULT NULL,       -- FK users.id (who invited them)
             FOREIGN KEY (user_id)         REFERENCES users(id),
             FOREIGN KEY (organization_id) REFERENCES organizations(id),
             FOREIGN KEY (invited_by)      REFERENCES users(id)
         )
     """)
 
-    # ── MARKET REPORTS — Session 22 ──────────────────────────────────────────
+    # MARKET REPORTS — Session 22
     # Stores extracted data from agent-uploaded market PDFs (MLS, RPR, Altos, etc.)
     # PDF bytes are NOT stored — agent retains the source file, we store only the
     # extracted stats JSON. This avoids MLS data licensing liability and disk bloat.
@@ -642,9 +641,9 @@ def init_db():
         except Exception:
             pass  # Column already exists
 
-    # ── COMPLIANCE RECORDS — Session 34 ──────────────────────────────────────
+    # COMPLIANCE RECORDS — Session 34
     # Permanent audit trail written at the moment a post is approved and a
-    # CIR™ ID is generated. Survives content_library deletions — once written
+    # CIR ID is generated. Survives content_library deletions — once written
     # this record is never altered or removed by any platform action.
     # library_item_id is nullable so deleted posts do not orphan the record.
     # compliance_json stores the full ComplianceBadge for complete auditability.
@@ -676,7 +675,7 @@ def init_db():
     except Exception:
         pass
 
-    # ── VIDEO JOBS — Session 49 ───────────────────────────────────────────────
+    # VIDEO JOBS — Session 49
     # Tracks every avatar video render request submitted to the video API.
     # One row per render attempt — regenerations create new rows.
     # heygen_video_id: the video_id returned by the HeyGen API on submission.
@@ -715,7 +714,7 @@ def init_db():
     except Exception:
         pass
 
-    # ── PHOTO TOKENS — Session 49 ─────────────────────────────────────────────
+    # PHOTO TOKENS — Session 49
     # Short-lived signed tokens that make an agent's profile photo temporarily
     # accessible to the video render API during avatar generation.
     # token: random 32-char URL-safe string included in the photo URL.
@@ -780,7 +779,7 @@ def migrate_context_column():
 def migrate_content_library_columns():
     """
     Adds missing columns to content_library:
-    - cir_id: CIR™ verification record ID
+    - cir_id: CIR verification record ID
     - image_url: generated image URL
     - compliance_checked_at: timestamp of last compliance re-check
     - edited_at: timestamp of last workspace edit
@@ -902,8 +901,6 @@ def log_audit_event(actor_id: int, action: str,
         conn.close()
     except Exception as e:
         print(f"[Audit] Log failed: {e}")
-    # NOTE: Orphaned CREATE TABLE block that previously ran here on every call
-    # has been removed. platform_connections and platform_posts are created in init_db().
 
 
 # ─────────────────────────────────────────────
@@ -994,7 +991,7 @@ def log_platform_post(user_id: int, library_item_id: int, platform: str,
 # ─────────────────────────────────────────────
 def save_agent_setup(user_id: int, setup: dict):
     """Save or update agent setup/identity data server-side."""
-    # ── Niche-count enforcement ──────────────────────────────────────────────
+    # Niche-count enforcement
     # Check the agent's plan limit before saving. Raises ValueError on violation
     # so the caller (/setup/save route) can return a 400 with a clear message.
     # UNLIMITED_ROLES (super_admin, admin) bypass this check entirely.
@@ -1018,7 +1015,6 @@ def save_agent_setup(user_id: int, setup: dict):
                 f"Your {plan} plan allows up to {niche_limit} niche{'s' if niche_limit != 1 else ''}. "
                 f"You submitted {len(niches)}. Please remove {len(niches) - niche_limit} before saving."
             )
-    # ────────────────────────────────────────────────────────────────────────
 
     conn = get_conn()
     c = conn.cursor()
@@ -1181,7 +1177,7 @@ def record_compliance_approval(
     approved_at: str,
 ) -> None:
     """
-    Write a permanent compliance record at the moment a CIR™ is issued.
+    Write a permanent compliance record at the moment a CIR is issued.
     Called from library_update() immediately after the CIR ID is generated.
     Never raises — a write failure here must never block the approval flow.
     The record is immutable once written: no update or delete path exists.
@@ -1358,7 +1354,7 @@ def get_compliance_records_for_broker(
 def backfill_compliance_records() -> int:
     """
     One-time backfill — copies approved/published posts that already have a
-    CIR™ ID from content_library into compliance_records.
+    CIR ID from content_library into compliance_records.
     Safe to call multiple times — skips any cir_id already present.
     Returns the number of records written.
     Called automatically at startup from app.py after init_db().
@@ -1483,7 +1479,7 @@ def library_get_item(item_id: int, user_id: int = None) -> Optional[dict]:
 
 def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     """Update status, copiedPlatforms, content, approvedAt, publishedAt.
-    When status is set to 'approved', generates a CIR™ ID if one does not
+    When status is set to 'approved', generates a CIR ID if one does not
     already exist on this item.
     """
     conn = get_conn()
@@ -1505,7 +1501,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
         conn.close()
         return library_get_item(item_id)
 
-    # ── CIR™ generation — write on first approval ──
+    # CIR generation — write on first approval
     # Only create a CIR ID if this update sets status to 'approved'
     # and the item doesn't already have one.
     _new_cir_id      = None  # track whether we just generated one
@@ -1539,7 +1535,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     conn.commit()
     conn.close()
 
-    # ── Write permanent compliance record — after DB commit, never blocks ──
+    # Write permanent compliance record — after DB commit, never blocks
     if _new_cir_id and _item_for_record:
         _niche, _content, _compliance = _item_for_record
         record_compliance_approval(
@@ -1572,7 +1568,7 @@ def _row_to_item(row) -> dict:
     ctx = "agent"
     try: ctx = row["context"] or "agent"
     except Exception: pass
-    # FIX: include cir_id, image_url, image_regen_count — columns exist in DB but were
+    # Include cir_id, image_url, image_regen_count — columns exist in DB but were
     # never returned, so the frontend could never display them.
     cir_id            = None
     image_url         = None
@@ -1673,6 +1669,22 @@ def schedule_mark_ran(schedule_id: int, next_run: str):
     conn.close()
 
 
+def schedule_deactivate(schedule_id: int) -> None:
+    """
+    Deactivate a schedule without deleting it.
+    Called by the scheduler safety net (Part C) when a scheduled niche
+    is no longer in the agent's current primaryNiches.
+    Admin can inspect and manually delete if desired.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE schedules SET active = 0 WHERE id = ?",
+        (schedule_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
 def schedule_delete(user_id: int, niche: str) -> bool:
     conn = get_conn()
     c = conn.cursor()
@@ -1684,6 +1696,20 @@ def schedule_delete(user_id: int, niche: str) -> bool:
     conn.commit()
     conn.close()
     return affected > 0
+
+
+def schedules_delete_for_user(user_id: int) -> int:
+    """
+    Delete ALL schedules for a user. Used by the reset-niches admin endpoint (Part B).
+    Returns the count of deleted rows.
+    """
+    conn = get_conn()
+    c    = conn.cursor()
+    c.execute("DELETE FROM schedules WHERE user_id = ?", (user_id,))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected
 
 
 def _schedule_row(row) -> dict:
@@ -1812,21 +1838,40 @@ def lookup_approval_token_record(token: str) -> Optional[dict]:
 
 
 # ─────────────────────────────────────────────
-# IDENTITY STRENGTH SCORE
+# NEXT ACTION ENGINE
+# Replaces calculate_identity_score() — Session 56
+#
+# Doctrine: Never grade agents. Never display numerical scores.
+# This function returns one actionable recommendation, supporting
+# data points, and a milestone progress indicator. Jordan uses this
+# data for the daily briefing. Agents see what to do next and why
+# it matters — never a score, never a grade.
 # ─────────────────────────────────────────────
-def calculate_identity_score(user_id: int, setup: dict = None) -> dict:
-    from datetime import datetime, timedelta
-    import json
 
-    # Always load setup from the database — never trust client-supplied data.
-    # This ensures the score is always calculated against the agent's actual
-    # saved identity, not whatever the frontend happens to have in localStorage.
+def get_agent_guidance(user_id: int) -> dict:
+    """
+    Return actionable guidance for an agent based on their current platform state.
+    Called by the identity endpoint in app.py to power Jordan's briefing card
+    and the Next Action panel in index.html.
+
+    Returns:
+        next_action  — one specific, actionable recommendation (string)
+        data_points  — the metrics that informed the recommendation (dict)
+        progress     — milestone indicator string (e.g. "12 of 25 CIR records
+                       toward AI search visibility") — never a numerical score
+        cir_count    — total CIR records issued (permanent compliance records)
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
     conn = get_conn()
     c    = conn.cursor()
+
+    # Load agent setup
     c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
     setup_row = c.fetchone()
     setup = json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
 
+    # Load content state
     c.execute("""
         SELECT status, compliance, approved_at, published_at, saved_at, niche
         FROM content_library
@@ -1835,176 +1880,119 @@ def calculate_identity_score(user_id: int, setup: dict = None) -> dict:
     """, (user_id,))
     rows = c.fetchall()
 
-    # Count CIR records from the permanent audit trail — this is the authoritative
-    # count shown on the authority page and in Jordan's briefing card.
+    # CIR count from permanent audit trail — authoritative count
     c.execute("SELECT COUNT(*) as cnt FROM compliance_records WHERE user_id = ?", (user_id,))
-    cir_row = c.fetchone()
+    cir_row   = c.fetchone()
     cir_count = cir_row["cnt"] if cir_row else 0
+
+    # Active schedules
+    c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (user_id,))
+    sched_row    = c.fetchone()
+    has_schedule = bool(sched_row and sched_row["cnt"] > 0)
 
     conn.close()
 
-    total_items     = len(rows)
-    approved_items  = [r for r in rows if r["status"] in ("approved", "published")]
-    published_items = [r for r in rows if r["status"] == "published"]
+    # Derive key data points
+    now     = _dt.utcnow()
+    last_7  = now - _td(days=7)
+    last_30 = now - _td(days=30)
 
-    # PILLAR 1: Foundation (30 pts)
-    name_pts       = 5  if setup.get("agentName", "").strip()   else 0
-    market_pts     = 5  if setup.get("market", "").strip()      else 0
-    bio_pts        = 8  if len(setup.get("shortBio","").strip()) > 60  else (4 if len(setup.get("shortBio","").strip()) > 20 else 0)
-    voice_pts      = 6  if len(setup.get("brandVoice","").strip()) > 30 else (3 if len(setup.get("brandVoice","").strip()) > 10 else 0)
-    niches_raw     = setup.get("primaryNiches", [])
-    niches         = niches_raw if isinstance(niches_raw, list) else []
-    niche_pts      = 6  if len(niches) >= 2 else (3 if len(niches) == 1 else 0)
-    desig_raw      = setup.get("designations", [])
-    desig_list     = desig_raw if isinstance(desig_raw, list) else []
-    desig_pts      = min(len(desig_list) * 2, 8)
-    disclaimer     = setup.get("disclaimer", "") or ""
-    disclaimer_pts = 4 if len(disclaimer.strip()) > 20 else 0
-    areas_raw      = setup.get("serviceAreas", [])
-    areas_list     = areas_raw if isinstance(areas_raw, list) else []
-    areas_pts      = min(len(areas_list), 4)
-
-    foundation = min(name_pts + market_pts + bio_pts + voice_pts + niche_pts + desig_pts + disclaimer_pts + areas_pts, 30)
-    foundation_breakdown = {
-        "name":        {"pts": name_pts,       "max": 5,  "label": "Name"},
-        "market":      {"pts": market_pts,      "max": 5,  "label": "Primary Market"},
-        "bio":         {"pts": bio_pts,         "max": 8,  "label": "Bio"},
-        "voice":       {"pts": voice_pts,       "max": 6,  "label": "Brand Voice"},
-        "niches":      {"pts": niche_pts,       "max": 6,  "label": "Niches"},
-        "designations":{"pts": desig_pts,       "max": 8,  "label": "Professional Designations"},
-        "disclaimer":  {"pts": disclaimer_pts,  "max": 4,  "label": "Broker Disclaimer"},
-        "areas":       {"pts": areas_pts,       "max": 4,  "label": "Service Areas"},
-    }
-
-    # PILLAR 2: Integrity (25 pts)
-    # Only count approved/published items — these went through the full compliance
-    # pipeline and have real CIR records. Drafts, pending, archived, and test
-    # items are excluded — including them penalizes agents unfairly.
-    reviewed_items = approved_items
-    reviewed_count = len(reviewed_items)
-    if reviewed_count == 0:
-        integrity = 0
-        compliance_rate = None
-        integrity_breakdown = {"label": "No approved content yet", "rate": None}
-    else:
-        compliant_count = sum(
-            1 for r in reviewed_items if _compliance_verdict(r["compliance"]) == "pass"
-        )
-        compliance_rate = round((compliant_count / reviewed_count) * 100) if reviewed_count > 0 else 0
-        if compliance_rate == 100:   integrity = 25
-        elif compliance_rate >= 90:  integrity = 20
-        elif compliance_rate >= 75:  integrity = 12
-        elif compliance_rate >= 50:  integrity = 6
-        else:                         integrity = 2
-        integrity_breakdown = {"rate": compliance_rate, "passing": compliant_count, "total": reviewed_count}
-
-    # PILLAR 3: Presence (30 pts)
-    now     = datetime.utcnow()
-    last_7  = now - timedelta(days=7)
-    last_30 = now - timedelta(days=30)
-
-    def parse_date(s):
+    def _parse_date(s):
         if not s: return None
-        try:    return datetime.fromisoformat(s.replace("Z",""))
+        try:    return _dt.fromisoformat(s.replace("Z", ""))
         except: return None
 
-    published_dates = [parse_date(r["published_at"] or r["approved_at"] or r["saved_at"]) for r in approved_items]
+    approved_items  = [r for r in rows if r["status"] in ("approved", "published")]
+    total_approved  = len(approved_items)
+
+    published_dates = [
+        _parse_date(r["published_at"] or r["approved_at"] or r["saved_at"])
+        for r in approved_items
+    ]
     published_dates = [d for d in published_dates if d]
 
-    has_any        = len(approved_items) > 0
-    in_last_7      = any(d >= last_7  for d in published_dates)
-    in_last_30     = any(d >= last_30 for d in published_dates)
-    total_approved = len(approved_items)
+    published_last_7  = any(d >= last_7  for d in published_dates)
+    published_last_30 = any(d >= last_30 for d in published_dates)
 
-    any_pts      = 5  if has_any   else 0
-    recent7_pts  = 12 if in_last_7 else 0
-    recent30_pts = 8  if in_last_30 and not in_last_7 else 0
-    volume_pts   = 5  if total_approved >= 5 else (3 if total_approved >= 2 else 0)
+    niches_raw  = setup.get("primaryNiches", [])
+    niches      = niches_raw if isinstance(niches_raw, list) else []
+    has_bio     = len(setup.get("shortBio", "").strip()) > 20
+    has_voice   = len(setup.get("brandVoice", "").strip()) > 10
+    has_market  = bool(setup.get("market", "").strip())
 
-    presence = any_pts + recent7_pts + recent30_pts + volume_pts
-    presence_breakdown = {
-        "total_approved":    total_approved,
-        "published_last_7":  in_last_7,
-        "published_last_30": in_last_30,
+    data_points = {
+        "cir_count":           cir_count,
+        "total_approved":      total_approved,
+        "published_last_7":    published_last_7,
+        "published_last_30":   published_last_30,
+        "has_schedule":        has_schedule,
+        "niche_count":         len(niches),
+        "has_bio":             has_bio,
+        "has_voice":           has_voice,
+        "has_market":          has_market,
     }
 
-    # PILLAR 4: Consistency (15 pts)
-    try:
-        conn2 = get_conn()
-        c2 = conn2.cursor()
-        c2.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (user_id,))
-        sched_row = c2.fetchone()
-        conn2.close()
-        has_schedule = (sched_row["cnt"] > 0) if sched_row else False
-    except Exception:
-        has_schedule = False
+    # Determine the single most impactful next action
+    # Priority order: foundation gaps first, then content gaps, then cadence
+    next_action = _determine_next_action(data_points)
 
-    niche_diversity = len(set(r["niche"] for r in approved_items if r["niche"])) if approved_items else 0
-    weeks_active = 0
-    for i in range(4):
-        week_start = now - timedelta(days=(i+1)*7)
-        week_end   = now - timedelta(days=i*7)
-        if any(week_start <= d < week_end for d in published_dates):
-            weeks_active += 1
-
-    schedule_pts   = 5 if has_schedule       else 0
-    diversity_pts  = 5 if niche_diversity >= 2 else (2 if niche_diversity == 1 else 0)
-    regularity_pts = 5 if weeks_active >= 3  else (3 if weeks_active >= 2 else (1 if weeks_active == 1 else 0))
-
-    consistency = schedule_pts + diversity_pts + regularity_pts
-    consistency_breakdown = {
-        "has_schedule":    has_schedule,
-        "niche_diversity": niche_diversity,
-        "weeks_active":    weeks_active,
-    }
-
-    total = min(foundation + integrity + presence + consistency, 100)
-
-    if total >= 90:   level = "Authoritative"
-    elif total >= 75: level = "Recognized"
-    elif total >= 50: level = "Building"
-    elif total >= 25: level = "Establishing"
-    else:             level = "Getting Started"
-
-    next_action = _score_next_action(
-        foundation, integrity, presence, consistency,
-        foundation_breakdown, integrity_breakdown,
-        presence_breakdown, consistency_breakdown
-    )
+    # Milestone progress indicator — never a score
+    progress = _build_progress_indicator(cir_count, total_approved, has_schedule, len(niches))
 
     return {
-        "total": total, "level": level,
-        "cir_count": cir_count,
-        "pillars": {
-            "foundation":          {"score": foundation,  "max": 30, "label": "Foundation",          "breakdown": foundation_breakdown},
-            "review_track_record": {"score": integrity,   "max": 25, "label": "Review Track Record", "breakdown": integrity_breakdown},
-            "presence":            {"score": presence,    "max": 30, "label": "Presence",            "breakdown": presence_breakdown},
-            "consistency":         {"score": consistency, "max": 15, "label": "Consistency",         "breakdown": consistency_breakdown},
-        },
         "next_action": next_action,
+        "data_points": data_points,
+        "progress":    progress,
+        "cir_count":   cir_count,
     }
 
 
-def _score_next_action(f, i, p, c, fb, ib, pb, cb) -> str:
-    gaps = []
-    if fb.get("bio", {}).get("pts", 0) < 8:
-        gaps.append((8 - fb["bio"]["pts"], "Complete your bio — it's the largest single factor in your Foundation score."))
-    if fb.get("niches", {}).get("pts", 0) < 6:
-        gaps.append((6 - fb["niches"]["pts"], "Select at least two niches to establish your areas of expertise."))
-    if fb.get("voice", {}).get("pts", 0) < 6:
-        gaps.append((6 - fb["voice"]["pts"], "Define your brand voice — it shapes every piece of content you generate."))
-    if pb.get("total_approved", 0) == 0:
-        gaps.append((20, "Generate and approve your first piece of content to activate your Presence score."))
-    if not pb.get("published_last_7"):
-        gaps.append((12, "Approve and publish content this week to maintain an active Presence score."))
-    if not cb.get("has_schedule"):
-        gaps.append((5, "Set a content schedule so HomeBridge builds your presence automatically."))
-    if cb.get("niche_diversity", 0) < 2 and pb.get("total_approved", 0) > 0:
-        gaps.append((5, "Generate content across multiple niches to deepen your Consistency score."))
-    if not gaps:
-        return "Your identity is strong. Keep publishing consistently to maintain your score."
-    gaps.sort(key=lambda x: -x[0])
-    return gaps[0][1]
+def _determine_next_action(dp: dict) -> str:
+    """
+    Return one specific, actionable recommendation based on data points.
+    Priority: setup gaps first, then content gaps, then schedule, then cadence.
+    Internal helper for get_agent_guidance().
+    """
+    if not dp["has_market"]:
+        return "Add your primary market in your Identity settings — it anchors every piece of content to a real place."
+    if dp["niche_count"] == 0:
+        return "Select at least one niche in your Identity settings — your content needs a specialty to be useful to anyone."
+    if not dp["has_bio"]:
+        return "Write a short bio in your Identity settings — it tells the platform who you are and shapes your content voice."
+    if not dp["has_voice"]:
+        return "Define your brand voice in Identity settings — it ensures every post sounds like you, not a template."
+    if dp["total_approved"] == 0:
+        return "Generate and approve your first piece of content to start building your permanent record."
+    if dp["niche_count"] == 1:
+        return "Consider adding a second niche — it expands the topics available to you and strengthens your authority footprint."
+    if not dp["published_last_7"]:
+        if dp["total_approved"] > 0 and not dp["published_last_30"]:
+            return "Your last approved content was more than 30 days ago. Generate and approve something this week to stay visible."
+        return "Approve and publish something this week — consistent presence is how search and AI systems learn to cite you."
+    if not dp["has_schedule"]:
+        return "Set a content schedule so AutoMates builds your presence automatically — even one post per week compounds over time."
+    if dp["cir_count"] < 10:
+        return f"You have {dp['cir_count']} CIR records so far. Keep approving content — 10 records is the first visibility milestone."
+    if dp["cir_count"] < 25:
+        return f"You have {dp['cir_count']} CIR records. At 25, AI search platforms begin to have enough indexed content to cite you consistently."
+    return "Your foundation is solid. Keep publishing consistently — your CIR record compounds with every approval."
+
+
+def _build_progress_indicator(cir_count: int, approved_count: int,
+                               has_schedule: bool, niche_count: int) -> str:
+    """
+    Return a milestone progress string. Never a numerical score.
+    Internal helper for get_agent_guidance().
+    """
+    if cir_count == 0:
+        return "Approve your first post to issue your first CIR record."
+    if cir_count < 10:
+        return f"{cir_count} of 10 CIR records toward your first visibility milestone."
+    if cir_count < 25:
+        return f"{cir_count} of 25 CIR records toward consistent AI search citation."
+    if cir_count < 50:
+        return f"{cir_count} CIR records issued. At 50, you have a substantial authority footprint."
+    return f"{cir_count} CIR records on file. Your permanent record is well established."
 
 
 # ─────────────────────────────────────────────
@@ -2029,16 +2017,16 @@ def generate_compliance_pdf(
     INK_2     = colors.HexColor("#3d3d38")
     INK_3     = colors.HexColor("#787870")
     INK_4     = colors.HexColor("#b0afa6")
-    BLUE      = colors.HexColor("#1749c9")
-    BLUE_DIM  = colors.HexColor("#eef2fb")
-    GREEN     = colors.HexColor("#15803d")
+    BLUE      = colors.HexColor("#1972A8")
+    BLUE_DIM  = colors.HexColor("#EBF8FF")
+    GREEN     = colors.HexColor("#1A7A4A")
     GREEN_DIM = colors.HexColor("#f0fdf4")
     AMBER     = colors.HexColor("#b45309")
     AMBER_DIM = colors.HexColor("#fffbeb")
     RED       = colors.HexColor("#b91c1c")
     RED_DIM   = colors.HexColor("#fef2f2")
-    BG        = colors.HexColor("#f5f4f0")
-    BORDER    = colors.HexColor("#e8e7e0")
+    BG        = colors.HexColor("#FAF9F7")
+    BORDER    = colors.HexColor("#E7E5E4")
     WHITE     = colors.white
 
     conn = get_conn()
@@ -2098,140 +2086,150 @@ def generate_compliance_pdf(
     def rule(): return HRFlowable(width="100%", thickness=0.5, color=BORDER, spaceAfter=8, spaceBefore=4)
     def truncate(s, n=80):
         s = str(s or "")
-        return s[:n] + "…" if len(s) > n else s
-    def fmt_date(s):
-        if not s: return "—"
-        try: return datetime.fromisoformat(s.replace("Z","")).strftime("%b %d, %Y")
-        except: return s[:10]
-
-    def compliance_label(comp_raw):
-        """PDF-local helper — wraps _compliance_verdict with label/color key for ReportLab."""
-        v = _compliance_verdict(comp_raw)
-        if v == "pass":    return ("Verified",   "pass")
-        if v == "warn":    return ("Review",      "warn")
-        if v == "fail":    return ("Attention",   "fail")
-        return ("—", "neutral")
-
-    def verdict_para(comp_raw):
-        label_text, kind = compliance_label(comp_raw)
-        st = {"pass": styles["cell_pass"], "warn": styles["cell_warn"], "fail": styles["cell_fail"]}.get(kind, styles["cell"])
-        return Paragraph(label_text, st)
+        return s[:n] + "..." if len(s) > n else s
 
     buf = io.BytesIO()
-    W   = letter[0] - 1.3*inch
     doc = SimpleDocTemplate(buf, pagesize=letter,
-          leftMargin=0.65*inch, rightMargin=0.65*inch,
-          topMargin=0.65*inch, bottomMargin=0.75*inch)
+        leftMargin=0.75*inch, rightMargin=0.75*inch,
+        topMargin=0.75*inch, bottomMargin=0.75*inch)
+
     story = []
 
     # Header
-    hdr = Table([[
-        Paragraph('<font name="Helvetica-Bold" size="18" color="#0f0f0d">Auto</font><font name="Helvetica-Bold" size="18" color="#C8963C">Mates</font>', styles["body"]),
-        Paragraph('<font color="#787870">Compliance Audit Report</font>', styles["body_small"]),
-    ]], colWidths=[W*0.5, W*0.5])
-    hdr.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(1,0),(1,0),"RIGHT"),("BOTTOMPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0)]))
-    story += [hdr, rule(), sp(4)]
+    story += [
+        Paragraph("AutoMates", styles["label"]),
+        Paragraph("Pre-Publication Review Report", styles["h1"]),
+        sp(4), rule(), sp(4),
+    ]
 
-    # Agent info
-    icw = W/4
-    info = Table([[
-        Table([[Paragraph("AGENT",styles["label"])],[Paragraph(agent_name or "—",styles["h1"])]],colWidths=[icw-8]),
-        Table([[Paragraph("BROKERAGE",styles["label"])],[Paragraph(brokerage or "—",styles["body"])]],colWidths=[icw-8]),
-        Table([[Paragraph("EMAIL",styles["label"])],[Paragraph(email or "—",styles["body"])]],colWidths=[icw-8]),
-        Table([[Paragraph("GENERATED",styles["label"])],[Paragraph(generated_at,styles["body"])]],colWidths=[icw-8]),
-    ]],colWidths=[icw]*4)
-    info.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
-    story += [info, sp(12), rule(), sp(4)]
+    # Agent info block
+    info_data = [
+        ["Agent", agent_name or ""],
+        ["Brokerage", brokerage or ""],
+        ["Email", email or ""],
+        ["Period", f"{date_from or 'All time'} to {date_to or 'Present'}"],
+        ["Generated", generated_at],
+    ]
+    info_table = Table(info_data, colWidths=[1.2*inch, 5.3*inch])
+    info_table.setStyle([
+        ("FONTNAME",  (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTNAME",  (1,0), (1,-1), "Helvetica"),
+        ("FONTSIZE",  (0,0), (-1,-1), 8),
+        ("TEXTCOLOR", (0,0), (0,-1), INK_3),
+        ("TEXTCOLOR", (1,0), (1,-1), INK_2),
+        ("TOPPADDING",(0,0),(-1,-1), 3),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+    ])
+    story += [info_table, sp(8), rule(), sp(4)]
 
-    # Summary tiles
-    def tile(lbl, val, col, sub):
-        return Table([[Paragraph(lbl,styles["label"])],[Paragraph(str(val),ParagraphStyle("tv",fontName="Helvetica-Bold",fontSize=22,textColor=col,leading=26))],[Paragraph(sub,styles["body_small"])]],colWidths=[(W/4)-8])
+    # Summary stats
+    story.append(Paragraph("Summary", styles["h2"]))
+    summary_data = [
+        ["Total Posts Reviewed", str(total)],
+        ["Pre-Publication Review: Passed", str(passing)],
+        ["Review Recommended", str(review_count)],
+        ["Attention Required", str(fail_count)],
+        ["Pre-Publication Review Rate", f"{compliance_rate}%"],
+    ]
+    summary_table = Table(summary_data, colWidths=[3*inch, 3.5*inch])
+    summary_table.setStyle([
+        ("FONTNAME",  (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTNAME",  (1,0), (1,-1), "Helvetica"),
+        ("FONTSIZE",  (0,0), (-1,-1), 9),
+        ("TEXTCOLOR", (0,0), (0,-1), INK_2),
+        ("TEXTCOLOR", (1,0), (1,-1), INK),
+        ("TOPPADDING",(0,0),(-1,-1), 4),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 4),
+        ("LINEBELOW", (0,-1),(-1,-1), 0.5, BORDER),
+    ])
+    story += [summary_table, sp(12), rule(), sp(4)]
 
-    tiles = Table([[
-        tile("TOTAL REVIEWED",  total,           BLUE,  "Items in this report"),
-        tile("COMPLIANCE RATE", f"{compliance_rate}%", GREEN if compliance_rate>=90 else AMBER if compliance_rate>=75 else RED, "Passed compliance check"),
-        tile("VERIFIED",        passing,          GREEN, "Fully compliant"),
-        tile("NEEDS ATTENTION", review_count+fail_count, RED if (review_count+fail_count)>0 else INK_4, "Review or attention flagged"),
-    ]],colWidths=[(W/4)]*4)
-    tiles.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(0,0),BLUE_DIM),("BACKGROUND",(1,0),(1,0),GREEN_DIM if compliance_rate>=75 else AMBER_DIM),
-        ("BACKGROUND",(2,0),(2,0),GREEN_DIM),("BACKGROUND",(3,0),(3,0),RED_DIM if (review_count+fail_count)>0 else BG),
-        ("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),10),("RIGHTPADDING",(0,0),(-1,-1),10),
-        ("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10),
-        ("LINEAFTER",(0,0),(2,0),0.5,BORDER),("BOX",(0,0),(-1,-1),0.5,BORDER),
-    ]))
-    story += [tiles, sp(16), Paragraph("Content Audit Record", styles["h2"]), sp(4)]
+    # Detail table
+    story.append(Paragraph("Content Detail", styles["h2"]))
 
-    if total == 0:
-        story.append(Paragraph("No approved or published content found for this report period.", styles["body"]))
+    if not rows:
+        story.append(Paragraph("No reviewed content in this period.", styles["body"]))
     else:
-        cw = {"date":1.0*inch,"title":2.4*inch,"niche":0.85*inch,"plat":0.9*inch,"verdict":0.75*inch,"approved":1.1*inch}
-        tdata = [[Paragraph(h,styles["cell_bold"]) for h in ["DATE SAVED","CONTENT","NICHE","PLATFORMS","COMPLIANCE","APPROVED AT"]]]
-
-        # row_meta tracks (row_index_in_tdata, bg_color, is_notes_subrow) for TableStyle
+        cw = {"date": 0.9*inch, "niche": 1.2*inch, "headline": 2.2*inch,
+              "fh": 0.7*inch, "nar": 0.7*inch, "status": 0.8*inch}
+        header = [
+            Paragraph("Date", styles["label"]),
+            Paragraph("Niche", styles["label"]),
+            Paragraph("Headline", styles["label"]),
+            Paragraph("Fair Housing", styles["label"]),
+            Paragraph("NAR Standards", styles["label"]),
+            Paragraph("Status", styles["label"]),
+        ]
+        tdata    = [header]
         row_meta = []
-        data_row_idx = 1  # header is row 0
+        data_row_idx = 1
 
         def _build_notes_text(comp_raw):
-            """
-            Build the PaperTrail™ verification source string for Item #2.
-            Prefers disclosureChecks (new format) then falls back to notes array.
-            Format: ✓ pass | Authority  /  ⚠ warn | Authority | Message
-            """
             try:
-                comp = json.loads(comp_raw) if isinstance(comp_raw, str) else comp_raw
-                if not isinstance(comp, dict):
-                    return "No compliance data."
-                # Prefer disclosureChecks (produced by the rebuilt compliance engine)
-                checks = comp.get("disclosureChecks", [])
-                if checks:
-                    return "  ·  ".join(checks[:12])  # cap at 12 to avoid PDF overflow
-                # Fallback: notes array (older records)
-                notes = comp.get("notes", [])
-                if notes:
-                    return "  ·  ".join(str(n) for n in notes[:8])
-                return "No detailed rule results available for this item."
+                comp  = json.loads(comp_raw) if isinstance(comp_raw, str) else (comp_raw or {})
+                notes = []
+                for check in comp.get("checks", []):
+                    if check.get("level") in ("warn", "fail") and check.get("message"):
+                        notes.append(check["message"])
+                return " | ".join(notes) if notes else ""
             except Exception:
-                return "Could not parse compliance data."
+                return ""
 
         for r in rows:
-            try: cd = json.loads(r["content"]) if isinstance(r["content"],str) else r["content"]
-            except: cd = {}
-            title   = cd.get("headline") or cd.get("title") or cd.get("body","")
-            display = truncate(title, 90) or "—"
+            verdict = _compliance_verdict(r["compliance"])
+            if verdict == "pass":
+                status_style = styles["cell_pass"]
+                status_label = "Reviewed"
+                notes_bg     = GREEN_DIM
+            elif verdict == "warn":
+                status_style = styles["cell_warn"]
+                status_label = "Review Recommended"
+                notes_bg     = AMBER_DIM
+            else:
+                status_style = styles["cell_fail"]
+                status_label = "Attention Required"
+                notes_bg     = RED_DIM
+
             try:
-                plats    = json.loads(r["copied_platforms"] or "[]")
-                plat_str = ", ".join(plats) if plats else "Pending"
-            except: plat_str = "Pending"
-            _, kind = compliance_label(r["compliance"])
-            main_bg  = {"pass":colors.HexColor("#f9fef9"),"warn":colors.HexColor("#fffdf5"),"fail":colors.HexColor("#fff9f9")}.get(kind,WHITE)
-            notes_bg = {"pass":colors.HexColor("#f4fdf4"),"warn":colors.HexColor("#fdf9ee"),"fail":colors.HexColor("#fdf4f4")}.get(kind,colors.HexColor("#f8f8f6"))
+                cd = json.loads(r["content"]) if r["content"] else {}
+            except Exception:
+                cd = {}
+            try:
+                comp = json.loads(r["compliance"]) if r["compliance"] else {}
+            except Exception:
+                comp = {}
 
-            # Main content row
-            tdata.append([
-                Paragraph(fmt_date(r["saved_at"]),styles["cell"]),
-                Paragraph(display,styles["cell"]),
-                Paragraph(r["niche"] or "—",styles["cell"]),
-                Paragraph(truncate(plat_str,40),styles["cell"]),
-                verdict_para(r["compliance"]),
-                Paragraph(fmt_date(r["approved_at"] or r["published_at"]),styles["cell"]),
-            ])
-            row_meta.append((data_row_idx, main_bg, False))
+            date_str = (r["approved_at"] or r["saved_at"] or "")[:10]
+            headline = truncate(cd.get("headline") or cd.get("title") or "", 60)
+            fh_val   = comp.get("fairHousing") or comp.get("fair_housing") or ""
+            nar_val  = comp.get("narStandards") or comp.get("nar_standards") or ""
+
+            data_row = [
+                Paragraph(date_str, styles["cell"]),
+                Paragraph(truncate(r["niche"] or "", 20), styles["cell"]),
+                Paragraph(headline, styles["cell"]),
+                Paragraph(str(fh_val)[:12], styles["cell"]),
+                Paragraph(str(nar_val)[:12], styles["cell"]),
+                Paragraph(status_label, status_style),
+            ]
+            bg = BLUE_DIM if data_row_idx % 2 == 0 else WHITE
+            tdata.append(data_row)
+            row_meta.append((data_row_idx, bg, False))
             data_row_idx += 1
 
-            # Notes sub-row (Item #2 — PaperTrail™ verification sources)
             notes_text = _build_notes_text(r["compliance"])
-            tdata.append([
-                Paragraph(notes_text, ParagraphStyle("notes_sub", fontName="Helvetica",
-                    fontSize=6.5, textColor=INK_3, leading=9, leftIndent=4)),
-                "", "", "", "", ""
-            ])
-            row_meta.append((data_row_idx, notes_bg, True))
-            data_row_idx += 1
+            if notes_text:
+                tdata.append([
+                    Paragraph(notes_text, ParagraphStyle("notes_sub", fontName="Helvetica",
+                        fontSize=6.5, textColor=INK_3, leading=9, leftIndent=4)),
+                    "", "", "", "", ""
+                ])
+                row_meta.append((data_row_idx, notes_bg, True))
+                data_row_idx += 1
 
         ct = Table(tdata, colWidths=list(cw.values()), repeatRows=1)
         ts = [
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f0eff8")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,0),7.5),
+            ("BACKGROUND",(0,0),(-1,0),BLUE_DIM),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,0),7.5),
             ("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
             ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
             ("LINEBELOW",(0,0),(-1,0),0.75,BLUE),("BOX",(0,0),(-1,-1),0.5,BORDER),
@@ -2301,7 +2299,7 @@ def get_broker_office_stats(broker_id: int) -> list:
         total_reviewed  = (stats["approved"] or 0) + (stats["published"] or 0)
         compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
 
-        # Lightweight identity score (extracted helper — Session 12)
+        # Lightweight identity score (broker/team dashboards only — internal use)
         published_count = stats["published"] or 0
         identity_score  = _calc_lightweight_identity(c, uid, compliance_rate, published_count)
 
@@ -2383,7 +2381,7 @@ def get_team_stats(team_id: int) -> list:
         total_reviewed  = (stats["approved"] or 0) + (stats["published"] or 0)
         compliance_rate = round((passing / total_reviewed) * 100) if total_reviewed > 0 else None
 
-        # Lightweight identity score (extracted helper — Session 12)
+        # Lightweight identity score (broker/team dashboards only — internal use)
         published_count = stats["published"] or 0
         identity_score  = _calc_lightweight_identity(c, uid, compliance_rate, published_count)
 
@@ -2466,7 +2464,7 @@ def get_broker_agent_content(broker_id: int, agent_id: int, limit: int = 20) -> 
             "niche":       r["niche"] or "",
             "status":      r["status"] or "pending",
             "headline":    cd.get("headline", ""),
-            "post":        (cd.get("post", "")[:200] + "…") if len(cd.get("post","")) > 200 else cd.get("post",""),
+            "post":        (cd.get("post", "")[:200] + "...") if len(cd.get("post","")) > 200 else cd.get("post",""),
             "compliance":  comp_label,
             "platforms":   plats,
             "cir_id":      r["cir_id"] or "",
@@ -2519,13 +2517,6 @@ def set_trial(user_id: int, days: int = 14):
     trial_ends = (datetime.utcnow() + timedelta(days=days)).isoformat()
     conn = get_conn()
     conn.execute("UPDATE users SET plan='trial', sub_status='trial', trial_ends_at=? WHERE id=?", (trial_ends, user_id))
-    conn.commit(); conn.close()
-
-def activate_subscription(user_id: int, plan: str, billing_cycle: str,
-                           stripe_customer_id: str, stripe_subscription_id: str):
-    conn = get_conn()
-    conn.execute("UPDATE users SET plan=?, billing_cycle=?, sub_status='active', stripe_customer_id=?, stripe_subscription_id=? WHERE id=?",
-                 (plan, billing_cycle, stripe_customer_id, stripe_subscription_id, user_id))
     conn.commit(); conn.close()
 
 def cancel_subscription(user_id: int):
@@ -2722,7 +2713,6 @@ def signals_purge_expired():
 # USAGE LIMITS
 # ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
 # USAGE SYSTEM — two-counter model
 #
 # PRIMARY UNIT: approved_post_count
@@ -2739,216 +2729,294 @@ def signals_purge_expired():
 # TRIAL: 10 lifetime generations, never resets.
 #
 # UNLIMITED_ROLES: super_admin and admin bypass all checks entirely.
-# ─────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
-# NICHE TAXONOMY — Session 54 — SINGLE SOURCE OF TRUTH
+# NICHE TAXONOMY v2.1 — Session 56 — SINGLE SOURCE OF TRUTH
 # ─────────────────────────────────────────────
-# Structure: Asset Class → Primary Niche → Sub-niches
+# Structure: Asset Class > Primary Niche > Sub-niches
 # This constant is the canonical definition for the entire platform.
 # app.js, onboarding.html, and content_engine.py all derive from this.
 # Never define niche names anywhere else. Never use fuzzy matching.
 # If a niche name changes here, update all consuming files in the same session.
 #
-# Asset Classes: Residential, Commercial, Industrial & Infrastructure,
-#                Land, Special Purpose
-# Primary Niches: the named specialty an agent selects
-# Sub-niches: the specific client or situation focus within that primary
+# Asset Classes: Residential (12), Commercial (6), Investment (4),
+#                Land (4), Industrial and Infrastructure (4), Special Purpose (5)
+# Total: 35 primary niches
 # ─────────────────────────────────────────────
 
 NICHE_TAXONOMY = {
 
-    # ── RESIDENTIAL ───────────────────────────────────────────────────────────
+    # RESIDENTIAL (12 primary niches)
     "Residential": {
 
+        "First-Time Buyers": [
+            "FHA and low-down-payment buyers",
+            "Down payment assistance program buyers",
+            "Rent-to-own and lease-option buyers",
+            "Millennial and Gen Z buyers",
+            "Co-buying partners (friends, siblings, unmarried couples)",
+        ],
+
         "Single Family": [
-            "First-time buyers",
-            "FHA & entry-level buyers",
-            "Move-up buyers",
-            "Growing families & school-district movers",
-            "Luxury buyers",
-            "High-end relocations & second-home buyers",
-            "Seniors 55+ & downsizers",
-            "Age-in-place transitions",
-            "Divorce & life transitions",
-            "Separation sales & major-life-change moves",
-            "Multigenerational families",
-            "Adult children & aging parents moving in",
-            "Relocation buyers",
-            "Corporate relocations & job-transfer moves",
-            "Single-family rental investors",
-            "Turnkey buyers & long-term rental investors",
+            "Move-up buyers and growing families",
+            "School-district movers",
+            "Suburban lifestyle buyers",
+            "Empty nesters selling family homes",
+            "Sellers preparing homes for market",
+        ],
+
+        "Luxury Residential": [
+            "High-end buyers ($1M+)",
+            "Ultra-luxury and UHNW clients",
+            "Second-home and vacation-property buyers",
+            "International buyers",
+            "Off-market and private listings",
         ],
 
         "Condominiums": [
-            "Urban lifestyle & walkable-neighborhood buyers",
-            "Downsizers & retirees",
-            "Low-maintenance living buyers",
-            "Vacation-home & resort-area buyers",
-            "Short-term-rental-friendly condo buyers",
+            "Urban lifestyle and walkable-neighborhood buyers",
+            "Downsizers and retirees seeking low maintenance",
+            "Vacation-home and resort-area condo buyers",
             "First-time condo buyers",
-            "Affordability-focused condo buyers",
+            "HOA-savvy buyers and investors",
         ],
 
         "Multifamily (2-4 Units)": [
-            "House hackers & owner-occupants",
-            "Duplex, triplex & quadplex buyers",
-            "Small investors & first rental-property buyers",
+            "House hackers and owner-occupants",
+            "Duplex, triplex, and quadplex buyers",
+            "Small investors and first rental-property buyers",
             "Mom-and-pop landlords",
-            "Multigenerational households",
-            "Shared-cost family living",
-            "Value-add investors",
-            "Repositioning buyers & light-rehab operators",
+            "Value-add and light-rehab investors",
         ],
 
-        "Manufactured & Mobile Homes": [
-            "Affordable-housing & budget-conscious buyers",
-            "Land-lease community buyers",
-            "Manufactured-home community buyers",
-            "Senior mobile-home buyers",
-            "Retirement-community buyers",
+        "Seniors and Downsizing": [
+            "Empty nesters",
+            "Age-in-place transitions",
+            "55+ community buyers",
+            "Assisted living and care transitions",
+            "Multigenerational family moves",
+            "Rightsizing (larger or smaller based on life stage)",
         ],
 
-        "Residential Specialty": [
-            "New construction buyers & builder-direct clients",
-            "Custom-home clients",
-            "Probate & inherited property sellers",
+        "Probate and Estate Sales": [
+            "Inherited property sellers",
             "Estate-sale families",
-            "Divorce sellers & court-driven transactions",
-            "Relocation sellers & job-transfer households",
-            "Probate and trust clients",
-            "Heirs managing inherited homes",
-            "Short-term rental investors",
-            "Vacation-rental operators",
+            "Trust-held property transactions",
+            "Court-appointed sales",
+            "Heirs managing out-of-state inherited homes",
+        ],
+
+        "Divorce and Life Transitions": [
+            "Court-ordered property sales",
+            "Separation and division of assets",
+            "Major life-change relocations (job loss, health, family crisis)",
+            "Pre-divorce property valuation",
+            "Collaborative divorce real estate",
+        ],
+
+        "Relocation": [
+            "Corporate relocation buyers and sellers",
+            "Military PCS moves",
+            "Job-transfer households",
+            "Remote-worker relocations",
+            "International relocation to the US",
+        ],
+
+        "Veterans and Military": [
+            "VA loan buyers",
+            "PCS timing and dual-transaction management",
+            "Military family housing",
+            "Veteran first-time buyers",
+            "Surviving spouse VA eligibility",
+        ],
+
+        "New Construction": [
+            "Builder-rep and spec-home sales",
+            "Custom-home clients",
+            "New community and master-planned buyers",
+            "Builder incentive and rate-buydown navigation",
+            "Lot selection and upgrade guidance",
+        ],
+
+        "Manufactured and Mobile Homes": [
+            "Affordable-housing and budget-conscious buyers",
+            "Land-lease community buyers",
+            "Senior mobile-home park buyers",
+            "Retirement-community manufactured homes",
+            "Manufactured home on owned land",
         ],
     },
 
-    # ── COMMERCIAL ────────────────────────────────────────────────────────────
+    # COMMERCIAL (6 primary niches)
     "Commercial": {
 
         "Retail": [
-            "Small business owners & storefront tenants",
-            "Franchise buyers",
-            "Owner-operators & local service businesses",
-            "Boutique retailers",
-            "Passive investors & income-focused buyers",
-            "1031 exchange buyers",
-            "Shopping center investors",
-            "Strip-center investors & mixed retail buyers",
+            "Small business owners and storefront tenants",
+            "Franchise location buyers",
+            "Shopping center and strip-center investors",
+            "NNN lease investors",
+            "Restaurant and food-service spaces",
         ],
 
         "Office": [
-            "Professional service firms",
-            "Law firms & accounting firms",
-            "Medical groups & dental practices",
-            "Therapy practices & behavioral health",
-            "Small office users & coworking operators",
-            "Flex-office buyers",
-            "Corporate users & headquarters relocations",
-            "Satellite-office buyers",
-        ],
-
-        "Industrial": [
-            "Logistics operators & warehouse users",
-            "Distribution companies",
-            "Fulfillment operators & e-commerce sellers",
-            "Last-mile delivery companies",
-            "Manufacturers & light industrial users",
-            "Assembly operations",
-            "Cold storage users & food distributors",
-            "Temperature-controlled operators",
+            "Professional service firms (law, accounting, consulting)",
+            "Medical and dental office users",
+            "Small office and coworking operators",
+            "Corporate headquarters relocations",
+            "Flex-office and hybrid-workspace buyers",
         ],
 
         "Hospitality": [
-            "Hotel investors & boutique-hotel buyers",
-            "Owner-operators & resort operators",
+            "Hotel investors and boutique-hotel buyers",
             "Extended-stay operators",
+            "Resort and leisure-market buyers",
             "Short-term lodging investors",
-            "Leisure-market buyers",
+            "Owner-operated hospitality properties",
+        ],
+
+        "Multifamily (5+ Units)": [
+            "Apartment building investors",
+            "Workforce and affordable housing operators",
+            "Value-add multifamily repositioning",
+            "Syndication and joint-venture investors",
+            "Student housing operators",
+        ],
+
+        "Mixed-Use and 1031 Exchange": [
+            "1031 exchange buyers (tax-deferred swaps)",
+            "Mixed-use property buyers (live-work, retail-residential)",
+            "NNN and passive-income investors",
+            "Portfolio diversification buyers",
+            "Opportunity Zone investors",
         ],
 
         "Commercial Specialty": [
-            "1031 exchange investors & tax-deferred swap buyers",
-            "Mixed-use buyers & live-work property users",
-            "Business expansion buyers",
-            "Franchise expansion operators",
+            "Business expansion and franchise growth",
+            "Special-use commercial (car washes, gas stations, auto service)",
+            "Owner-operator commercial buyers",
+            "Tenant representation",
         ],
     },
 
-    # ── INDUSTRIAL & INFRASTRUCTURE ───────────────────────────────────────────
-    "Industrial & Infrastructure": {
+    # INVESTMENT (4 primary niches) — NEW in v2.1
+    "Investment": {
 
-        "Data Centers": [
-            "Technology operators & cloud infrastructure users",
-            "Institutional investors",
-            "Specialized infrastructure buyers",
-            "Hyperscale campus buyers",
-            "Edge data center operators",
-            "Colocation facility users",
+        "Fix and Flip": [
+            "Rehab investors and ARV specialists",
+            "Wholesale deal sourcing",
+            "Contractor-network buyers",
+            "First-time flip investors",
+            "High-volume flip operators",
         ],
 
-        "Light Industrial Flex": [
-            "Trades businesses & contractors",
-            "Repair businesses",
-            "Small manufacturers",
-            "Service-and-storage users",
+        "Long-Term Rentals": [
+            "Buy-and-hold portfolio builders",
+            "BRRRR strategy investors",
+            "Turnkey rental buyers",
+            "Section 8 and affordable rental operators",
+            "Out-of-state rental investors",
         ],
 
-        "Industrial Specialty": [
-            "Telecom & fiber infrastructure operators",
-            "Powered shell buyers",
-            "Network facility operators",
+        "Short-Term Rentals": [
+            "Airbnb and VRBO operators",
+            "Vacation rental investors",
+            "Mid-term rental operators (30-90 day stays)",
+            "Furnished rental investors",
+            "STR regulation-savvy buyers",
+        ],
+
+        "Property Management": [
+            "Landlord services and tenant placement",
+            "Portfolio management and owner reporting",
+            "Maintenance coordination and vendor management",
+            "Rent collection and lease enforcement",
+            "Property management company operators",
         ],
     },
 
-    # ── LAND ──────────────────────────────────────────────────────────────────
+    # LAND (4 primary niches)
     "Land": {
 
         "Raw Land": [
-            "Rural lifestyle buyers & homesteaders",
-            "Off-grid buyers",
+            "Rural lifestyle buyers and homesteaders",
+            "Off-grid and self-sufficient buyers",
             "Recreational land buyers",
-            "Agricultural users & ranch buyers",
+            "Acreage and ranchette buyers",
         ],
 
         "Development Land": [
-            "Builders & subdivision developers",
+            "Builders and subdivision developers",
             "Infill developers",
-            "Entitlement buyers & land assemblers",
-            "Spec developers",
+            "Entitlement buyers and land assemblers",
+            "Spec and build-to-rent developers",
         ],
 
         "Agricultural Land": [
-            "Farmers & ranchers",
+            "Farmers and ranchers",
             "Crop producers",
             "Legacy family-land buyers",
             "Conservation-minded buyers",
         ],
 
         "Land Specialty": [
-            "Recreational buyers & hunting land buyers",
-            "Timberland buyers",
+            "Recreational and hunting land buyers",
+            "Timberland investors",
             "Conservation easement buyers",
-            "Transitional land investors",
-            "Future-development buyers",
+            "Transitional land and future-development investors",
+            "Water-rights and mineral-rights properties",
         ],
     },
 
-    # ── SPECIAL PURPOSE ───────────────────────────────────────────────────────
+    # INDUSTRIAL AND INFRASTRUCTURE (4 primary niches)
+    "Industrial and Infrastructure": {
+
+        "Data Centers": [
+            "Technology operators and cloud infrastructure users",
+            "Hyperscale campus buyers",
+            "Edge data center operators",
+            "Colocation facility users",
+            "Institutional data center investors",
+        ],
+
+        "Warehouse and Logistics": [
+            "Distribution and fulfillment operators",
+            "Last-mile delivery locations",
+            "Cold storage and temperature-controlled facilities",
+            "E-commerce logistics facilities",
+            "Third-party logistics (3PL) operators",
+        ],
+
+        "Light Industrial Flex": [
+            "Trades businesses and contractors",
+            "Small manufacturers and assembly operations",
+            "Service-and-storage users",
+            "Maker spaces and creative industrial",
+        ],
+
+        "Industrial Specialty": [
+            "Telecom and fiber infrastructure operators",
+            "Powered shell buyers",
+            "Network facility operators",
+            "Specialized infrastructure investors",
+        ],
+    },
+
+    # SPECIAL PURPOSE (5 primary niches)
     "Special Purpose": {
 
         "Healthcare": [
-            "Assisted living buyers & senior-care operators",
-            "Skilled nursing buyers",
-            "Medical campus buyers",
-            "Behavioral health buyers",
-            "Therapy-clinic users",
+            "Assisted living and senior-care operators",
+            "Skilled nursing facility buyers",
+            "Medical campus and MOB investors",
+            "Behavioral health facility buyers",
+            "Urgent care and therapy-clinic users",
         ],
 
         "Institutional": [
-            "Schools & charter-school operators",
-            "Religious organizations & worship facilities",
-            "Nonprofits & community organizations",
+            "Schools and charter-school operators",
+            "Religious organizations and worship facilities",
+            "Nonprofits and community organizations",
+            "Government-use property buyers",
         ],
 
         "Storage": [
@@ -2959,26 +3027,40 @@ NICHE_TAXONOMY = {
         ],
 
         "Special Purpose Specialty": [
-            "Daycare operators & childcare buyers",
-            "Government-use property buyers",
-            "Entertainment venues & event-center operators",
+            "Daycare operators and childcare facility buyers",
+            "Entertainment venues and event centers",
+            "Sports and recreation facility operators",
+            "Car wash and auto-service investors",
+        ],
+
+        "Distressed and Pre-Foreclosure": [
+            "Short sale specialists",
+            "Foreclosure and REO buyers",
+            "Loss mitigation and lender negotiation",
+            "Pre-foreclosure intervention and counseling",
+            "Homeowner hardship transitions",
         ],
     },
 }
 
-# ── Compliance profile map — keyed to Asset Class ────────────────────────────
+# Compliance profile map — keyed to Asset Class
 # Used by content_engine.py to select the right compliance check profile.
 # Derived from NICHE_TAXONOMY asset class keys. Do not add keys here that
 # are not asset class names in NICHE_TAXONOMY.
+# Investment profile is new in v2.1 — includes SEC, FinCEN, and financial
+# projection rules in addition to standard residential checks.
+# Data Centers use the data_center profile; all other Industrial and
+# Infrastructure niches use the commercial profile.
 ASSET_CLASS_COMPLIANCE = {
-    "Residential":                "residential",
-    "Commercial":                 "commercial",
-    "Industrial & Infrastructure": "commercial",
-    "Land":                       "residential",
-    "Special Purpose":            "commercial",
+    "Residential":                  "residential",
+    "Commercial":                   "commercial",
+    "Investment":                   "investment",
+    "Land":                         "residential",
+    "Industrial and Infrastructure": "commercial",   # Data Centers overridden per-niche in content_engine.py
+    "Special Purpose":              "commercial",
 }
 
-# ── Helper: get all primary niche names across all asset classes ──────────────
+# Helper: get all primary niche names across all asset classes
 def get_all_primary_niches() -> list:
     """Returns a flat list of all primary niche names from NICHE_TAXONOMY."""
     result = []
@@ -2986,7 +3068,7 @@ def get_all_primary_niches() -> list:
         result.extend(primaries.keys())
     return result
 
-# ── Helper: get asset class for a given primary niche name ────────────────────
+# Helper: get asset class for a given primary niche name
 def get_asset_class_for_niche(primary_niche: str) -> str:
     """Returns the asset class name for a given primary niche. Empty string if not found."""
     for asset_class, primaries in NICHE_TAXONOMY.items():
@@ -2994,9 +3076,15 @@ def get_asset_class_for_niche(primary_niche: str) -> str:
             return asset_class
     return ""
 
-# ── Helper: get compliance profile for a primary niche ───────────────────────
+# Helper: get compliance profile for a primary niche
 def get_compliance_profile_for_niche(primary_niche: str) -> str:
-    """Returns the compliance profile string for a primary niche."""
+    """
+    Returns the compliance profile string for a primary niche.
+    Data Centers use the data_center profile regardless of asset class.
+    All other niches derive their profile from their asset class.
+    """
+    if primary_niche == "Data Centers":
+        return "data_center"
     asset_class = get_asset_class_for_niche(primary_niche)
     return ASSET_CLASS_COMPLIANCE.get(asset_class, "residential")
 
@@ -3027,18 +3115,17 @@ PLAN_LIMITS = {
     "starter":         {"posts": 50,   "backstop": 150,  "niches": 999, "videos": 5,  "lifetime": False},
     "professional":    {"posts": 60,   "backstop": 200,  "niches": 999, "videos": 20, "lifetime": False},
     "power":           {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 30, "lifetime": False},
-    # ── COACH — added Session 49 ─────────────────────────────────────────────
+    # COACH — added Session 49
     # B2B plan for real estate coaches. $199/month. Stripe product created
     # Session 48. Nav/context built Session 50.
     "coach":           {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 20, "lifetime": False},
-    # ── INSIDER — DO NOT REMOVE ──────────────────────────────────────────────
+    # INSIDER — DO NOT REMOVE
     # Granted manually by Kevin to influencer agents, beta evaluators, and
     # HomeBridge Group staff who need full platform access at no charge.
     # Never self-serve. Never in Stripe. Kevin sets plan="insider" directly
     # in the DB via the admin panel or SQL. Role stays "agent" — no admin
     # privileges. Billing panel is hidden for this plan. Never delete this key.
     "insider":         {"posts": 100,  "backstop": 350,  "niches": 999, "videos": 30, "lifetime": False},
-    # ─────────────────────────────────────────────────────────────────────────
     # Legacy keys — kept so existing DB rows never break
     "agent":           {"posts": 30,   "backstop": 90,   "niches": 999, "videos": 0,  "lifetime": False},
     "team":            {"posts": 75,   "backstop": 225,  "niches": 999, "videos": 0,  "lifetime": False},
@@ -3061,7 +3148,7 @@ def _get_plan_limits(plan: str) -> dict:
 
 def _compute_next_billing_reset(reset_day: int) -> datetime:
     """
-    Compute the next billing reset datetime from a day-of-month (1–28).
+    Compute the next billing reset datetime from a day-of-month (1-28).
     If today is before reset_day this month, reset is this month.
     If today is on or after reset_day, reset is next month.
     Clamps to 28 to avoid Feb/short-month issues.
@@ -3270,7 +3357,7 @@ def record_generation(user_id: int, role: str) -> None:
 
 def record_post_approval(user_id: int, role: str) -> None:
     """
-    Increment approved_post_count when a CIR is issued (status → approved).
+    Increment approved_post_count when a CIR is issued (status approved).
     This is the primary billing counter.
     Never called for UNLIMITED_ROLES.
     """
@@ -3317,7 +3404,7 @@ def set_billing_reset_day(user_id: int, day: int) -> None:
     """
     Set the day-of-month on which this agent's billing period resets.
     Called by the Stripe webhook on subscription creation.
-    Clamped to 1–28 to avoid month-end edge cases.
+    Clamped to 1-28 to avoid month-end edge cases.
     """
     day = min(max(int(day), 1), 28)
     conn = get_conn()
@@ -3357,7 +3444,7 @@ def activate_subscription(user_id: int, plan: str, billing_cycle: str,
     conn.close()
 
 
-# ── Keep usage_check and usage_increment as thin compatibility shims ──
+# Keep usage_check and usage_increment as thin compatibility shims
 # These are still imported by content_engine.py and app.py in places.
 # They now delegate to the new two-counter system.
 # Remove these once all call sites are updated.
@@ -4050,7 +4137,7 @@ def schedule_row_with_days(row) -> dict:
 # and monthly video limit enforcement.
 # ─────────────────────────────────────────────
 
-# ── Profile photo ────────────────────────────────────────────────────────────
+# Profile photo
 
 def profile_photo_save(user_id: int, photo_bytes: bytes) -> bool:
     """
@@ -4102,7 +4189,7 @@ def profile_photo_exists(user_id: int) -> bool:
     return bool(row and row["has_profile_photo"])
 
 
-# ── Signed photo tokens ───────────────────────────────────────────────────────
+# Signed photo tokens
 
 def photo_token_create(user_id: int) -> str:
     """
@@ -4161,7 +4248,7 @@ def photo_token_consume(token: str) -> None:
     conn.close()
 
 
-# ── Video limit enforcement ───────────────────────────────────────────────────
+# Video limit enforcement
 
 def _video_reset_if_due(conn, user_id: int, row: dict) -> dict:
     """
@@ -4328,7 +4415,7 @@ def apply_video_topup(user_id: int) -> dict:
     }
 
 
-# ── Video jobs ────────────────────────────────────────────────────────────────
+# Video jobs
 
 def video_job_create(user_id: int, library_item_id: Optional[int],
                      script_preview: str, photo_token: str) -> dict:
@@ -4456,7 +4543,7 @@ def _video_job_row(row) -> dict:
     }
 
 
-# ── HeyGen avatar ID management ───────────────────────────────────────────────
+# HeyGen avatar ID management
 
 def set_heygen_avatar_id(user_id: int, avatar_id: str) -> None:
     """
@@ -4495,10 +4582,10 @@ def get_video_identity(user_id: int) -> dict:
     """
     Return the video identity state for an agent.
     Used by POST /video/render to determine render path:
-      - heygen_photo_avatar_id: set → use stored Photo Avatar (fast path, Session 50+)
-      - has_photo: True → create Photo Avatar first, then render
-      - heygen_avatar_id: set → use Instant Avatar (future upgrade path)
-      - neither → render not possible, agent needs to upload a photo
+      - heygen_photo_avatar_id: set use stored Photo Avatar (fast path, Session 50+)
+      - has_photo: True create Photo Avatar first, then render
+      - heygen_avatar_id: set use Instant Avatar (future upgrade path)
+      - neither render not possible, agent needs to upload a photo
     """
     conn = get_conn()
     c    = conn.cursor()
@@ -4523,7 +4610,7 @@ def get_video_identity(user_id: int) -> dict:
     }
 
 
-# ── Voice Identity — LMNT voice cloning — Session 51 ─────────────────────────
+# Voice Identity — LMNT voice cloning — Session 51
 
 def set_lmnt_voice_id(user_id: int, voice_id: str) -> None:
     """
