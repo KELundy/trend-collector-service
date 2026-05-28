@@ -278,12 +278,13 @@ async def get_connections(current_user=Depends(get_current_user)):
             fb_conn = database.get_platform_connection(current_user["id"], "facebook")
             has_page_token = bool(fb_conn and fb_conn.get("page_token", "").strip())
         safe.append({
-            "platform":       c["platform"],
-            "handle":         c.get("platform_handle", ""),
-            "connected_at":   c.get("connected_at", ""),
-            "expires_at":     c.get("expires_at", ""),
-            "is_expired":     _is_expired(c.get("expires_at", "")),
-            "has_page_token": has_page_token,
+            "platform":          c["platform"],
+            "handle":            c.get("platform_handle", ""),
+            "connected_at":      c.get("connected_at", ""),
+            "expires_at":        c.get("expires_at", ""),
+            "is_expired":        _is_expired(c.get("expires_at", "")),
+            "days_until_expiry": _days_until_expiry(c.get("expires_at", "")),
+            "has_page_token":    has_page_token,
         })
     return {"connections": safe}
 
@@ -827,6 +828,18 @@ def _is_expired(expires_at: str) -> bool:
         return datetime.utcnow() > datetime.fromisoformat(expires_at)
     except Exception:
         return False
+
+
+def _days_until_expiry(expires_at: str) -> Optional[int]:
+    """Return whole days until token expires, or None if no expiry set.
+    Returns 0 if already expired."""
+    if not expires_at:
+        return None
+    try:
+        delta = datetime.fromisoformat(expires_at) - datetime.utcnow()
+        return max(0, delta.days)
+    except Exception:
+        return None
 
 
 def _format_post_text(content: dict, platform: str) -> str:
