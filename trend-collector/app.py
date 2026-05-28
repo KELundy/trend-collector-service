@@ -3177,6 +3177,73 @@ async def admin_reset_niches(user_id: int, current_user: dict = Depends(get_curr
     }
 
 
+@app.post("/admin/users/{user_id}/purge-stale-schedules")
+async def admin_purge_stale_schedules(user_id: int, current_user: dict = Depends(get_current_user)):
+    """
+    Super admin only — delete schedule records whose niche column does not match
+    any of the agent's current primaryNiches.
+
+    This fixes the pre-migration orphan problem: schedule rows created under old
+    taxonomy names that were never cleaned up by Part A of the Scheduler-Niche
+    Lifecycle (which only removes niches that were present in primaryNiches at
+    save time, not rows that pre-date the taxonomy migration).
+
+    Does NOT touch the agent's niche selections, setup_json, library, or CIR records.
+    Only deletes schedule rows whose niche name is no longer valid for this agent.
+
+    Session 57 — fixes Kevin's 9-entry schedule panel (should be 3).
+    """
+    _require_super_admin(current_user)
+
+    from database import log_audit_event as _lae_ps
+
+    # Read the agent's current primaryNiches
+    current_setup   = get_agent_setup(user_id) or {}
+    current_niches  = set(current_setup.get("primaryNiches", []) or [])
+
+    # Read all schedule rows for this user
+    all_schedules   = schedules_get_all(user_id)
+
+    stale   = [s for s in all_schedules if s["niche"] not in current_niches]
+    valid   = [s for s in all_schedules if s["niche"] in current_niches]
+
+    deleted_niches  = []
+    deleted_count   = 0
+    for s in stale:
+        removed = schedule_delete(user_id, s["niche"])
+        if removed:
+            deleted_niches.append(s["niche"])
+            deleted_count += 1
+
+    _lae_ps(
+        actor_id  = current_user["id"],
+        action    = "admin_purge_stale_schedules",
+        target_id = user_id,
+        detail    = (
+            f"Purged {deleted_count} stale schedule(s) for user {user_id}. "
+            f"Deleted niches: {deleted_niches}. "
+            f"Retained niches: {[s['niche'] for s in valid]}."
+        ),
+    )
+
+    print(f"[Admin] Purged {deleted_count} stale schedule(s) for user {user_id}. "
+          f"Deleted: {deleted_niches}. Retained: {[s['niche'] for s in valid]}.")
+
+    return {
+        "ok":               True,
+        "user_id":          user_id,
+        "current_niches":   sorted(current_niches),
+        "deleted_count":    deleted_count,
+        "deleted_niches":   deleted_niches,
+        "retained_niches":  [s["niche"] for s in valid],
+        "message": (
+            f"{deleted_count} stale schedule record(s) deleted. "
+            f"{len(valid)} valid schedule(s) retained. "
+            f"Agent's active niches: {sorted(current_niches)}."
+        ),
+    }
+
+
 @app.post("/admin/create-user")
 async def admin_create_user(request: Request,
                              current_user: dict = Depends(get_current_user)):
