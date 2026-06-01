@@ -361,18 +361,22 @@ def _get_market_rss_feeds(market: str) -> list:
     return matched
 
 
-def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
+def _fetch_rss_signals(market: str, cutoff_dt: datetime, context: str = "agent") -> list:
     """
     Tier 0 — Fetch RSS feeds via rss2json.com API and return signals in the
-    same dict shape as Claude signals. Always includes all national feeds.
-    Market-specific feeds are added based on the agent's market string.
+    same dict shape as Claude signals.
+
+    context='agent'        — pulls AGENT_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+                             + market-matched MARKET_RSS_FEEDS (consumer-facing).
+    context='hb_marketing' — pulls HB_MARKETING_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+                             only (no market feeds; HB Marketing is national-audience content).
 
     Uses rss2json.com as a proxy — bypasses publisher-side SSL/403 blocks
     that direct urllib fetches hit on Render. Requires RSS2JSON_API_KEY env var.
 
     Only returns items published after cutoff_dt (14-day hard limit).
     Never raises — individual feed failures are logged and skipped.
-    Returns a list of signal dicts tagged with source_type='rss'.
+    Returns a list of signal dicts tagged with source_type='rss' and signal_context=context.
     """
     if not RSS_ENABLED:
         return []
@@ -385,15 +389,21 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
         print("[Signals/RSS] RSS2JSON_API_KEY not set — skipping Tier 0.")
         return []
 
-    # Build the feed list: national always-on + market-matched feeds
-    market_feeds = _get_market_rss_feeds(market)
-    all_feeds = [(label, url, sig_type, "National") for label, url, sig_type in NATIONAL_RSS_FEEDS]
+    # Build the feed list based on context
+    if context == "hb_marketing":
+        national_list = HB_MARKETING_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+        market_feeds  = []
+    else:
+        national_list = AGENT_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+        market_feeds  = _get_market_rss_feeds(market)
+
+    all_feeds = [(label, url, sig_type, "National") for label, url, sig_type in national_list]
     all_feeds += [(label, url, sig_type, market or "Local") for label, url, sig_type in market_feeds]
 
     if market_feeds:
-        print(f"[Signals/RSS] Market '{market}': {len(NATIONAL_RSS_FEEDS)} national + {len(market_feeds)} local feeds.")
+        print(f"[Signals/RSS] context={context} market='{market}': {len(national_list)} national + {len(market_feeds)} local feeds.")
     else:
-        print(f"[Signals/RSS] Market '{market}': no local feeds matched — national feeds only.")
+        print(f"[Signals/RSS] context={context} market='{market}': {len(national_list)} national feeds, no local.")
 
     results = []
     for label, url, sig_type, default_area in all_feeds:
