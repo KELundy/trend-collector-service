@@ -309,6 +309,12 @@ def init_db():
         c.execute("ALTER TABLE local_signals ADD COLUMN source_type TEXT DEFAULT 'claude'")
     except Exception:
         pass  # Column already exists
+    # Non-destructive: Signal audience context — separates agent-facing (consumer) from hb_marketing signals (Session 58)
+    # Values: 'agent' | 'hb_marketing'  — defaults to 'agent' so all existing rows are correctly typed
+    try:
+        c.execute("ALTER TABLE local_signals ADD COLUMN context TEXT DEFAULT 'agent'")
+    except Exception:
+        pass  # Column already exists
 
     # Agent setup — stores identity/profile data server-side
     c.execute("""
@@ -2632,10 +2638,11 @@ def signals_dedupe_check(user_id: int, source_url: str, headline: str) -> bool:
 def signals_save(user_id: int, area: str, headline: str, summary: str,
                  source_url: str, signal_type: str = "general",
                  relevance_score: float = 0.5, published_date: str = None,
-                 source_type: str = "claude"):
+                 source_type: str = "claude", context: str = "agent"):
     """Save a hyper-local signal for an agent.
     published_date — ISO date string of when the story was published (e.g. '2026-04-15').
     source_type    — 'rss' for RSS-sourced signals, 'claude' for Claude web search signals.
+    context        — 'agent' for consumer-facing signals, 'hb_marketing' for agent/broker-facing signals.
     Signals older than 45 days are rejected in signal_collector.py before this is called.
     """
     from datetime import timedelta
@@ -2643,15 +2650,20 @@ def signals_save(user_id: int, area: str, headline: str, summary: str,
     expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
     conn.execute("""
         INSERT INTO local_signals
-            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date, source_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date, source_type))
+            (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date, source_type, context)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, area, headline, summary, source_url, signal_type, relevance_score, expires_at, published_date, source_type, context))
     conn.commit()
     conn.close()
 
 
-def signals_get_latest(user_id: int, limit: int = 5) -> list:
+def signals_get_latest(user_id: int, limit: int = 5, context: str = "agent") -> list:
     """Get the most recent unused high-relevance signals for an agent.
+
+    context — 'agent' returns consumer-facing signals for content generation and
+              the Home panel in agent context. 'hb_marketing' returns agent/broker-
+              facing signals for the Home panel in HB Marketing context.
+              Defaults to 'agent' so all existing callers are unaffected.
 
     Priority order — location specificity first, then recency, then relevance:
       1. Hyper-local  (signal_type LIKE 'local:%')    — agent's specific service areas
@@ -2681,9 +2693,10 @@ def signals_get_latest(user_id: int, limit: int = 5) -> list:
         WHERE user_id = ?
           AND used = 0
           AND (expires_at IS NULL OR expires_at > ?)
+          AND (context = ? OR (context IS NULL AND ? = 'agent'))
         ORDER BY tier_rank ASC, collected_at DESC, relevance_score DESC
         LIMIT ?
-    """, (user_id, now, limit))
+    """, (user_id, now, context, context, limit))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
