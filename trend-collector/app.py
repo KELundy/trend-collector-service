@@ -3793,18 +3793,53 @@ def _comp_check_rate_limit(ip: str) -> bool:
     return True
 
 
+def _geolocate_ip_state(ip: str) -> str:
+    """
+    Best-effort IP geolocation to US state using ip-api.com (free, no key required).
+    Returns two-letter state abbreviation (e.g. "CO") or empty string on failure.
+    Non-blocking — never raises.
+    """
+    import urllib.request as _ureq
+    import json as _jgeo
+    try:
+        if not ip or ip in ("unknown", "127.0.0.1", "::1"):
+            return ""
+        with _ureq.urlopen(f"http://ip-api.com/json/{ip}?fields=status,regionCode", timeout=2) as r:
+            data = _jgeo.loads(r.read().decode())
+            if data.get("status") == "success":
+                return data.get("regionCode", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _normalize_email_base(email: str) -> str:
+    """
+    Returns the base email address stripping Gmail-style plus-addressing.
+    e.g. user+test@gmail.com -> user@gmail.com
+    Used for duplicate detection, not gatekeeping.
+    """
+    if "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    base_local = local.split("+")[0]
+    return f"{base_local}@{domain}"
+
+
 @app.post("/public/compliance-check")
 async def public_compliance_check(request: Request):
     """
     Public-facing compliance check endpoint for compliance-check.html.
     Flow:
-      1. Validate post_text and email are present.
+      1. Validate post_text, email, and name are present.
       2. Check IP rate limit (3/hour).
       3. Check email against compliance_checker_leads (one check per email).
-      4. Run 8-rule compliance check via run_public_compliance_check().
-      5. Save lead record to compliance_checker_leads.
-      6. Return results.
+      4. Geolocate IP to US state (non-blocking, best-effort).
+      5. Run 8-rule compliance check via run_public_compliance_check().
+      6. Save lead record to compliance_checker_leads.
+      7. Return results.
     No authentication required. CORS-permissive for Bluehost cross-origin requests.
+    Schema migration: adds name, state, base_email columns if not present (additive).
     """
     # ── IP extraction ─────────────────────────────────────────────────────────
     client_ip = request.client.host if request.client else "unknown"
@@ -3827,30 +3862,47 @@ async def public_compliance_check(request: Request):
 
     post_text = str(body.get("post_text", "")).strip()[:5000]
     email     = str(body.get("email",     "")).strip().lower()[:200]
+    name      = str(body.get("name",      "")).strip()[:120]
 
     if not post_text:
         raise HTTPException(400, "post_text is required.")
     if not email or "@" not in email:
         raise HTTPException(400, "A valid email address is required.")
+    if not name:
+        raise HTTPException(400, "Your name is required.")
 
-    # ── DB: ensure table exists and check email uniqueness ───────────────────
+    base_email = _normalize_email_base(email)
+
+    # ── DB: ensure table exists with full schema, migrate if needed ───────────
     from database import get_conn as _gc_pub
     try:
         conn = _gc_pub()
         c    = conn.cursor()
+        # Base table — always ensure it exists
         c.execute("""
             CREATE TABLE IF NOT EXISTS compliance_checker_leads (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                email       TEXT NOT NULL UNIQUE,
-                post_text   TEXT NOT NULL,
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                email        TEXT NOT NULL UNIQUE,
+                post_text    TEXT NOT NULL,
                 results_json TEXT,
-                ip_address  TEXT,
-                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ip_address   TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.commit()
+        # Additive migrations — safe to run every request, SQLite silently errors on existing columns
+        for _col_sql in [
+            "ALTER TABLE compliance_checker_leads ADD COLUMN name TEXT",
+            "ALTER TABLE compliance_checker_leads ADD COLUMN state TEXT",
+            "ALTER TABLE compliance_checker_leads ADD COLUMN base_email TEXT",
+        ]:
+            try:
+                c.execute(_col_sql)
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
 
-        # Check email uniqueness
+        # Check email uniqueness (exact match)
         c.execute("SELECT id FROM compliance_checker_leads WHERE email = ?", (email,))
         existing = c.fetchone()
         conn.close()
@@ -3871,6 +3923,9 @@ async def public_compliance_check(request: Request):
             }
         )
 
+    # ── Geolocate IP to state (non-blocking) ─────────────────────────────────
+    state = _geolocate_ip_state(client_ip)
+
     # ── Run the 8-rule compliance check ──────────────────────────────────────
     try:
         check_result = run_public_compliance_check(post_text)
@@ -3885,9 +3940,9 @@ async def public_compliance_check(request: Request):
         conn = _gc_pub()
         conn.execute(
             """INSERT INTO compliance_checker_leads
-               (email, post_text, results_json, ip_address)
-               VALUES (?, ?, ?, ?)""",
-            (email, post_text, _json_cl.dumps(check_result), client_ip)
+               (name, email, base_email, post_text, results_json, ip_address, state)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (name, email, base_email, post_text, _json_cl.dumps(check_result), client_ip, state)
         )
         conn.commit()
         conn.close()
@@ -3898,6 +3953,194 @@ async def public_compliance_check(request: Request):
         "ok":      True,
         "results": check_result.get("results", []),
     }
+
+
+# =============================================================================
+# GET /admin/compliance-checker-leads
+# GET /admin/compliance-checker-leads/export
+# =============================================================================
+# Super admin and admin only.
+# Returns all compliance checker leads with enriched fields:
+#   - name, email, state, date, truncated post text
+#   - flag/review/pass counts derived from stored results_json
+#   - plus_address flag (email contains '+' before @)
+#   - ip_repeat_count (how many times this IP has submitted)
+# Export returns a CSV download.
+# =============================================================================
+
+def _parse_lead_counts(results_json: str) -> dict:
+    """Parse stored results JSON and return flag/review/pass counts."""
+    import json as _jlc
+    try:
+        data    = _jlc.loads(results_json or "[]")
+        results = data.get("results", data) if isinstance(data, dict) else data
+        flags   = sum(1 for r in results if str(r.get("status", "")).upper() == "FLAG")
+        reviews = sum(1 for r in results if str(r.get("status", "")).upper() == "REVIEW")
+        passes  = sum(1 for r in results if str(r.get("status", "")).upper() == "PASS")
+        return {"flags": flags, "reviews": reviews, "passes": passes}
+    except Exception:
+        return {"flags": 0, "reviews": 0, "passes": 0}
+
+
+@app.get("/admin/compliance-checker-leads")
+async def admin_compliance_leads(
+    page: int = 1,
+    per_page: int = 50,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Super admin and admin only.
+    Returns paginated compliance checker leads with enriched fields.
+    Includes plus-address flag and IP repeat count for duplicate detection.
+    """
+    if current_user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    from database import get_conn as _gc_leads
+    conn   = _gc_leads()
+    c      = conn.cursor()
+
+    # Ensure table exists (defensive — may not exist if no checks done yet)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS compliance_checker_leads (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            email        TEXT NOT NULL UNIQUE,
+            post_text    TEXT NOT NULL,
+            results_json TEXT,
+            ip_address   TEXT,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
+    # Total count
+    c.execute("SELECT COUNT(*) as n FROM compliance_checker_leads")
+    total = c.fetchone()["n"]
+
+    # Paginated rows
+    offset = (max(1, page) - 1) * per_page
+    c.execute("""
+        SELECT id, name, email, base_email, state, post_text,
+               results_json, ip_address, created_at
+        FROM compliance_checker_leads
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+    """, (per_page, offset))
+    rows = [dict(r) for r in c.fetchall()]
+
+    # Build IP repeat count lookup
+    c.execute("""
+        SELECT ip_address, COUNT(*) as cnt
+        FROM compliance_checker_leads
+        WHERE ip_address IS NOT NULL AND ip_address != 'unknown'
+        GROUP BY ip_address
+    """)
+    ip_counts = {r["ip_address"]: r["cnt"] for r in c.fetchall()}
+    conn.close()
+
+    leads = []
+    for r in rows:
+        counts      = _parse_lead_counts(r.get("results_json") or "")
+        raw_email   = r.get("email") or ""
+        plus_flag   = "+" in raw_email.split("@")[0] if "@" in raw_email else False
+        ip          = r.get("ip_address") or ""
+        ip_repeats  = ip_counts.get(ip, 1)
+        post_text   = r.get("post_text") or ""
+
+        leads.append({
+            "id":            r["id"],
+            "name":          r.get("name") or "",
+            "email":         raw_email,
+            "base_email":    r.get("base_email") or _normalize_email_base(raw_email),
+            "state":         r.get("state") or "",
+            "created_at":    r.get("created_at") or "",
+            "post_preview":  post_text[:120] + ("..." if len(post_text) > 120 else ""),
+            "flags":         counts["flags"],
+            "reviews":       counts["reviews"],
+            "passes":        counts["passes"],
+            "plus_address":  plus_flag,
+            "ip_repeat_count": ip_repeats,
+        })
+
+    return {
+        "leads":    leads,
+        "total":    total,
+        "page":     page,
+        "per_page": per_page,
+        "pages":    max(1, -(-total // per_page)),  # ceiling division
+    }
+
+
+@app.get("/admin/compliance-checker-leads/export")
+async def admin_compliance_leads_export(current_user: dict = Depends(get_current_user)):
+    """
+    Super admin and admin only.
+    Returns full leads table as a CSV file download.
+    Columns: id, name, email, base_email, state, flags, reviews, passes,
+             plus_address, ip_repeat_count, post_preview, created_at
+    """
+    if current_user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(403, "Admin access required.")
+
+    import csv as _csv
+    import io  as _io
+    from database import get_conn as _gc_exp
+
+    conn = _gc_exp()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, name, email, base_email, state, post_text,
+               results_json, ip_address, created_at
+        FROM compliance_checker_leads
+        ORDER BY created_at DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+
+    # Build IP repeat count lookup
+    c.execute("""
+        SELECT ip_address, COUNT(*) as cnt
+        FROM compliance_checker_leads
+        WHERE ip_address IS NOT NULL AND ip_address != 'unknown'
+        GROUP BY ip_address
+    """)
+    ip_counts = {r["ip_address"]: r["cnt"] for r in c.fetchall()}
+    conn.close()
+
+    buf = _io.StringIO()
+    writer = _csv.writer(buf)
+    writer.writerow([
+        "id", "name", "email", "base_email", "state",
+        "flags", "reviews", "passes", "plus_address",
+        "ip_repeat_count", "post_preview", "created_at"
+    ])
+    for r in rows:
+        counts     = _parse_lead_counts(r.get("results_json") or "")
+        raw_email  = r.get("email") or ""
+        plus_flag  = "+" in raw_email.split("@")[0] if "@" in raw_email else False
+        ip         = r.get("ip_address") or ""
+        post_text  = r.get("post_text") or ""
+        writer.writerow([
+            r["id"],
+            r.get("name") or "",
+            raw_email,
+            r.get("base_email") or _normalize_email_base(raw_email),
+            r.get("state") or "",
+            counts["flags"],
+            counts["reviews"],
+            counts["passes"],
+            "yes" if plus_flag else "no",
+            ip_counts.get(ip, 1),
+            post_text[:120].replace("\n", " "),
+            r.get("created_at") or "",
+        ])
+
+    from datetime import datetime as _dt
+    filename = f"compliance-leads-{_dt.utcnow().strftime('%Y%m%d')}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/contact")
