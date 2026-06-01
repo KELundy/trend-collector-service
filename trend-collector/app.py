@@ -601,13 +601,23 @@ async def get_usage(current_user=Depends(get_current_user)):
 
 # ── Local signals endpoint ─────────────────────────────────────────────────────
 @app.get("/signals/latest")
-async def get_latest_signals(current_user=Depends(get_current_user)):
+async def get_latest_signals(
+    request: Request,
+    current_user=Depends(get_current_user)
+):
     """
     Returns the most recent high-relevance local signals for the agent.
     Used by the Home dashboard to surface the suggested next action.
+    Accepts optional ?context=agent|hb_marketing query param.
+    Defaults to 'agent'. hb_marketing only honoured for super_admin/admin/hb_marketer.
     """
     from database import signals_get_latest
-    signals = signals_get_latest(current_user["id"], limit=5)
+    ctx = request.query_params.get("context", "agent")
+    role = current_user.get("role", "agent")
+    # Enforce: only privileged roles can request hb_marketing signals
+    if ctx == "hb_marketing" and role not in ("super_admin", "admin", "hb_marketer"):
+        ctx = "agent"
+    signals = signals_get_latest(current_user["id"], limit=10, context=ctx)
     return {"signals": signals}
 
 
@@ -1075,7 +1085,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
             local_signal_trends = []
             try:
                 from database import signals_get_latest as _sgl
-                raw_signals = _sgl(user_id, limit=5)
+                raw_signals = _sgl(user_id, limit=5, context="agent")
                 local_signal_trends = [
                     f"{s.get('headline','')} ({s.get('area','')})".strip()
                     for s in raw_signals
