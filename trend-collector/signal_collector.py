@@ -35,443 +35,308 @@ _collector_started       = False
 #
 # Three layers:
 #   AGENT_NATIONAL_RSS_FEEDS        — always-on for every agent. Consumer-facing
-#                                     publications: housing market trackers, local
-#                                     business journals, mortgage/affordability sources,
-#                                     consumer real estate portals, federal agencies.
+#                                     publications: housing market trackers,
+#                                     mortgage/affordability sources, consumer
+#                                     real estate portals, federal agencies.
 #                                     context='agent'. Surfaces on agent Home panel.
 #
 #   HB_MARKETING_NATIONAL_RSS_FEEDS — super_admin, admin, hb_marketer roles only.
 #                                     Agent and broker publications: industry news,
-#                                     association magazines, CRE publications,
+#                                     association media, CRE publications,
 #                                     brokerage/business-development media.
 #                                     context='hb_marketing'. Surfaces on HB Marketing panel.
 #
-#   DUAL_NATIONAL_RSS_FEEDS         — saved to BOTH contexts. Sources that publish
-#                                     content relevant to both consumers and professionals:
-#                                     rates, policy, federal agency releases.
+#   DUAL_NATIONAL_RSS_FEEDS         — saved to BOTH contexts. Policy, rates, and
+#                                     data relevant to both audiences.
 #
-#   MARKET_RSS_FEEDS                — keyed on the agent's market string (case-insensitive,
-#                                     partial match). Always agent context. No configuration.
+#   MARKET_RSS_FEEDS                — keyed on agent's market string (case-insensitive
+#                                     partial match). Always agent context. Covers
+#                                     37 US metros with local business journals,
+#                                     indie news, and development-focused sources.
 #
 # Each feed entry: (label, url, default_signal_type)
 # Feeds that 404 or time out are logged and skipped — never break collection.
-# Source list authorised by Kevin Lundy, Session 58.
+# Feed list verified by Claude Opus 4.6, Session 58, June 2026.
+# Fair Housing note: school ratings and crime/safety feeds excluded by design.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Consumer-facing: housing market trackers, data providers, consumer portals,
-# affordability/mortgage publications, local business journals.
+# Consumer-facing: housing market data, consumer portals, mortgage/affordability.
 AGENT_NATIONAL_RSS_FEEDS = [
-    # ── Housing market data / consumer portals ────────────────────────────────
-    ("Redfin News",              "https://www.redfin.com/news/feed/",                                    "market|data"),
-    ("Realtor.com Research",     "https://www.realtor.com/research/feed/",                               "market|data"),
-    ("Zillow Research",          "https://www.zillow.com/research/feed/",                                "market|data"),
-    ("CoreLogic Insights",       "https://www.corelogic.com/intelligence/feed/",                        "market|data"),
-    ("StreetEasy Blog",          "https://streeteasy.com/blog/feed/",                                   "market|data"),
-    # ── Consumer affordability / mortgage / finance ───────────────────────────
-    ("Bankrate Real Estate",     "https://www.bankrate.com/rss/finance/mortgages/",                     "market|rates"),
-    ("NerdWallet Real Estate",   "https://www.nerdwallet.com/blog/mortgages/feed/",                     "market|rates"),
-    ("Motley Fool Real Estate",  "https://www.fool.com/feeds/index.aspx?id=real-estate",                "market|news"),
-    ("USA Today Homefront",      "https://rss.usatoday.com/news/money/realestate",                      "market|news"),
-    ("US News Real Estate",      "https://realestate.usnews.com/rss/news",                              "market|news"),
-    # ── Federal agencies ─────────────────────────────────────────────────────
-    ("HUD News Releases",        "https://www.hud.gov/rss/News_Releases.xml",                           "policy|regulatory"),
-    ("CFPB Newsroom",            "https://www.consumerfinance.gov/about-us/newsroom/feed/",             "regulatory|policy"),
-    # ── National business / finance ──────────────────────────────────────────
+    ("Redfin Blog",              "https://www.redfin.com/blog/feed",                                    "market|news"),
+    ("BiggerPockets Blog",       "https://www.biggerpockets.com/blog/feed",                             "market|news"),
+    ("Norada Real Estate",       "https://www.noradarealestate.com/blog/feed/",                         "market|data"),
+    ("The Mortgage Reports",     "https://themortgagereports.com/feed",                                 "market|rates"),
+    ("Realty Times",             "https://realtytimes.com/archives?format=feed",                        "market|news"),
+    ("Point2 Homes News",        "https://www.point2homes.com/news/feed",                               "market|news"),
     ("WSJ Real Estate",          "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",                       "market|news"),
     ("Bloomberg Real Estate",    "https://feeds.bloomberg.com/markets/news.rss",                        "market|news"),
 ]
 
-# Agent and broker facing: industry news, association media, CRE publications,
-# brokerage and business-development media.
+# Agent and broker facing: industry news, association media, CRE publications.
 HB_MARKETING_NATIONAL_RSS_FEEDS = [
-    # ── Residential industry publications ────────────────────────────────────
-    ("Inman News",               "https://www.inman.com/feed/",                                         "market|news"),
-    ("The Close",                "https://theclose.com/feed/",                                          "market|news"),
-    ("RealTrends",               "https://www.realtrends.com/feed/",                                    "market|industry"),
-    ("Real Estate News",         "https://www.realestatebusiness.com.au/feed/",                         "market|industry"),
-    ("Working RE Magazine",      "https://www.workingre.com/feed/",                                     "market|industry"),
-    ("RISMedia",                 "https://rismedia.com/feed/",                                          "market|industry"),
-    ("The Real Deal",            "https://therealdeal.com/feed/",                                       "market|news"),
-    # ── NAR and association media ─────────────────────────────────────────────
-    ("NAR News",                 "https://www.nar.realtor/rss/news",                                    "policy|market"),
-    ("NAR Commercial Connections","https://www.nar.realtor/rss/commercial",                             "market|industry"),
-    # ── Commercial real estate ────────────────────────────────────────────────
-    ("GlobeSt",                  "https://www.globest.com/feed/",                                       "market|commercial"),
-    ("National RE Investor",     "https://www.nreionline.com/rss/all",                                  "market|commercial"),
-    ("Commercial Property Exec", "https://www.cpexecutive.com/feed/",                                   "market|commercial"),
-    ("Bisnow",                   "https://www.bisnow.com/feed",                                         "market|commercial"),
+    ("Inman News",               "https://feeds.feedburner.com/inmannews",                              "market|industry"),
+    ("HousingWire",              "https://www.housingwire.com/feed/",                                   "market|industry"),
+    ("RISMedia Housecall",       "https://blog.rismedia.com/feed",                                      "market|industry"),
+    ("The Close",                "https://theclose.com/feed/",                                          "market|industry"),
+    ("NAHB Eye on Housing",      "https://eyeonhousing.org/feed/",                                      "market|data"),
     ("ConnectCRE",               "https://www.connectcre.com/feed/",                                    "market|commercial"),
     ("Commercial Observer",      "https://commercialobserver.com/feed/",                                "market|commercial"),
-    ("CoStar News",              "https://www.costar.com/rss/news",                                     "market|commercial"),
-    # ── Development and land use ──────────────────────────────────────────────
-    ("Urban Land (ULI)",         "https://urbanland.uli.org/feed/",                                     "market|development"),
-    ("NAIOP Development",        "https://www.naiop.org/rss/news",                                      "market|development"),
+    ("Propmodo",                 "https://www.propmodo.com/feed/",                                      "market|commercial"),
+    ("DS News",                  "https://dsnews.com/feed",                                             "market|industry"),
+    ("Working RE",               "https://www.workingre.com/feed/",                                     "market|industry"),
+    ("Appraisal Buzz",           "https://www.appraisalbuzz.com/feed/",                                 "market|industry"),
+    ("REjournals",               "https://rejournals.com/feed/",                                        "market|commercial"),
+    ("Multi-Housing News",       "https://www.multihousingnews.com/feed/",                              "market|commercial"),
 ]
 
-# Dual-context: saved to BOTH agent and hb_marketing buckets.
-# Policy, rates, and broad market data relevant to both audiences.
+# Dual-context: policy, rates, and broad market data relevant to both audiences.
 DUAL_NATIONAL_RSS_FEEDS = [
-    ("HousingWire",              "https://www.housingwire.com/feed/",                                   "market|policy"),
-    ("Mortgage News Daily",      "https://www.mortgagenewsdaily.com/rss/headlines.aspx",                "market|rates"),
-    ("NAR News",                 "https://www.nar.realtor/rss/news",                                    "policy|market"),
+    ("Calculated Risk",          "https://www.calculatedriskblog.com/feeds/posts/default?alt=rss",      "market|data"),
+    ("GlobeSt",                  "https://www.globest.com/feed/",                                       "market|commercial"),
+    ("The Real Deal NY",         "https://therealdeal.com/new-york/feed/",                              "market|development"),
+    ("NY YIMBY",                 "https://newyorkyimby.com/feed",                                       "market|development"),
+    ("Chicago YIMBY",            "https://chicagoyimby.com/feed",                                       "market|development"),
 ]
 
 # Market lookup table — keyed on lowercase partial-match strings.
 # An agent's market field is lowercased and checked with `in` against each key.
 # Multiple keys can match the same market string — all matching feeds are used.
 # Format: { "match_string": [(label, url, signal_type), ...] }
-
+# Source strategy per market:
+#   1. Business Journal (bizjournals.com) — employers, development, construction, zoning
+#   2. Local indie/nonprofit news — deeper zoning, transit, infrastructure, policy
+#   3. Development-focused sites — groundbreakings, permits, neighborhood change
+# Fair Housing: school ratings and crime/safety feeds excluded by design.
 MARKET_RSS_FEEDS = {
 
-    # ── COLORADO (CO) ─────────────────────────────────────────────────────────
+    # ── COLORADO ──────────────────────────────────────────────────────────────
     "denver": [
-        ("Denver Post Real Estate",      "https://feeds.denverpost.com/dp/real-estate",                   "market|news"),
-        ("Denver Business Journal RE",   "https://www.bizjournals.com/denver/real_estate/rss/",           "market|development"),
-        ("REColorado Blog",              "https://www.recolorado.com/blog/feed",                          "market|data"),
-        ("Denver7 News",                 "https://www.thedenverchannel.com/rss/news.rss",                 "news|development"),
-    ],
-    "colorado springs": [
-        ("Colorado Springs Gazette RE",  "https://gazette.com/search/?f=rss&t=article&c=business",       "market|news"),
-        ("Colorado Springs Business Journal", "https://www.cobizmag.com/feed/",                          "market|development"),
-    ],
-    "boulder": [
-        ("Boulder Daily Camera RE",      "https://www.dailycamera.com/feed/",                            "market|news"),
-    ],
-    "fort collins": [
-        ("Coloradoan",                   "https://www.coloradoan.com/rss/news/",                         "market|news"),
+        ("Denver Business Journal",  "https://feeds.bizjournals.com/bizj_denver",                       "market|development"),
+        ("Colorado Sun",             "https://coloradosun.com/feed/",                                   "market|policy"),
+        ("Denverite",                "https://denverite.com/feed/",                                     "market|development"),
+        ("BusinessDen",              "https://businessden.com/feed/",                                   "market|development"),
+        ("Mile High CRE",            "https://milehighcre.com/feed/",                                   "market|commercial"),
     ],
 
-    # ── WYOMING (WY) ─────────────────────────────────────────────────────────
-    "cheyenne": [
-        ("Wyoming Tribune Eagle",        "https://www.wyomingnews.com/rss.xml",                          "market|news"),
-    ],
-    "casper": [
-        ("Casper Star-Tribune",          "https://trib.com/feed/",                                       "market|news"),
-    ],
-
-    # ── MONTANA (MT) ─────────────────────────────────────────────────────────
-    "billings": [
-        ("Billings Gazette",             "https://billingsgazette.com/feed/",                            "market|news"),
-    ],
-    "missoula": [
-        ("Missoulian",                   "https://missoulian.com/feed/",                                 "market|news"),
-    ],
-    "bozeman": [
-        ("Bozeman Daily Chronicle",      "https://www.bozemandailychronicle.com/feed/",                  "market|news"),
-    ],
-
-    # ── IDAHO (ID) ────────────────────────────────────────────────────────────
-    "boise": [
-        ("Idaho Statesman",              "https://www.idahostatesman.com/news/business/real-estate/rss", "market|news"),
-        ("Boise Dev",                    "https://boisedev.com/feed/",                                   "development|news"),
-    ],
-
-    # ── UTAH (UT) ─────────────────────────────────────────────────────────────
-    "salt lake": [
-        ("Salt Lake Tribune RE",         "https://www.sltrib.com/feed/",                                 "market|news"),
-        ("Deseret News Business",        "https://www.deseret.com/arc/outboundfeeds/rss/",               "market|development"),
-        ("Utah Business",                "https://utahbusiness.com/feed/",                               "market|development"),
-    ],
-    "provo": [
-        ("Daily Herald Utah",            "https://www.heraldextra.com/search/?f=rss&t=article",          "market|news"),
-    ],
-
-    # ── NEW MEXICO (NM) ───────────────────────────────────────────────────────
-    "albuquerque": [
-        ("Albuquerque Journal Business", "https://www.abqjournal.com/category/business/feed/",           "market|news"),
-        ("Albuquerque Business First",   "https://www.bizjournals.com/albuquerque/real_estate/rss/",     "market|development"),
-    ],
-    "santa fe": [
-        ("Santa Fe New Mexican",         "https://www.santafenewmexican.com/search/?f=rss&t=article",    "market|news"),
-    ],
-
-    # ── TEXAS (TX) ───────────────────────────────────────────────────────────
-    "dallas": [
-        ("Dallas Morning News RE",       "https://www.dallasnews.com/business/real-estate/rss/",         "market|news"),
-        ("Dallas Business Journal RE",   "https://www.bizjournals.com/dallas/real_estate/rss/",          "market|development"),
-        ("Dallas Innovates",             "https://dallasinnovates.com/feed/",                            "development|news"),
-    ],
-    "houston": [
-        ("Houston Chronicle RE",         "https://www.houstonchronicle.com/business/real-estate/rss/",  "market|news"),
-        ("Houston Business Journal RE",  "https://www.bizjournals.com/houston/real_estate/rss/",        "market|development"),
-        ("HAR Market Updates",           "https://www.har.com/rss/news",                                "market|data"),
-    ],
+    # ── TEXAS ─────────────────────────────────────────────────────────────────
     "austin": [
-        ("Austin American-Statesman RE", "https://www.statesman.com/business/real-estate/rss/",         "market|news"),
-        ("Austin Business Journal RE",   "https://www.bizjournals.com/austin/real_estate/rss/",         "market|development"),
-        ("ABoR Market Data",             "https://www.abor.com/news/feed/",                             "market|data"),
+        ("Austin Business Journal",  "https://feeds.bizjournals.com/bizj_austin",                       "market|development"),
+        ("Austin Monitor",           "https://www.austinmonitor.com/feed/",                             "market|policy"),
+        ("KUT Austin",               "https://www.kut.org/feed",                                        "market|policy"),
+        ("CultureMap Austin",        "https://austin.culturemap.com/feeds/rss/",                        "market|development"),
     ],
+
+    "dallas": [
+        ("Dallas Business Journal",  "https://feeds.bizjournals.com/bizj_dallas",                       "market|development"),
+        ("D Magazine",               "https://www.dmagazine.com/feed/",                                 "market|development"),
+        ("CultureMap Dallas",        "https://dallas.culturemap.com/feeds/rss/",                        "market|development"),
+    ],
+
+    "houston": [
+        ("Houston Business Journal", "https://feeds.bizjournals.com/bizj_houston",                      "market|development"),
+        ("CultureMap Houston",       "https://houston.culturemap.com/feeds/rss/",                       "market|development"),
+        ("Houston Public Media",     "https://www.houstonpublicmedia.org/feed/",                        "market|policy"),
+    ],
+
     "san antonio": [
-        ("San Antonio Express-News RE",  "https://www.mysanantonio.com/business/real-estate/rss/",      "market|news"),
-        ("San Antonio Business Journal", "https://www.bizjournals.com/sanantonio/real_estate/rss/",     "market|development"),
+        ("San Antonio Business Journal", "https://feeds.bizjournals.com/bizj_sanantonio",               "market|development"),
+        ("San Antonio Report",       "https://sanantonioreport.org/feed/",                              "market|policy"),
     ],
 
-    # ── ARIZONA (AZ) ─────────────────────────────────────────────────────────
+    # ── WEST ──────────────────────────────────────────────────────────────────
     "phoenix": [
-        ("Arizona Republic RE",          "https://www.azcentral.com/business/real-estate/rss/",         "market|news"),
-        ("Phoenix Business Journal RE",  "https://www.bizjournals.com/phoenix/real_estate/rss/",        "market|development"),
-        ("AZBigMedia RE",                "https://azbigmedia.com/real-estate/feed/",                    "market|development"),
-    ],
-    "tucson": [
-        ("Arizona Daily Star RE",        "https://tucson.com/business/real-estate/rss/",                "market|news"),
-        ("Tucson Business Journal",      "https://www.bizjournals.com/phoenix/real_estate/rss/",        "market|development"),
-    ],
-    "scottsdale": [
-        ("AZBigMedia RE",                "https://azbigmedia.com/real-estate/feed/",                    "market|development"),
-        ("Arizona Republic RE",          "https://www.azcentral.com/business/real-estate/rss/",         "market|news"),
+        ("Phoenix Business Journal", "https://feeds.bizjournals.com/bizj_phoenix",                      "market|development"),
+        ("AZ Big Media",             "https://azbigmedia.com/feed/",                                    "market|development"),
+        ("Phoenix New Times",        "https://www.phoenixnewtimes.com/news/rss",                        "market|development"),
     ],
 
-    # ── NEVADA (NV) ──────────────────────────────────────────────────────────
     "las vegas": [
-        ("Las Vegas Review-Journal RE",  "https://www.reviewjournal.com/business/real-estate/rss/",     "market|news"),
-        ("Las Vegas Business Press",     "https://lvbusinesspress.com/feed/",                           "market|development"),
-        ("Vegas Inc",                    "https://vegasinc.lasvegassun.com/feed/",                      "market|development"),
-    ],
-    "reno": [
-        ("Reno Gazette-Journal",         "https://www.rgj.com/rss/news/",                               "market|news"),
-        ("Northern Nevada Business",     "https://www.nnbw.com/feed/",                                  "market|development"),
+        ("Nevada Independent",       "https://thenevadaindependent.com/feed",                           "market|policy"),
+        ("Las Vegas Review-Journal", "https://www.reviewjournal.com/feed/",                             "market|development"),
+        ("KLAS Las Vegas",           "https://www.8newsnow.com/feed/",                                  "market|development"),
     ],
 
-    # ── OREGON (OR) ──────────────────────────────────────────────────────────
-    "portland": [
-        ("Oregonian Business",           "https://www.oregonlive.com/business/rss/",                    "market|news"),
-        ("Portland Business Journal RE", "https://www.bizjournals.com/portland/real_estate/rss/",       "market|development"),
-        ("Oregon Business",              "https://oregonbusiness.com/feed/",                            "market|development"),
-    ],
-    "eugene": [
-        ("Register-Guard",               "https://www.registerguard.com/search/?f=rss&t=article",       "market|news"),
-    ],
-    "bend": [
-        ("Bend Bulletin",                "https://www.bendbulletin.com/feed/",                          "market|news"),
-        ("Central Oregon Association",   "https://www.coar.com/feed/",                                  "market|data"),
-    ],
-
-    # ── WASHINGTON (WA) ──────────────────────────────────────────────────────
     "seattle": [
-        ("Seattle Times RE",             "https://www.seattletimes.com/business/real-estate/rss/",      "market|news"),
-        ("Puget Sound Business Journal", "https://www.bizjournals.com/seattle/real_estate/rss/",        "market|development"),
-        ("NWMLS Market Data",            "https://www.nwmls.com/news/feed/",                            "market|data"),
-    ],
-    "spokane": [
-        ("Spokesman-Review Business",    "https://www.spokesman.com/rss/business/",                     "market|news"),
-        ("Spokane Business Journal",     "https://www.spokanejournal.com/feed/",                        "market|development"),
-    ],
-    "tacoma": [
-        ("News Tribune Business",        "https://www.thenewstribune.com/news/business/rss/",           "market|news"),
+        ("Puget Sound Business Journal", "https://feeds.bizjournals.com/bizj_pugetsound",               "market|development"),
+        ("Seattle Times RE",         "https://www.seattletimes.com/business/real-estate/feed/",         "market|news"),
+        ("The Urbanist",             "https://www.theurbanist.org/feed/",                               "market|development"),
+        ("Crosscut",                 "https://crosscut.com/feeds/rss.xml",                              "market|policy"),
     ],
 
-    # ── CALIFORNIA (CA) ──────────────────────────────────────────────────────
-    "los angeles": [
-        ("LA Times RE",                  "https://www.latimes.com/business/real-estate/rss2.0.xml",     "market|news"),
-        ("LA Business Journal RE",       "https://labusinessjournal.com/real-estate/rss/",              "market|development"),
-        ("Bisnow LA",                    "https://www.bisnow.com/los-angeles/rss",                      "market|development"),
-    ],
-    "san francisco": [
-        ("SF Chronicle RE",              "https://www.sfchronicle.com/business/real-estate/rss/",       "market|news"),
-        ("SF Business Times RE",         "https://www.bizjournals.com/sanfrancisco/real_estate/rss/",   "market|development"),
-        ("The Real Deal SF",             "https://therealdeal.com/tag/san-francisco/feed/",             "market|development"),
-    ],
-    "san diego": [
-        ("San Diego Union-Tribune RE",   "https://www.sandiegouniontribune.com/business/real-estate/rss/", "market|news"),
-        ("San Diego Business Journal",   "https://www.bizjournals.com/sandiego/real_estate/rss/",       "market|development"),
-    ],
-    "sacramento": [
-        ("Sacramento Bee Business",      "https://www.sacbee.com/news/business/real-estate/rss/",       "market|news"),
-        ("Sacramento Business Journal",  "https://www.bizjournals.com/sacramento/real_estate/rss/",     "market|development"),
-    ],
-    "san jose": [
-        ("Mercury News RE",              "https://www.mercurynews.com/real-estate/rss/",                "market|news"),
-        ("Silicon Valley Business Journal", "https://www.bizjournals.com/sanjose/real_estate/rss/",    "market|development"),
+    "portland": [
+        ("Portland Business Journal", "https://feeds.bizjournals.com/bizj_portland",                    "market|development"),
+        ("OregonLive Business",      "https://www.oregonlive.com/business/rss",                         "market|development"),
+        ("Willamette Week",          "https://www.wweek.com/feed/",                                     "market|development"),
     ],
 
-    # ── ALASKA (AK) ──────────────────────────────────────────────────────────
-    "anchorage": [
-        ("Anchorage Daily News",         "https://www.adn.com/real-estate/rss/",                        "market|news"),
-        ("Alaska Business",              "https://www.akbizmag.com/feed/",                              "market|development"),
+    "salt lake": [
+        ("Deseret News",             "https://www.deseret.com/feeds/rss",                               "market|development"),
+        ("Building Salt Lake",       "https://buildingsaltlake.com/feed/",                              "market|development"),
+        ("Salt Lake Tribune",        "https://www.sltrib.com/feed/",                                    "market|policy"),
     ],
 
-    # ── HAWAII (HI) ──────────────────────────────────────────────────────────
-    "honolulu": [
-        ("Honolulu Star-Advertiser RE",  "https://www.staradvertiser.com/real-estate/rss/",             "market|news"),
-        ("Pacific Business News RE",     "https://www.bizjournals.com/pacific/real_estate/rss/",        "market|development"),
-    ],
-    "maui": [
-        ("Maui News",                    "https://www.mauinews.com/feed/",                              "market|news"),
+    "boise": [
+        ("Boise Dev",                "https://boisedev.com/feed/",                                      "market|development"),
+        ("Idaho Business Review",    "https://idahobusinessreview.com/feed/",                           "market|development"),
     ],
 
-    # ── FLORIDA (FL) ─────────────────────────────────────────────────────────
-    "miami": [
-        ("Miami Herald RE",              "https://www.miamiherald.com/news/business/real-estate/rss/",  "market|news"),
-        ("South Florida Business Journal","https://www.bizjournals.com/southflorida/real_estate/rss/",  "market|development"),
-        ("The Real Deal Miami",          "https://therealdeal.com/tag/miami/feed/",                     "market|development"),
-    ],
-    "orlando": [
-        ("Orlando Sentinel RE",          "https://www.orlandosentinel.com/business/real-estate/rss/",  "market|news"),
-        ("Orlando Business Journal RE",  "https://www.bizjournals.com/orlando/real_estate/rss/",       "market|development"),
-    ],
-    "tampa": [
-        ("Tampa Bay Times RE",           "https://www.tampabay.com/business/real-estate/rss/",         "market|news"),
-        ("Tampa Bay Business Journal",   "https://www.bizjournals.com/tampabay/real_estate/rss/",      "market|development"),
-    ],
-    "jacksonville": [
-        ("Florida Times-Union Business", "https://www.jacksonville.com/business/rss/",                 "market|news"),
-        ("Jacksonville Business Journal","https://www.bizjournals.com/jacksonville/real_estate/rss/",  "market|development"),
+    "albuquerque": [
+        ("Albuquerque Business First", "https://feeds.bizjournals.com/bizj_albuquerque",                "market|development"),
+        ("Albuquerque Journal",      "https://www.abqjournal.com/feed",                                 "market|development"),
     ],
 
-    # ── GEORGIA (GA) ─────────────────────────────────────────────────────────
+    # ── SOUTHEAST ─────────────────────────────────────────────────────────────
     "atlanta": [
-        ("Atlanta Journal-Constitution RE","https://www.ajc.com/business/real-estate/rss/",            "market|news"),
-        ("Atlanta Business Chronicle RE", "https://www.bizjournals.com/atlanta/real_estate/rss/",      "market|development"),
-        ("Bisnow Atlanta",               "https://www.bisnow.com/atlanta/rss",                         "market|development"),
-    ],
-    "savannah": [
-        ("Savannah Morning News",        "https://www.savannahnow.com/search/?f=rss&t=article",        "market|news"),
+        ("Atlanta Business Chronicle", "https://feeds.bizjournals.com/bizj_atlanta",                    "market|development"),
+        ("SaportaReport",            "https://saportareport.com/feed/",                                 "market|development"),
+        ("What Now Atlanta",         "https://whatnowatlanta.com/feed/",                                 "market|development"),
+        ("Rough Draft Atlanta",      "https://roughdraftatlanta.com/feed/",                             "market|development"),
     ],
 
-    # ── NORTH CAROLINA (NC) ──────────────────────────────────────────────────
     "charlotte": [
-        ("Charlotte Observer RE",        "https://www.charlotteobserver.com/news/business/real-estate/rss/", "market|news"),
-        ("Charlotte Business Journal RE","https://www.bizjournals.com/charlotte/real_estate/rss/",     "market|development"),
-    ],
-    "raleigh": [
-        ("News & Observer Business",     "https://www.newsobserver.com/business/real-estate/rss/",     "market|news"),
-        ("Triangle Business Journal RE", "https://www.bizjournals.com/triangle/real_estate/rss/",      "market|development"),
-    ],
-    "durham": [
-        ("News & Observer Business",     "https://www.newsobserver.com/business/real-estate/rss/",     "market|news"),
-        ("Triangle Business Journal RE", "https://www.bizjournals.com/triangle/real_estate/rss/",      "market|development"),
+        ("Charlotte Business Journal", "https://feeds.bizjournals.com/bizj_charlotte",                  "market|development"),
+        ("WFAE Charlotte",           "https://www.wfae.org/feed",                                       "market|policy"),
+        ("Axios Charlotte",          "https://www.axios.com/local/charlotte/feed",                      "market|development"),
     ],
 
-    # ── SOUTH CAROLINA (SC) ──────────────────────────────────────────────────
-    "charleston": [
-        ("Post and Courier Business",    "https://www.postandcourier.com/business/rss/",               "market|news"),
-        ("Charleston Business Journal",  "https://www.charlestonbusiness.com/feed/",                   "market|development"),
-    ],
-    "columbia": [
-        ("The State Business",           "https://www.thestate.com/news/business/rss/",                "market|news"),
-    ],
-    "greenville": [
-        ("Greenville News Business",     "https://www.greenvilleonline.com/business/rss/",             "market|news"),
-        ("Upstate Business Journal",     "https://upstatebusinessjournal.com/feed/",                   "market|development"),
-    ],
-
-    # ── TENNESSEE (TN) ───────────────────────────────────────────────────────
     "nashville": [
-        ("Tennessean Business",          "https://www.tennessean.com/business/real-estate/rss/",       "market|news"),
-        ("Nashville Business Journal RE","https://www.bizjournals.com/nashville/real_estate/rss/",     "market|development"),
-        ("Nashville Post",               "https://www.nashvillepost.com/feed/",                        "market|development"),
-    ],
-    "memphis": [
-        ("Memphis Commercial Appeal Business","https://www.commercialappeal.com/business/rss/",        "market|news"),
-        ("Memphis Business Journal RE",  "https://www.bizjournals.com/memphis/real_estate/rss/",       "market|development"),
-    ],
-    "knoxville": [
-        ("Knoxville News Sentinel Business","https://www.knoxnews.com/business/rss/",                  "market|news"),
+        ("Nashville Business Journal", "https://feeds.bizjournals.com/bizj_nashville",                  "market|development"),
+        ("Nashville Scene",          "https://www.nashvillescene.com/news/rss",                         "market|development"),
+        ("Axios Nashville",          "https://www.axios.com/local/nashville/feed",                      "market|development"),
     ],
 
-    # ── VIRGINIA (VA) ────────────────────────────────────────────────────────
+    "tampa": [
+        ("Tampa Bay Business Journal", "https://feeds.bizjournals.com/bizj_tampabay",                   "market|development"),
+        ("Axios Tampa Bay",          "https://www.axios.com/local/tampa-bay/feed",                      "market|development"),
+        ("St Pete Catalyst",         "https://stpetecatalyst.com/feed/",                                "market|development"),
+    ],
+
+    "orlando": [
+        ("Orlando Business Journal", "https://feeds.bizjournals.com/bizj_orlando",                      "market|development"),
+        ("GrowthSpotter",            "https://www.growthspotter.com/feed",                               "market|development"),
+        ("Bungalower",               "https://bungalower.com/feed/",                                    "market|development"),
+    ],
+
+    "miami": [
+        ("South Florida Business Journal", "https://feeds.bizjournals.com/bizj_southflorida",           "market|development"),
+        ("The Real Deal Miami",      "https://therealdeal.com/miami/feed/",                             "market|development"),
+        ("Next Miami",               "https://www.thenextmiami.com/feed/",                              "market|development"),
+    ],
+
+    "jacksonville": [
+        ("Jacksonville Business Journal", "https://feeds.bizjournals.com/bizj_jacksonville",            "market|development"),
+        ("Jax Daily Record",         "https://www.jaxdailyrecord.com/feed",                             "market|development"),
+    ],
+
+    # ── MID-ATLANTIC / NORTHEAST ──────────────────────────────────────────────
+    "raleigh": [
+        ("Triangle Business Journal", "https://feeds.bizjournals.com/bizj_triangle",                    "market|development"),
+        ("Axios Raleigh",            "https://www.axios.com/local/raleigh/feed",                        "market|development"),
+    ],
+
     "richmond": [
-        ("Richmond Times-Dispatch RE",   "https://richmond.com/business/real-estate/rss/",             "market|news"),
-        ("Richmond BizSense",            "https://richmondbizsense.com/feed/",                         "market|development"),
-    ],
-    "norfolk": [
-        ("Virginian-Pilot Business",     "https://www.pilotonline.com/business/rss/",                  "market|news"),
-        ("Inside Business Hampton Roads","https://insidebiz.com/feed/",                                "market|development"),
-    ],
-    "northern virginia": [
-        ("Washington Business Journal RE","https://www.bizjournals.com/washington/real_estate/rss/",   "market|development"),
-        ("Washington Post RE",           "https://feeds.washingtonpost.com/rss/realestate",            "market|news"),
-    ],
-    "arlington": [
-        ("Washington Business Journal RE","https://www.bizjournals.com/washington/real_estate/rss/",   "market|development"),
-        ("ARLnow",                       "https://www.arlnow.com/feed/",                               "market|news"),
+        ("Richmond BizSense",        "https://richmondbizsense.com/feed/",                              "market|development"),
     ],
 
-    # ── MARYLAND (MD) ────────────────────────────────────────────────────────
+    "washington": [
+        ("Washington Business Journal", "https://feeds.bizjournals.com/bizj_washington",                "market|development"),
+        ("Greater Greater Washington", "https://ggwash.org/feed",                                       "market|policy"),
+        ("DCist",                    "https://dcist.com/feed/",                                         "market|development"),
+        ("ARLnow",                   "https://www.arlnow.com/feed/",                                    "market|development"),
+    ],
+
     "baltimore": [
-        ("Baltimore Sun Business",       "https://www.baltimoresun.com/business/real-estate/rss/",     "market|news"),
-        ("Baltimore Business Journal RE","https://www.bizjournals.com/baltimore/real_estate/rss/",     "market|development"),
-        ("Bisnow Baltimore",             "https://www.bisnow.com/washington-dc/rss",                   "market|development"),
-    ],
-    "bethesda": [
-        ("Washington Post RE",           "https://feeds.washingtonpost.com/rss/realestate",            "market|news"),
-        ("Washington Business Journal RE","https://www.bizjournals.com/washington/real_estate/rss/",   "market|development"),
-    ],
-    "annapolis": [
-        ("Capital Gazette Business",     "https://www.capitalgazette.com/business/rss/",               "market|news"),
+        ("Baltimore Business Journal", "https://feeds.bizjournals.com/bizj_baltimore",                  "market|development"),
+        ("Baltimore Brew",           "https://www.baltimorebrew.com/feed/",                             "market|policy"),
+        ("Baltimore Fishbowl",       "https://baltimorefishbowl.com/feed/",                             "market|development"),
     ],
 
-    # ── ADDITIONAL TOP METROS (non-compliance states, high transaction volume) ──
-
-    # New York
-    "new york": [
-        ("NY Times RE",                  "https://feeds.nytimes.com/nyt/rss/RealEstate",               "market|news"),
-        ("The Real Deal NY",             "https://therealdeal.com/new-york/feed/",                     "market|development"),
-        ("Crain's NY Real Estate",       "https://www.crainsnewyork.com/real-estate/rss/",             "market|development"),
-    ],
-    # Chicago
-    "chicago": [
-        ("Chicago Tribune RE",           "https://www.chicagotribune.com/real-estate/rss/",            "market|news"),
-        ("Crain's Chicago RE",           "https://www.chicagobusiness.com/real-estate/rss/",           "market|development"),
-        ("Bisnow Chicago",               "https://www.bisnow.com/chicago/rss",                         "market|development"),
-    ],
-    # Boston
-    "boston": [
-        ("Boston Globe RE",              "https://www.bostonglobe.com/business/real-estate/rss/",      "market|news"),
-        ("Boston Business Journal RE",   "https://www.bizjournals.com/boston/real_estate/rss/",        "market|development"),
-        ("Banker & Tradesman",           "https://www.bankertradesman.com/feed/",                      "market|data"),
-    ],
-    # Minneapolis
-    "minneapolis": [
-        ("Star Tribune Business",        "https://www.startribune.com/business/rss/",                  "market|news"),
-        ("Minneapolis Business Journal", "https://www.bizjournals.com/twincities/real_estate/rss/",    "market|development"),
-    ],
-    # Detroit
-    "detroit": [
-        ("Detroit Free Press Business",  "https://www.freep.com/business/rss/",                        "market|news"),
-        ("Crain's Detroit Business RE",  "https://www.crainsdetroit.com/real-estate/rss/",             "market|development"),
-    ],
-    # Pittsburgh
-    "pittsburgh": [
-        ("Pittsburgh Post-Gazette Business","https://www.post-gazette.com/business/rss/",              "market|news"),
-        ("Pittsburgh Business Times RE", "https://www.bizjournals.com/pittsburgh/real_estate/rss/",    "market|development"),
-    ],
-    # Philadelphia
     "philadelphia": [
-        ("Philadelphia Inquirer RE",     "https://www.inquirer.com/real-estate/rss/",                  "market|news"),
-        ("Philadelphia Business Journal","https://www.bizjournals.com/philadelphia/real_estate/rss/",  "market|development"),
+        ("Philadelphia Business Journal", "https://feeds.bizjournals.com/bizj_philadelphia",            "market|development"),
+        ("Billy Penn",               "https://billypenn.com/feed/",                                     "market|development"),
+        ("PhillyVoice",              "https://www.phillyvoice.com/feed/",                               "market|development"),
     ],
-    # Kansas City
+
+    "boston": [
+        ("Boston Business Journal",  "https://feeds.bizjournals.com/bizj_boston",                       "market|development"),
+    ],
+
+    "new york": [
+        ("The Real Deal NY",         "https://therealdeal.com/new-york/feed/",                          "market|development"),
+        ("Commercial Observer",      "https://commercialobserver.com/feed/",                             "market|commercial"),
+        ("Gothamist",                "https://gothamist.com/feed",                                      "market|development"),
+        ("NY YIMBY",                 "https://newyorkyimby.com/feed",                                   "market|development"),
+        ("6sqft",                    "https://www.6sqft.com/feed/",                                     "market|development"),
+    ],
+
+    # ── MIDWEST ───────────────────────────────────────────────────────────────
+    "chicago": [
+        ("Crain's Chicago Business", "https://www.chicagobusiness.com/rss",                             "market|development"),
+        ("Chicago YIMBY",            "https://chicagoyimby.com/feed",                                   "market|development"),
+        ("Block Club Chicago",       "https://blockclubchicago.org/feed/",                              "market|development"),
+    ],
+
+    "minneapolis": [
+        ("Minneapolis/St Paul Business Journal", "https://feeds.bizjournals.com/bizj_twincities",       "market|development"),
+        ("MinnPost",                 "https://www.minnpost.com/feed/",                                  "market|policy"),
+        ("Finance and Commerce",     "https://finance-commerce.com/feed/",                              "market|development"),
+    ],
+
     "kansas city": [
-        ("KC Star Business",             "https://www.kansascity.com/news/business/real-estate/rss/",  "market|news"),
-        ("Kansas City Business Journal", "https://www.bizjournals.com/kansascity/real_estate/rss/",    "market|development"),
+        ("Kansas City Business Journal", "https://feeds.bizjournals.com/bizj_kansascity",               "market|development"),
+        ("KCUR",                     "https://www.kcur.org/feed",                                       "market|policy"),
+        ("Flatland KC",              "https://flatlandkc.org/feed/",                                    "market|development"),
     ],
-    # St. Louis
-    "st. louis": [
-        ("St. Louis Post-Dispatch Business","https://www.stltoday.com/business/real-estate/rss/",      "market|news"),
-        ("St. Louis Business Journal RE","https://www.bizjournals.com/stlouis/real_estate/rss/",       "market|development"),
+
+    "st louis": [
+        ("St Louis Business Journal", "https://feeds.bizjournals.com/bizj_stlouis",                     "market|development"),
+        ("NextSTL",                  "https://nextstl.com/feed/",                                       "market|development"),
     ],
-    # Indianapolis
-    "indianapolis": [
-        ("Indianapolis Star Business",   "https://www.indystar.com/business/real-estate/rss/",         "market|news"),
-        ("Indianapolis Business Journal","https://www.ibj.com/articles/rss/feed",                      "market|development"),
+
+    "detroit": [
+        ("Crain's Detroit Business", "https://www.crainsdetroit.com/rss",                               "market|development"),
+        ("Deadline Detroit",         "https://www.deadlinedetroit.com/rss",                             "market|development"),
     ],
-    # Columbus
+
     "columbus": [
-        ("Columbus Dispatch Business",   "https://www.dispatch.com/business/rss/",                     "market|news"),
-        ("Columbus Business First RE",   "https://www.bizjournals.com/columbus/real_estate/rss/",      "market|development"),
+        ("Columbus Business First",  "https://feeds.bizjournals.com/bizj_columbus",                     "market|development"),
+        ("Columbus Underground",     "https://www.columbusunderground.com/feed",                        "market|development"),
     ],
-    # Cleveland
+
     "cleveland": [
-        ("Plain Dealer Business",        "https://www.cleveland.com/business/rss/",                    "market|news"),
-        ("Crain's Cleveland Business RE","https://www.crainscleveland.com/real-estate/rss/",           "market|development"),
+        ("Crain's Cleveland Business", "https://www.crainscleveland.com/rss",                           "market|development"),
+        ("Fresh Water Cleveland",    "https://www.freshwatercleveland.com/feed",                        "market|development"),
     ],
-    # Cincinnati
+
     "cincinnati": [
-        ("Cincinnati Enquirer Business", "https://www.cincinnati.com/business/real-estate/rss/",       "market|news"),
-        ("Cincinnati Business Courier",  "https://www.bizjournals.com/cincinnati/real_estate/rss/",    "market|development"),
+        ("Cincinnati Business Courier", "https://feeds.bizjournals.com/bizj_cincinnati",                "market|development"),
     ],
+
+    "pittsburgh": [
+        ("Pittsburgh Business Times", "https://feeds.bizjournals.com/bizj_pittsburgh",                  "market|development"),
+        ("NEXTpittsburgh",           "https://nextpittsburgh.com/feed/",                                "market|development"),
+        ("PublicSource",             "https://www.publicsource.org/feed/",                              "market|policy"),
+    ],
+
+    # ── SOUTH ─────────────────────────────────────────────────────────────────
+    "new orleans": [
+        ("New Orleans CityBusiness", "https://neworleanscitybusiness.com/feed/",                        "market|development"),
+        ("The Lens NOLA",            "https://thelensnola.org/feed/",                                   "market|policy"),
+        ("Axios New Orleans",        "https://www.axios.com/local/new-orleans/feed",                    "market|development"),
+    ],
+
+    "memphis": [
+        ("Memphis Business Journal", "https://feeds.bizjournals.com/bizj_memphis",                      "market|development"),
+        ("Daily Memphian",           "https://dailymemphian.com/feed",                                  "market|development"),
+    ],
+
+    "louisville": [
+        ("Louisville Business First", "https://feeds.bizjournals.com/bizj_louisville",                  "market|development"),
+        ("Insider Louisville",       "https://insiderlouisville.com/feed/",                             "market|development"),
+    ],
+
 }
+
 
 
 def _get_market_rss_feeds(market: str) -> list:
@@ -496,22 +361,18 @@ def _get_market_rss_feeds(market: str) -> list:
     return matched
 
 
-def _fetch_rss_signals(market: str, cutoff_dt: datetime, context: str = "agent") -> list:
+def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
     """
     Tier 0 — Fetch RSS feeds via rss2json.com API and return signals in the
-    same dict shape as Claude signals.
-
-    context='agent'        — pulls AGENT_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
-                             + market-matched MARKET_RSS_FEEDS (consumer-facing).
-    context='hb_marketing' — pulls HB_MARKETING_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
-                             only (no market feeds; HB Marketing is national-audience content).
+    same dict shape as Claude signals. Always includes all national feeds.
+    Market-specific feeds are added based on the agent's market string.
 
     Uses rss2json.com as a proxy — bypasses publisher-side SSL/403 blocks
     that direct urllib fetches hit on Render. Requires RSS2JSON_API_KEY env var.
 
     Only returns items published after cutoff_dt (14-day hard limit).
     Never raises — individual feed failures are logged and skipped.
-    Returns a list of signal dicts tagged with source_type='rss' and signal_context=context.
+    Returns a list of signal dicts tagged with source_type='rss'.
     """
     if not RSS_ENABLED:
         return []
@@ -524,23 +385,15 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime, context: str = "agent")
         print("[Signals/RSS] RSS2JSON_API_KEY not set — skipping Tier 0.")
         return []
 
-    # Build the feed list based on context
-    if context == "hb_marketing":
-        # HB Marketing: agent/broker publications + dual-context feeds. No market feeds.
-        national_list = HB_MARKETING_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
-        market_feeds  = []
-    else:
-        # Agent (default): consumer-facing publications + dual-context feeds + market feeds
-        national_list = AGENT_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
-        market_feeds  = _get_market_rss_feeds(market)
-
-    all_feeds = [(label, url, sig_type, "National") for label, url, sig_type in national_list]
+    # Build the feed list: national always-on + market-matched feeds
+    market_feeds = _get_market_rss_feeds(market)
+    all_feeds = [(label, url, sig_type, "National") for label, url, sig_type in NATIONAL_RSS_FEEDS]
     all_feeds += [(label, url, sig_type, market or "Local") for label, url, sig_type in market_feeds]
 
     if market_feeds:
-        print(f"[Signals/RSS] context={context} market='{market}': {len(national_list)} national + {len(market_feeds)} local feeds.")
+        print(f"[Signals/RSS] Market '{market}': {len(NATIONAL_RSS_FEEDS)} national + {len(market_feeds)} local feeds.")
     else:
-        print(f"[Signals/RSS] context={context} market='{market}': {len(national_list)} national feeds, no local.")
+        print(f"[Signals/RSS] Market '{market}': no local feeds matched — national feeds only.")
 
     results = []
     for label, url, sig_type, default_area in all_feeds:
@@ -610,7 +463,6 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime, context: str = "agent")
                         "published_date":  pub_date_str,
                         "signal_type":     sig_type,
                         "relevance_score": 0.75,  # Curated sources are high-relevance by default
-                        "signal_context":  context,
                     })
                     feed_count += 1
 
@@ -770,12 +622,9 @@ def _validate_published_date(raw_date: str, user_id: int, headline: str) -> tupl
 
 
 def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
-                  source_type: str = "claude", context: str = "agent") -> int:
-    """Save signals to DB, tagging with tier, source_type, and context. Returns count saved.
+                  source_type: str = "claude") -> int:
+    """Save signals to DB, tagging with tier and source_type. Returns count saved.
     source_type: 'rss' for Tier 0 RSS signals, 'claude' for Tier 1-3 Claude web search.
-    context:     'agent' for consumer-facing signals, 'hb_marketing' for agent/broker signals.
-                 If the signal dict contains 'signal_context', that takes precedence over
-                 the function-level default — allows mixed-context batches from DUAL feeds.
     Rejects any signal with a published_date older than 14 days.
     Rejects duplicates (same source_url or near-identical headline within 30 days).
     Signals with no date are allowed through with a log warning.
@@ -807,9 +656,6 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
                 print(f"[Signals] DUPE skipped: '{headline[:60]}' (user {user_id})")
                 continue
 
-            # Per-signal context override — used when DUAL feeds save to both buckets
-            sig_context = sig.get("signal_context") or context
-
             signals_save(
                 user_id        = user_id,
                 area           = str(sig.get("area", areas_str))[:200],
@@ -820,7 +666,6 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
                 relevance_score= float(sig.get("relevance_score", 0.5)),
                 published_date = pub_date,
                 source_type    = source_type,
-                context        = sig_context,
             )
             saved += 1
         except Exception as e:
@@ -867,51 +712,28 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
 
     areas_str  = ", ".join(service_areas[:5]) if service_areas else market
     market_str = market or "the local area"
-    # Use all of the agent's niches for Tier 3 Claude searches — not just the first one.
-    # Switching niches takes effect on the next collection run automatically.
-    niche_str  = ", ".join(primary_niches) if primary_niches else "Residential Real Estate"
+    niche_str  = primary_niches[0] if primary_niches else "Residential Real Estate"
     today_str  = datetime.utcnow().strftime("%B %d, %Y")  # e.g. "April 30, 2026"
     cutoff_str = (datetime.utcnow() - __import__('datetime').timedelta(days=14)).strftime("%B %d, %Y")
     total_saved = 0
 
     # ── TIER 0: RSS feeds — real-time, no API cost ───────────────────────────
     # Parsed before any Claude web search fires.
-    # Two passes: agent context (consumer-facing) always runs.
-    # HB Marketing context runs for super_admin, admin, and hb_marketer roles only.
-    # Market feeds are matched automatically from the agent's market string.
-    # If agent RSS yields enough strong signals, Claude searches are skipped.
+    # National feeds run for every agent. Market feeds are matched automatically
+    # from the agent's market string — zero agent configuration required.
+    # If RSS yields enough strong signals, Claude searches are skipped entirely.
     from datetime import timedelta
-    cutoff_dt = datetime.utcnow() - timedelta(days=14)
-
-    # Pass 1: agent context — consumer-facing signals for every user
-    rss_agent = _fetch_rss_signals(market, cutoff_dt, context="agent")
-    strong0   = 0
-    if rss_agent:
-        saved_agent  = _save_signals(rss_agent, user_id, "rss", market_str, source_type="rss", context="agent")
-        total_saved += saved_agent
-        strong0      = sum(1 for s in rss_agent if float(s.get("relevance_score", 0)) >= HIGH_RELEVANCE_THRESHOLD)
-        print(f"[Signals] Tier 0 agent (RSS): {len(rss_agent)} found, {saved_agent} saved, {strong0} strong — user {user_id}")
+    cutoff_dt   = datetime.utcnow() - timedelta(days=14)
+    rss_signals = _fetch_rss_signals(market, cutoff_dt)
+    strong0     = 0
+    if rss_signals:
+        saved_rss   = _save_signals(rss_signals, user_id, "rss", market_str, source_type="rss")
+        total_saved += saved_rss
+        strong0     = sum(1 for s in rss_signals
+                         if float(s.get("relevance_score", 0)) >= HIGH_RELEVANCE_THRESHOLD)
+        print(f"[Signals] Tier 0 (RSS): {len(rss_signals)} found, {saved_rss} saved, {strong0} strong — user {user_id}")
     else:
-        print(f"[Signals] Tier 0 agent (RSS): no signals returned — user {user_id}")
-
-    # Pass 2: hb_marketing context — agent/broker-facing signals for privileged roles only
-    from database import get_conn as _gc_sc
-    try:
-        _conn_role = _gc_sc()
-        _row_role  = _conn_role.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
-        _conn_role.close()
-        _user_role = (_row_role["role"] if _row_role else "") or ""
-    except Exception:
-        _user_role = ""
-
-    if _user_role in ("super_admin", "admin", "hb_marketer"):
-        rss_hb = _fetch_rss_signals(market, cutoff_dt, context="hb_marketing")
-        if rss_hb:
-            saved_hb     = _save_signals(rss_hb, user_id, "rss", market_str, source_type="rss", context="hb_marketing")
-            total_saved += saved_hb
-            print(f"[Signals] Tier 0 hb_marketing (RSS): {len(rss_hb)} found, {saved_hb} saved — user {user_id}")
-        else:
-            print(f"[Signals] Tier 0 hb_marketing (RSS): no signals returned — user {user_id}")
+        print(f"[Signals] Tier 0 (RSS): no signals returned — user {user_id}")
 
     if strong0 >= MIN_STRONG_SIGNALS:
         print(f"[Signals] ✓ User {user_id} — {total_saved} saved from Tier 0 (RSS). Skipping Claude searches.")
