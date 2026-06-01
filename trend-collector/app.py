@@ -735,7 +735,14 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
         context_parts = []
         if body.headline: context_parts.append(body.headline)
         if body.summary:  context_parts.append(body.summary)
-        situation = "Signal-driven post: " + " ".join(context_parts) if context_parts else "Market update and current conditions"
+        if context_parts:
+            situation = "Signal-driven post: " + " ".join(context_parts)
+        else:
+            # No signal context — draw a niche-specific situation so content stays relevant
+            from content_engine import NICHE_SITUATIONS, DEFAULT_SITUATIONS
+            import random as _random
+            _sit_pool = NICHE_SITUATIONS.get(niche) or DEFAULT_SITUATIONS
+            situation = _random.choice(_sit_pool)
 
         result = generate_content_core(
             agent_name           = user_row["agent_name"],
@@ -871,6 +878,21 @@ def content_scheduler_worker():
         time.sleep(15 * 60)
 
 
+
+def _pick_niche_situation(niche: str) -> str:
+    """
+    Returns a randomly selected situation string from NICHE_SITUATIONS[niche].
+    Falls back to DEFAULT_SITUATIONS if the niche is not in the taxonomy.
+    Used by the scheduler when no defaultSituation is set in agent setup.
+    Ensures every agent gets niche-specific content regardless of which niche
+    is scheduled — switching niches takes effect on the next scheduler run.
+    """
+    import random as _random
+    from content_engine import NICHE_SITUATIONS, DEFAULT_SITUATIONS
+    pool = NICHE_SITUATIONS.get(niche) or DEFAULT_SITUATIONS
+    return _random.choice(pool)
+
+
 def _run_scheduled_generation(sched: dict):
     user_id  = sched["user_id"]
     niche    = sched["niche"]
@@ -897,7 +919,7 @@ def _run_scheduled_generation(sched: dict):
             brokerage   = user_row["brokerage"],
             market      = setup.get("market", ""),
             niche       = niche,
-            situation   = setup.get("defaultSituation") or "Market update and current conditions",
+            situation   = setup.get("defaultSituation") or _pick_niche_situation(niche),
             persona     = setup.get("defaultPersona") or "homeowners",
             tone        = setup.get("tone", "Professional"),
             length      = setup.get("length", "Standard"),
@@ -1069,7 +1091,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 brokerage   = user_row["brokerage"],
                 market      = setup.get("market", ""),
                 niche       = niche,
-                situation   = setup.get("defaultSituation") or "Market update and current conditions",
+                situation   = setup.get("defaultSituation") or _pick_niche_situation(niche),
                 persona     = setup.get("defaultPersona") or "homeowners",
                 tone        = setup.get("tone", "Professional"),
                 length      = setup.get("length", "Standard"),
