@@ -33,38 +33,87 @@ _collector_started       = False
 
 # ── TIER 0 RSS FEED REGISTRY ─────────────────────────────────────────────────
 #
-# Two layers:
-#   NATIONAL_RSS_FEEDS  — always-on for every agent, regardless of market.
-#                         Industry publications, federal agencies, national
-#                         real estate data sources.
-#   MARKET_RSS_FEEDS    — keyed on the agent's market string (case-insensitive,
-#                         partial match). Activated automatically when an agent's
-#                         market field matches. No agent configuration required.
-#                         Coverage: all 21 compliance states + top US metros.
-#                         Fallback: agents in unlisted markets get national feeds only.
+# Three layers:
+#   AGENT_NATIONAL_RSS_FEEDS        — always-on for every agent. Consumer-facing
+#                                     publications: housing market trackers, local
+#                                     business journals, mortgage/affordability sources,
+#                                     consumer real estate portals, federal agencies.
+#                                     context='agent'. Surfaces on agent Home panel.
+#
+#   HB_MARKETING_NATIONAL_RSS_FEEDS — super_admin, admin, hb_marketer roles only.
+#                                     Agent and broker publications: industry news,
+#                                     association magazines, CRE publications,
+#                                     brokerage/business-development media.
+#                                     context='hb_marketing'. Surfaces on HB Marketing panel.
+#
+#   DUAL_NATIONAL_RSS_FEEDS         — saved to BOTH contexts. Sources that publish
+#                                     content relevant to both consumers and professionals:
+#                                     rates, policy, federal agency releases.
+#
+#   MARKET_RSS_FEEDS                — keyed on the agent's market string (case-insensitive,
+#                                     partial match). Always agent context. No configuration.
 #
 # Each feed entry: (label, url, default_signal_type)
 # Feeds that 404 or time out are logged and skipped — never break collection.
+# Source list authorised by Kevin Lundy, Session 58.
 # ─────────────────────────────────────────────────────────────────────────────
 
-NATIONAL_RSS_FEEDS = [
-    # ── Industry publications ────────────────────────────────────────────────
-    ("Inman News",               "https://www.inman.com/feed/",                                          "market|news"),
-    ("The Close",                "https://theclose.com/feed/",                                           "market|news"),
-    ("RealTrends",               "https://www.realtrends.com/feed/",                                     "market|industry"),
-    ("HousingWire",              "https://www.housingwire.com/feed/",                                    "market|policy"),
-    ("Mortgage News Daily",      "https://www.mortgagenewsdaily.com/rss/headlines.aspx",                 "market|rates"),
-    # ── Federal agencies ─────────────────────────────────────────────────────
-    ("NAR News",                 "https://www.nar.realtor/rss/news",                                     "policy|market"),
-    ("HUD News Releases",        "https://www.hud.gov/rss/News_Releases.xml",                            "policy|regulatory"),
-    ("CFPB Newsroom",            "https://www.consumerfinance.gov/about-us/newsroom/feed/",              "regulatory|policy"),
-    # ── National data providers ───────────────────────────────────────────────
+# Consumer-facing: housing market trackers, data providers, consumer portals,
+# affordability/mortgage publications, local business journals.
+AGENT_NATIONAL_RSS_FEEDS = [
+    # ── Housing market data / consumer portals ────────────────────────────────
     ("Redfin News",              "https://www.redfin.com/news/feed/",                                    "market|data"),
+    ("Realtor.com Research",     "https://www.realtor.com/research/feed/",                               "market|data"),
     ("Zillow Research",          "https://www.zillow.com/research/feed/",                                "market|data"),
     ("CoreLogic Insights",       "https://www.corelogic.com/intelligence/feed/",                        "market|data"),
+    ("StreetEasy Blog",          "https://streeteasy.com/blog/feed/",                                   "market|data"),
+    # ── Consumer affordability / mortgage / finance ───────────────────────────
+    ("Bankrate Real Estate",     "https://www.bankrate.com/rss/finance/mortgages/",                     "market|rates"),
+    ("NerdWallet Real Estate",   "https://www.nerdwallet.com/blog/mortgages/feed/",                     "market|rates"),
+    ("Motley Fool Real Estate",  "https://www.fool.com/feeds/index.aspx?id=real-estate",                "market|news"),
+    ("USA Today Homefront",      "https://rss.usatoday.com/news/money/realestate",                      "market|news"),
+    ("US News Real Estate",      "https://realestate.usnews.com/rss/news",                              "market|news"),
+    # ── Federal agencies ─────────────────────────────────────────────────────
+    ("HUD News Releases",        "https://www.hud.gov/rss/News_Releases.xml",                           "policy|regulatory"),
+    ("CFPB Newsroom",            "https://www.consumerfinance.gov/about-us/newsroom/feed/",             "regulatory|policy"),
     # ── National business / finance ──────────────────────────────────────────
     ("WSJ Real Estate",          "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",                       "market|news"),
     ("Bloomberg Real Estate",    "https://feeds.bloomberg.com/markets/news.rss",                        "market|news"),
+]
+
+# Agent and broker facing: industry news, association media, CRE publications,
+# brokerage and business-development media.
+HB_MARKETING_NATIONAL_RSS_FEEDS = [
+    # ── Residential industry publications ────────────────────────────────────
+    ("Inman News",               "https://www.inman.com/feed/",                                         "market|news"),
+    ("The Close",                "https://theclose.com/feed/",                                          "market|news"),
+    ("RealTrends",               "https://www.realtrends.com/feed/",                                    "market|industry"),
+    ("Real Estate News",         "https://www.realestatebusiness.com.au/feed/",                         "market|industry"),
+    ("Working RE Magazine",      "https://www.workingre.com/feed/",                                     "market|industry"),
+    ("RISMedia",                 "https://rismedia.com/feed/",                                          "market|industry"),
+    ("The Real Deal",            "https://therealdeal.com/feed/",                                       "market|news"),
+    # ── NAR and association media ─────────────────────────────────────────────
+    ("NAR News",                 "https://www.nar.realtor/rss/news",                                    "policy|market"),
+    ("NAR Commercial Connections","https://www.nar.realtor/rss/commercial",                             "market|industry"),
+    # ── Commercial real estate ────────────────────────────────────────────────
+    ("GlobeSt",                  "https://www.globest.com/feed/",                                       "market|commercial"),
+    ("National RE Investor",     "https://www.nreionline.com/rss/all",                                  "market|commercial"),
+    ("Commercial Property Exec", "https://www.cpexecutive.com/feed/",                                   "market|commercial"),
+    ("Bisnow",                   "https://www.bisnow.com/feed",                                         "market|commercial"),
+    ("ConnectCRE",               "https://www.connectcre.com/feed/",                                    "market|commercial"),
+    ("Commercial Observer",      "https://commercialobserver.com/feed/",                                "market|commercial"),
+    ("CoStar News",              "https://www.costar.com/rss/news",                                     "market|commercial"),
+    # ── Development and land use ──────────────────────────────────────────────
+    ("Urban Land (ULI)",         "https://urbanland.uli.org/feed/",                                     "market|development"),
+    ("NAIOP Development",        "https://www.naiop.org/rss/news",                                      "market|development"),
+]
+
+# Dual-context: saved to BOTH agent and hb_marketing buckets.
+# Policy, rates, and broad market data relevant to both audiences.
+DUAL_NATIONAL_RSS_FEEDS = [
+    ("HousingWire",              "https://www.housingwire.com/feed/",                                   "market|policy"),
+    ("Mortgage News Daily",      "https://www.mortgagenewsdaily.com/rss/headlines.aspx",                "market|rates"),
+    ("NAR News",                 "https://www.nar.realtor/rss/news",                                    "policy|market"),
 ]
 
 # Market lookup table — keyed on lowercase partial-match strings.
@@ -447,18 +496,22 @@ def _get_market_rss_feeds(market: str) -> list:
     return matched
 
 
-def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
+def _fetch_rss_signals(market: str, cutoff_dt: datetime, context: str = "agent") -> list:
     """
     Tier 0 — Fetch RSS feeds via rss2json.com API and return signals in the
-    same dict shape as Claude signals. Always includes all national feeds.
-    Market-specific feeds are added based on the agent's market string.
+    same dict shape as Claude signals.
+
+    context='agent'        — pulls AGENT_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+                             + market-matched MARKET_RSS_FEEDS (consumer-facing).
+    context='hb_marketing' — pulls HB_MARKETING_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+                             only (no market feeds; HB Marketing is national-audience content).
 
     Uses rss2json.com as a proxy — bypasses publisher-side SSL/403 blocks
     that direct urllib fetches hit on Render. Requires RSS2JSON_API_KEY env var.
 
     Only returns items published after cutoff_dt (14-day hard limit).
     Never raises — individual feed failures are logged and skipped.
-    Returns a list of signal dicts tagged with source_type='rss'.
+    Returns a list of signal dicts tagged with source_type='rss' and signal_context=context.
     """
     if not RSS_ENABLED:
         return []
@@ -471,15 +524,23 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
         print("[Signals/RSS] RSS2JSON_API_KEY not set — skipping Tier 0.")
         return []
 
-    # Build the feed list: national always-on + market-matched feeds
-    market_feeds = _get_market_rss_feeds(market)
-    all_feeds = [(label, url, sig_type, "National") for label, url, sig_type in NATIONAL_RSS_FEEDS]
+    # Build the feed list based on context
+    if context == "hb_marketing":
+        # HB Marketing: agent/broker publications + dual-context feeds. No market feeds.
+        national_list = HB_MARKETING_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+        market_feeds  = []
+    else:
+        # Agent (default): consumer-facing publications + dual-context feeds + market feeds
+        national_list = AGENT_NATIONAL_RSS_FEEDS + DUAL_NATIONAL_RSS_FEEDS
+        market_feeds  = _get_market_rss_feeds(market)
+
+    all_feeds = [(label, url, sig_type, "National") for label, url, sig_type in national_list]
     all_feeds += [(label, url, sig_type, market or "Local") for label, url, sig_type in market_feeds]
 
     if market_feeds:
-        print(f"[Signals/RSS] Market '{market}': {len(NATIONAL_RSS_FEEDS)} national + {len(market_feeds)} local feeds.")
+        print(f"[Signals/RSS] context={context} market='{market}': {len(national_list)} national + {len(market_feeds)} local feeds.")
     else:
-        print(f"[Signals/RSS] Market '{market}': no local feeds matched — national feeds only.")
+        print(f"[Signals/RSS] context={context} market='{market}': {len(national_list)} national feeds, no local.")
 
     results = []
     for label, url, sig_type, default_area in all_feeds:
@@ -549,6 +610,7 @@ def _fetch_rss_signals(market: str, cutoff_dt: datetime) -> list:
                         "published_date":  pub_date_str,
                         "signal_type":     sig_type,
                         "relevance_score": 0.75,  # Curated sources are high-relevance by default
+                        "signal_context":  context,
                     })
                     feed_count += 1
 
@@ -708,9 +770,12 @@ def _validate_published_date(raw_date: str, user_id: int, headline: str) -> tupl
 
 
 def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
-                  source_type: str = "claude") -> int:
-    """Save signals to DB, tagging with tier and source_type. Returns count saved.
+                  source_type: str = "claude", context: str = "agent") -> int:
+    """Save signals to DB, tagging with tier, source_type, and context. Returns count saved.
     source_type: 'rss' for Tier 0 RSS signals, 'claude' for Tier 1-3 Claude web search.
+    context:     'agent' for consumer-facing signals, 'hb_marketing' for agent/broker signals.
+                 If the signal dict contains 'signal_context', that takes precedence over
+                 the function-level default — allows mixed-context batches from DUAL feeds.
     Rejects any signal with a published_date older than 14 days.
     Rejects duplicates (same source_url or near-identical headline within 30 days).
     Signals with no date are allowed through with a log warning.
@@ -742,6 +807,9 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
                 print(f"[Signals] DUPE skipped: '{headline[:60]}' (user {user_id})")
                 continue
 
+            # Per-signal context override — used when DUAL feeds save to both buckets
+            sig_context = sig.get("signal_context") or context
+
             signals_save(
                 user_id        = user_id,
                 area           = str(sig.get("area", areas_str))[:200],
@@ -752,6 +820,7 @@ def _save_signals(signals: list, user_id: int, tier: str, areas_str: str,
                 relevance_score= float(sig.get("relevance_score", 0.5)),
                 published_date = pub_date,
                 source_type    = source_type,
+                context        = sig_context,
             )
             saved += 1
         except Exception as e:
@@ -798,28 +867,51 @@ def _collect_signals_for_agent(user_id: int, agent_name: str,
 
     areas_str  = ", ".join(service_areas[:5]) if service_areas else market
     market_str = market or "the local area"
-    niche_str  = primary_niches[0] if primary_niches else "Residential Real Estate"
+    # Use all of the agent's niches for Tier 3 Claude searches — not just the first one.
+    # Switching niches takes effect on the next collection run automatically.
+    niche_str  = ", ".join(primary_niches) if primary_niches else "Residential Real Estate"
     today_str  = datetime.utcnow().strftime("%B %d, %Y")  # e.g. "April 30, 2026"
     cutoff_str = (datetime.utcnow() - __import__('datetime').timedelta(days=14)).strftime("%B %d, %Y")
     total_saved = 0
 
     # ── TIER 0: RSS feeds — real-time, no API cost ───────────────────────────
     # Parsed before any Claude web search fires.
-    # National feeds run for every agent. Market feeds are matched automatically
-    # from the agent's market string — zero agent configuration required.
-    # If RSS yields enough strong signals, Claude searches are skipped entirely.
+    # Two passes: agent context (consumer-facing) always runs.
+    # HB Marketing context runs for super_admin, admin, and hb_marketer roles only.
+    # Market feeds are matched automatically from the agent's market string.
+    # If agent RSS yields enough strong signals, Claude searches are skipped.
     from datetime import timedelta
-    cutoff_dt   = datetime.utcnow() - timedelta(days=14)
-    rss_signals = _fetch_rss_signals(market, cutoff_dt)
-    strong0     = 0
-    if rss_signals:
-        saved_rss   = _save_signals(rss_signals, user_id, "rss", market_str, source_type="rss")
-        total_saved += saved_rss
-        strong0     = sum(1 for s in rss_signals
-                         if float(s.get("relevance_score", 0)) >= HIGH_RELEVANCE_THRESHOLD)
-        print(f"[Signals] Tier 0 (RSS): {len(rss_signals)} found, {saved_rss} saved, {strong0} strong — user {user_id}")
+    cutoff_dt = datetime.utcnow() - timedelta(days=14)
+
+    # Pass 1: agent context — consumer-facing signals for every user
+    rss_agent = _fetch_rss_signals(market, cutoff_dt, context="agent")
+    strong0   = 0
+    if rss_agent:
+        saved_agent  = _save_signals(rss_agent, user_id, "rss", market_str, source_type="rss", context="agent")
+        total_saved += saved_agent
+        strong0      = sum(1 for s in rss_agent if float(s.get("relevance_score", 0)) >= HIGH_RELEVANCE_THRESHOLD)
+        print(f"[Signals] Tier 0 agent (RSS): {len(rss_agent)} found, {saved_agent} saved, {strong0} strong — user {user_id}")
     else:
-        print(f"[Signals] Tier 0 (RSS): no signals returned — user {user_id}")
+        print(f"[Signals] Tier 0 agent (RSS): no signals returned — user {user_id}")
+
+    # Pass 2: hb_marketing context — agent/broker-facing signals for privileged roles only
+    from database import get_conn as _gc_sc
+    try:
+        _conn_role = _gc_sc()
+        _row_role  = _conn_role.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+        _conn_role.close()
+        _user_role = (_row_role["role"] if _row_role else "") or ""
+    except Exception:
+        _user_role = ""
+
+    if _user_role in ("super_admin", "admin", "hb_marketer"):
+        rss_hb = _fetch_rss_signals(market, cutoff_dt, context="hb_marketing")
+        if rss_hb:
+            saved_hb     = _save_signals(rss_hb, user_id, "rss", market_str, source_type="rss", context="hb_marketing")
+            total_saved += saved_hb
+            print(f"[Signals] Tier 0 hb_marketing (RSS): {len(rss_hb)} found, {saved_hb} saved — user {user_id}")
+        else:
+            print(f"[Signals] Tier 0 hb_marketing (RSS): no signals returned — user {user_id}")
 
     if strong0 >= MIN_STRONG_SIGNALS:
         print(f"[Signals] ✓ User {user_id} — {total_saved} saved from Tier 0 (RSS). Skipping Claude searches.")
