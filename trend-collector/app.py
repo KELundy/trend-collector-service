@@ -2234,13 +2234,14 @@ async def public_agent_profile(slug: str):
     items = [dict(r) for r in c.fetchall()]
 
     # Stats — active posts only (approved/published) for displayed metrics.
-    # CIR count includes archived — those records are permanent.
+    # CIR count queries compliance_records directly — permanent table, survives post deletion.
+    # This ensures deleted posts do not reduce the displayed CIR count on the authority page.
     active_items  = [i for i in items if i.get("status") in ("approved", "published")]
     posts_30_days = sum(1 for i in active_items if (i.get("approved_at") or "") >= month_ago)
-    cir_count     = sum(1 for i in items if i.get("cir_id"))
-    # posts_total = all CIR-reviewed posts, including archived.
-    # Archiving is housekeeping — a CIR was issued and a licensed professional
-    # stood behind that content. The count reflects the full body of reviewed work.
+    c2            = conn.cursor()
+    c2.execute("SELECT COUNT(*) FROM compliance_records WHERE user_id = ?", (user_id,))
+    cir_count     = c2.fetchone()[0] or 0
+    # posts_total = all CIR-reviewed posts per compliance_records — permanent, not affected by deletion.
     posts_total   = cir_count
 
     clean_count = 0
@@ -2312,7 +2313,7 @@ async def public_agent_profile(slug: str):
             "cir_id":      item.get("cir_id",""),
             "approved_at": (item.get("approved_at") or "")[:10],
             "post_url":    f"https://{slug}.homebridgegroup.co/posts/{ps}",
-            "verify_url":  f"https://app.homebridgegroup.co/verify/{item.get('cir_id','')}" if item.get("cir_id") else "",
+            "verify_url":  f"https://homebridgegroup.co/verify/{item.get('cir_id','')}" if item.get("cir_id") else "",
         })
 
     conn.close()
@@ -2406,7 +2407,7 @@ async def public_agent_rss(slug: str):
         except: pass
         link = f"https://{slug}.homebridgegroup.co"
         if item.get("cir_id"):
-            link = f"https://app.homebridgegroup.co/verify/{item['cir_id']}"
+            link = f"https://homebridgegroup.co/verify/{item['cir_id']}"
         items_xml += f"""
   <item>
     <title>{esc(headline)}</title>
@@ -2490,7 +2491,7 @@ async def public_agent_post(slug: str, post_slug: str):
                 "agent_name":  user["agent_name"],
                 "brokerage":   user.get("brokerage",""),
                 "profile_url": f"https://{slug}.homebridgegroup.co",
-                "verify_url":  f"https://app.homebridgegroup.co/verify/{item['cir_id']}" if item.get("cir_id") else "",
+                "verify_url":  f"https://homebridgegroup.co/verify/{item['cir_id']}" if item.get("cir_id") else "",
             }
             break
 
