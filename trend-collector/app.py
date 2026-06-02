@@ -2406,7 +2406,7 @@ async def public_agent_rss(slug: str):
         except: pass
         link = f"https://{slug}.homebridgegroup.co"
         if item.get("cir_id"):
-            link = f"https://homebridgegroup.co/verify.html?cir={item['cir_id']}"
+            link = f"https://app.homebridgegroup.co/verify/{item['cir_id']}"
         items_xml += f"""
   <item>
     <title>{esc(headline)}</title>
