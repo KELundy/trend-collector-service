@@ -542,19 +542,40 @@ class ScheduleRequest(BaseModel):
     timeOfDay:  str
     timezone:   Optional[str] = "America/Denver"
     dayOfWeek:  Optional[str] = None  # JSON array e.g. '["mon","wed","fri"]'
+    context:    Optional[str] = "agent"  # 'agent' | 'hb_marketing' — Session 62
 
 class ScheduleDeleteRequest(BaseModel):
     niche: str
 
 
 @app.get("/schedules")
-async def get_schedules(current_user=Depends(get_current_user)):
-    return {"schedules": schedules_get_all(current_user["id"])}
+async def get_schedules(request: Request, current_user=Depends(get_current_user)):
+    """
+    Return schedules for the current user filtered by context.
+    Accepts optional ?context=agent|hb_marketing query param.
+    Defaults to 'agent' so existing agent schedule calls are unaffected.
+    hb_marketing context only honoured for super_admin/admin/hb_marketer roles.
+    """
+    ctx = request.query_params.get("context", "agent")
+    role = current_user.get("role", "agent")
+    # Only privileged roles can request hb_marketing schedules
+    if ctx == "hb_marketing" and role not in ("super_admin", "admin", "hb_marketer"):
+        ctx = "agent"
+    return {"schedules": schedules_get_all(current_user["id"], context=ctx)}
 
 
 @app.post("/schedules")
 async def upsert_schedule(body: ScheduleRequest, current_user=Depends(get_current_user)):
+    """
+    Create or update a schedule. Context from request body determines which
+    workspace the schedule belongs to. Defaults to 'agent'.
+    hb_marketing context only honoured for super_admin/admin/hb_marketer roles.
+    """
     from database import schedule_upsert
+    ctx = body.context or "agent"
+    role = current_user.get("role", "agent")
+    if ctx == "hb_marketing" and role not in ("super_admin", "admin", "hb_marketer"):
+        ctx = "agent"
     schedule = schedule_upsert(
         user_id    = current_user["id"],
         niche      = body.niche,
@@ -562,13 +583,22 @@ async def upsert_schedule(body: ScheduleRequest, current_user=Depends(get_curren
         time_of_day= body.timeOfDay,
         timezone   = body.timezone,
         day_of_week= body.dayOfWeek,
+        context    = ctx,
     )
     return {"success": True, "schedule": schedule}
 
 
 @app.delete("/schedules/{niche}")
-async def delete_schedule(niche: str, current_user=Depends(get_current_user)):
-    success = schedule_delete(current_user["id"], niche)
+async def delete_schedule(niche: str, request: Request, current_user=Depends(get_current_user)):
+    """
+    Delete a schedule by niche. Accepts optional ?context= query param.
+    Defaults to 'agent' so existing agent delete calls are unaffected.
+    """
+    ctx = request.query_params.get("context", "agent")
+    role = current_user.get("role", "agent")
+    if ctx == "hb_marketing" and role not in ("super_admin", "admin", "hb_marketer"):
+        ctx = "agent"
+    success = schedule_delete(current_user["id"], niche, context=ctx)
     if not success:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return {"success": True}
