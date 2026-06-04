@@ -274,6 +274,14 @@ def init_db():
         c.execute("ALTER TABLE schedules ADD COLUMN day_of_week TEXT DEFAULT NULL")
     except Exception:
         pass
+    # Non-destructive: add context to existing schedules table (Session 62)
+    # Values: 'agent' | 'hb_marketing'
+    # Defaults to 'agent' so all existing agent schedules are correctly typed.
+    # Separates HB Marketing schedules from agent schedules for the same user_id.
+    try:
+        c.execute("ALTER TABLE schedules ADD COLUMN context TEXT NOT NULL DEFAULT 'agent'")
+    except Exception:
+        pass
 
     # Local signals — hyper-local market intelligence per agent
     c.execute("""
@@ -1611,20 +1619,30 @@ def _row_to_item(row) -> dict:
 # ─────────────────────────────────────────────
 def schedule_upsert(user_id: int, niche: str, frequency: str,
                     time_of_day: str, timezone: str = "America/Denver",
-                    day_of_week: str = None) -> dict:
+                    day_of_week: str = None,
+                    context: str = "agent") -> dict:
+    """
+    Insert or update a schedule for a user/niche/context combination.
+    context separates agent schedules from hb_marketing schedules for the
+    same user_id. Defaults to 'agent' so all existing callers are unaffected.
+    The ON CONFLICT clause matches on (user_id, niche) which is the existing
+    unique index. Context is stored and used for filtering but is not part
+    of the unique key -- niche names are fully distinct between workspaces.
+    """
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run, day_of_week)
-        VALUES (?, ?, ?, ?, ?, 1, NULL, ?)
+        INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run, day_of_week, context)
+        VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?)
         ON CONFLICT(user_id, niche) DO UPDATE SET
             frequency   = excluded.frequency,
             time_of_day = excluded.time_of_day,
             timezone    = excluded.timezone,
             active      = 1,
             next_run    = NULL,
-            day_of_week = excluded.day_of_week
-    """, (user_id, niche, frequency, time_of_day, timezone, day_of_week))
+            day_of_week = excluded.day_of_week,
+            context     = excluded.context
+    """, (user_id, niche, frequency, time_of_day, timezone, day_of_week, context))
     conn.commit()
     c.execute("SELECT * FROM schedules WHERE user_id = ? AND niche = ?", (user_id, niche))
     row = c.fetchone()
@@ -1632,10 +1650,18 @@ def schedule_upsert(user_id: int, niche: str, frequency: str,
     return _schedule_row(row)
 
 
-def schedules_get_all(user_id: int) -> list:
+def schedules_get_all(user_id: int, context: str = "agent") -> list:
+    """
+    Return all schedules for a user in a given context.
+    context defaults to 'agent' so all existing callers are unaffected.
+    HB Marketing workspace passes context='hb_marketing' to see only its schedules.
+    """
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM schedules WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+    c.execute(
+        "SELECT * FROM schedules WHERE user_id = ? AND context = ? ORDER BY created_at DESC",
+        (user_id, context)
+    )
     rows = c.fetchall()
     conn.close()
     return [_schedule_row(r) for r in rows]
@@ -1691,12 +1717,17 @@ def schedule_deactivate(schedule_id: int) -> None:
     conn.close()
 
 
-def schedule_delete(user_id: int, niche: str) -> bool:
+def schedule_delete(user_id: int, niche: str, context: str = "agent") -> bool:
+    """
+    Delete a schedule for a user/niche/context combination.
+    context defaults to 'agent' so existing callers (setup/save niche cleanup,
+    DELETE /schedules/{niche} endpoint) continue to work without changes.
+    """
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "DELETE FROM schedules WHERE user_id = ? AND niche = ?",
-        (user_id, niche)
+        "DELETE FROM schedules WHERE user_id = ? AND niche = ? AND context = ?",
+        (user_id, niche, context)
     )
     affected = c.rowcount
     conn.commit()
@@ -1722,6 +1753,9 @@ def _schedule_row(row) -> dict:
     dow = None
     try: dow = row["day_of_week"]
     except Exception: pass
+    ctx = "agent"
+    try: ctx = row["context"] or "agent"
+    except Exception: pass
     return {
         "id":         row["id"],
         "userId":     row["user_id"],
@@ -1733,6 +1767,7 @@ def _schedule_row(row) -> dict:
         "lastRun":    row["last_run"],
         "nextRun":    row["next_run"],
         "dayOfWeek":  dow,
+        "context":    ctx,
     }
 
 
