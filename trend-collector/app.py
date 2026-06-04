@@ -470,7 +470,7 @@ async def save_to_library(payload: dict, current_user=Depends(get_current_user))
     source     = payload.get("source", "manual")
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
-    item = library_save(user_id=current_user["id"], niche=niche, content=content, compliance=compliance, source=source)
+    item = library_save(user_id=current_user["id"], niche=niche, content=content, compliance=compliance, source=source, context=_ctx)
     return {"success": True, "item": item}
 
 
