@@ -844,15 +844,21 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
 
 
 @app.get("/identity/guidance")
-async def get_identity_guidance(current_user=Depends(get_current_user)):
+async def get_identity_guidance(request: Request, current_user=Depends(get_current_user)):
     """
     Return actionable guidance for the current agent via the Next Action Engine.
     Replaces the retired /identity/score endpoint (Session 56).
     Never returns a numerical score or grade. Returns one actionable recommendation,
     supporting data points, a milestone progress indicator, and the CIR count.
     Used by Jordan's briefing card and the Next Action panel in index.html.
+    Accepts optional ?context=agent|hb_marketing to scope counts to the correct workspace.
+    hb_marketing context only honoured for super_admin/admin/hb_marketer roles.
     """
-    guidance = get_agent_guidance(current_user["id"])
+    ctx  = request.query_params.get("context", "agent")
+    role = current_user.get("role", "agent")
+    if ctx == "hb_marketing" and role not in ("super_admin", "admin", "hb_marketer"):
+        ctx = "agent"
+    guidance = get_agent_guidance(current_user["id"], context=ctx)
     return guidance
 
 
