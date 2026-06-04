@@ -1889,11 +1889,14 @@ def lookup_approval_token_record(token: str) -> Optional[dict]:
 # it matters — never a score, never a grade.
 # ─────────────────────────────────────────────
 
-def get_agent_guidance(user_id: int) -> dict:
+def get_agent_guidance(user_id: int, context: str = "agent") -> dict:
     """
     Return actionable guidance for an agent based on their current platform state.
     Called by the identity endpoint in app.py to power Jordan's briefing card
     and the Next Action panel in index.html.
+
+    context: 'agent' | 'hb_marketing' — filters content counts to the correct
+    workspace so HB Marketing Jordan never shows agent post counts and vice versa.
 
     Returns:
         next_action  — one specific, actionable recommendation (string)
@@ -1907,27 +1910,37 @@ def get_agent_guidance(user_id: int) -> dict:
     conn = get_conn()
     c    = conn.cursor()
 
-    # Load agent setup
+    # Load agent setup — always reads agent_setup (not affected by context)
     c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
     setup_row = c.fetchone()
     setup = json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
 
-    # Load content state
+    # Load content state — filter by context
     c.execute("""
         SELECT status, compliance, approved_at, published_at, saved_at, niche
         FROM content_library
-        WHERE user_id = ?
+        WHERE user_id = ? AND (context = ? OR (context IS NULL AND ? = 'agent'))
         ORDER BY saved_at DESC
-    """, (user_id,))
+    """, (user_id, context, context))
     rows = c.fetchall()
 
-    # CIR count from permanent audit trail — authoritative count
-    c.execute("SELECT COUNT(*) as cnt FROM compliance_records WHERE user_id = ?", (user_id,))
+    # CIR count — join to content_library to filter by context
+    # compliance_records has no context column so we join on library_item_id
+    c.execute("""
+        SELECT COUNT(*) as cnt
+        FROM compliance_records cr
+        LEFT JOIN content_library cl ON cr.library_item_id = cl.id
+        WHERE cr.user_id = ?
+          AND (cl.context = ? OR (cl.context IS NULL AND ? = 'agent') OR cr.library_item_id IS NULL AND ? = 'agent')
+    """, (user_id, context, context, context))
     cir_row   = c.fetchone()
     cir_count = cir_row["cnt"] if cir_row else 0
 
-    # Active schedules
-    c.execute("SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1", (user_id,))
+    # Active schedules — filter by context
+    c.execute(
+        "SELECT COUNT(*) as cnt FROM schedules WHERE user_id = ? AND active = 1 AND context = ?",
+        (user_id, context)
+    )
     sched_row    = c.fetchone()
     has_schedule = bool(sched_row and sched_row["cnt"] > 0)
 
