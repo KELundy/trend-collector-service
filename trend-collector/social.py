@@ -403,6 +403,268 @@ class PostRequest(BaseModel):
     content_override: Optional[str] = None
     image_url: Optional[str] = None        # Generated image to attach
     org_urn: Optional[str] = None          # LinkedIn org URN for company page posting
+    video_url: Optional[str] = None        # HeyGen rendered video URL — triggers video upload path
+
+# ─────────────────────────────────────────────
+# VIDEO UPLOAD HELPERS — Session 64
+# ─────────────────────────────────────────────
+
+async def _refresh_youtube_token(user_id: int) -> Optional[str]:
+    """Refresh an expired YouTube access token using the stored refresh token.
+    Returns the new access token on success, or None on failure."""
+    conn = database.get_platform_connection(user_id, "youtube")
+    if not conn or not conn.get("refresh_token"):
+        print(f"[YouTube] No refresh token found for user {user_id}")
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "grant_type":    "refresh_token",
+                    "refresh_token": conn["refresh_token"],
+                    "client_id":     YOUTUBE_CLIENT_ID,
+                    "client_secret": YOUTUBE_CLIENT_SECRET,
+                },
+                headers={"Accept": "application/json"},
+            )
+        data = resp.json()
+        new_token = data.get("access_token")
+        if not new_token:
+            print(f"[YouTube] Token refresh failed for user {user_id}: {data}")
+            return None
+        expires_in = data.get("expires_in", 3600)
+        new_expires_at = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
+        database.save_platform_connection(
+            user_id          = user_id,
+            platform         = "youtube",
+            access_token     = new_token,
+            refresh_token    = conn["refresh_token"],
+            expires_at       = new_expires_at,
+            platform_user_id = conn.get("platform_user_id", ""),
+            platform_handle  = conn.get("platform_handle", ""),
+        )
+        print(f"[YouTube] Token refreshed successfully for user {user_id}")
+        return new_token
+    except Exception as e:
+        print(f"[YouTube] Token refresh exception for user {user_id}: {e}")
+        return None
+
+
+async def _upload_youtube_video(access_token: str, video_source_url: str, title: str, description: str) -> dict:
+    """Download a video from HeyGen CDN and upload it to YouTube via resumable upload API."""
+    # Step 1: Download video from HeyGen
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        dl = await client.get(video_source_url)
+    if dl.status_code != 200:
+        raise HTTPException(502, "Could not retrieve your rendered video. Please try again.")
+    video_bytes   = dl.content
+    content_type  = dl.headers.get("content-type", "video/mp4").split(";")[0].strip()
+
+    # Step 2: Initiate resumable upload
+    init_payload = {
+        "snippet": {
+            "title":       title[:100],
+            "description": description[:5000],
+            "categoryId":  "22",   # People & Blogs — safe default for real estate
+        },
+        "status": {
+            "privacyStatus":            "public",
+            "selfDeclaredMadeForKids":  False,
+        },
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        init_resp = await client.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "resumable", "part": "snippet,status"},
+            json=init_payload,
+            headers={
+                "Authorization":         f"Bearer {access_token}",
+                "Content-Type":          "application/json",
+                "X-Upload-Content-Type": content_type,
+                "X-Upload-Content-Length": str(len(video_bytes)),
+            },
+        )
+    upload_url = init_resp.headers.get("Location", "")
+    if not upload_url:
+        print(f"[YouTube] Resumable upload init failed {init_resp.status_code}: {init_resp.text[:200]}")
+        raise HTTPException(502, "YouTube video upload failed. Please try again.")
+
+    # Step 3: Upload video bytes
+    async with httpx.AsyncClient(timeout=120) as client:
+        put_resp = await client.put(
+            upload_url,
+            content=video_bytes,
+            headers={
+                "Content-Type":   content_type,
+                "Content-Length": str(len(video_bytes)),
+            },
+        )
+    if put_resp.status_code not in (200, 201):
+        print(f"[YouTube] Video PUT failed {put_resp.status_code}: {put_resp.text[:200]}")
+        raise HTTPException(502, "YouTube video upload failed. Please try again.")
+
+    result   = put_resp.json()
+    video_id = result.get("id", "")
+    return {
+        "id":      video_id,
+        "url":     f"https://www.youtube.com/watch?v={video_id}",
+        "action":  "posted",
+        "message": "Video published to YouTube.",
+    }
+
+
+async def _upload_linkedin_video(
+    access_token: str,
+    person_urn: str,
+    video_source_url: str,
+    text: str,
+    org_urn: str = None,
+) -> dict:
+    """Download a video from HeyGen CDN and upload it to LinkedIn via register-upload flow.
+    Falls back to text-only post on any failure."""
+    # Determine author — mirrors _post_linkedin logic
+    if org_urn:
+        author = org_urn if org_urn.startswith("urn:") else f"urn:li:organization:{org_urn}"
+    else:
+        if not person_urn:
+            raise HTTPException(400, "LinkedIn user ID not found. Please reconnect your LinkedIn account.")
+        author = person_urn if person_urn.startswith("urn:") else f"urn:li:person:{person_urn}"
+
+    # Step 1: Download video from HeyGen
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            dl = await client.get(video_source_url)
+        if dl.status_code != 200:
+            raise Exception(f"HeyGen download returned {dl.status_code}")
+        video_bytes = dl.content
+    except Exception as e:
+        print(f"[LinkedIn] Video download failed: {e} — falling back to text post")
+        return await _post_linkedin(access_token, person_urn, text, None, org_urn)
+
+    # Step 2: Register video upload
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            reg = await client.post(
+                "https://api.linkedin.com/v2/assets?action=registerUpload",
+                json={
+                    "registerUploadRequest": {
+                        "recipes": ["urn:li:digitalmediaRecipe:feedshare-video"],
+                        "owner":   author,
+                        "serviceRelationships": [
+                            {"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}
+                        ],
+                    }
+                },
+                headers={
+                    "Authorization":              f"Bearer {access_token}",
+                    "Content-Type":               "application/json",
+                    "X-Restli-Protocol-Version":  "2.0.0",
+                },
+            )
+        if reg.status_code not in (200, 201):
+            raise Exception(f"Registration returned {reg.status_code}: {reg.text[:200]}")
+        reg_data    = reg.json()
+        upload_url  = reg_data["value"]["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
+        media_asset = reg_data["value"]["asset"]
+    except Exception as e:
+        print(f"[LinkedIn] Video upload failed, falling back to text post: {e}")
+        return await _post_linkedin(access_token, person_urn, text, None, org_urn)
+
+    # Step 3: Upload video bytes
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            put_resp = await client.put(
+                upload_url,
+                content=video_bytes,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type":  "application/octet-stream",
+                },
+            )
+        if put_resp.status_code not in (200, 201):
+            raise Exception(f"Video PUT returned {put_resp.status_code}")
+    except Exception as e:
+        print(f"[LinkedIn] Video upload failed, falling back to text post: {e}")
+        return await _post_linkedin(access_token, person_urn, text, None, org_urn)
+
+    # Step 4: Create video post
+    payload = {
+        "author":         author,
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {
+            "com.linkedin.ugc.ShareContent": {
+                "shareCommentary":   {"text": text},
+                "shareMediaCategory": "VIDEO",
+                "media": [
+                    {
+                        "status": "READY",
+                        "media":  media_asset,
+                        "title":  {"text": text[:100]},
+                    }
+                ],
+            }
+        },
+        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.linkedin.com/v2/ugcPosts",
+            json=payload,
+            headers={
+                "Authorization":              f"Bearer {access_token}",
+                "Content-Type":               "application/json",
+                "X-Restli-Protocol-Version":  "2.0.0",
+            },
+        )
+    if resp.status_code not in (200, 201):
+        print(f"[LinkedIn] Video post failed {resp.status_code}: {resp.text[:200]} — falling back to text post")
+        return await _post_linkedin(access_token, person_urn, text, None, org_urn)
+
+    post_id = resp.headers.get("x-restli-id", "")
+    return {
+        "id":      post_id,
+        "url":     f"https://www.linkedin.com/feed/update/{post_id}/" if post_id else "",
+        "action":  "posted",
+        "message": "Video published to LinkedIn.",
+    }
+
+
+async def _upload_facebook_video(
+    page_token: str,
+    page_id: str,
+    video_source_url: str,
+    text: str,
+) -> dict:
+    """Upload a video to a Facebook Page using URL-based ingestion.
+    Facebook fetches the video from the HeyGen CDN URL directly.
+    Falls back to text-only post on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"https://graph.facebook.com/v19.0/{page_id}/videos",
+                data={
+                    "file_url":    video_source_url,
+                    "description": text,
+                    "access_token": page_token,
+                },
+            )
+        if resp.status_code not in (200, 201):
+            raise Exception(f"Facebook video POST returned {resp.status_code}: {resp.text[:200]}")
+        result   = resp.json()
+        video_id = result.get("id", "")
+        return {
+            "id":      video_id,
+            "url":     f"https://www.facebook.com/{page_id}/videos/{video_id}/" if video_id else "",
+            "action":  "posted",
+            "message": "Video published to Facebook.",
+        }
+    except Exception as e:
+        print(f"[Facebook] Video upload failed, falling back to text post: {e}")
+        # Fall back — call _post_facebook with page_token already resolved
+        # Pass empty string for access_token and user_id since page_token is already set
+        return await _post_facebook("", "", text, None, page_token)
+
 
 @router.post("/post")
 async def post_to_platform(body: PostRequest, current_user=Depends(get_current_user)):
@@ -439,15 +701,63 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
     else:
         image_url = None
 
+    video_url = body.video_url  # May be None — routes to text/image path when absent
+
     try:
         if platform == "linkedin":
-            result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text, image_url, body.org_urn)
+            if video_url:
+                result = await _upload_linkedin_video(
+                    access_token,
+                    conn_data.get("platform_user_id", ""),
+                    video_url,
+                    post_text,
+                    body.org_urn,
+                )
+            else:
+                result = await _post_linkedin(access_token, conn_data.get("platform_user_id", ""), post_text, image_url, body.org_urn)
+
         elif platform == "google":
+            # Google Business Profile does not support video upload
             result = await _post_google(access_token, post_text)
+
         elif platform == "facebook":
-            result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text, image_url, conn_data.get("page_token", ""))
+            page_token = conn_data.get("page_token", "")
+            if video_url:
+                # Resolve page_id and page_token the same way _post_facebook does
+                fb_page_id    = os.getenv("FACEBOOK_PAGE_ID", "")
+                fb_page_token = page_token or os.getenv("FACEBOOK_PAGE_TOKEN", "")
+                if not fb_page_token:
+                    raise HTTPException(400, "No Facebook page token found. Please reconnect Facebook and select your page.")
+                if not fb_page_id and fb_page_token:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        me = await client.get(
+                            "https://graph.facebook.com/me",
+                            params={"access_token": fb_page_token, "fields": "id"},
+                        )
+                        fb_page_id = me.json().get("id", "")
+                result = await _upload_facebook_video(fb_page_token, fb_page_id, video_url, post_text)
+            else:
+                result = await _post_facebook(access_token, conn_data.get("platform_user_id", ""), post_text, image_url, page_token)
+
         elif platform == "youtube":
-            result = await _post_youtube(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
+            if video_url:
+                # Refresh token if expired — YouTube tokens expire after 1 hour
+                if _is_expired(conn_data.get("expires_at", "")):
+                    new_token = await _refresh_youtube_token(current_user["id"])
+                    if new_token:
+                        access_token = new_token
+                    else:
+                        raise HTTPException(401, "Your YouTube connection has expired. Please reconnect in Profile.")
+                # Build title from library item headline if available
+                yt_title = ""
+                if item:
+                    yt_title = (item.get("content", {}).get("headline") or "")[:100]
+                if not yt_title:
+                    yt_title = post_text[:100]
+                result = await _upload_youtube_video(access_token, video_url, yt_title, post_text)
+            else:
+                result = await _post_youtube(access_token, conn_data.get("platform_user_id", ""), post_text, image_url)
+
         else:
             raise HTTPException(400, f"Direct posting to {platform} is not yet supported.")
     except HTTPException:
