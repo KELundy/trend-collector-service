@@ -2461,11 +2461,11 @@ async def public_agent_rss(slug: str):
   <channel>
     <title>{esc(agent_name)} — Real Estate Insights</title>
     <link>https://{slug}.homebridgegroup.co</link>
-    <description>Verified real estate content by {esc(agent_name)}, {esc(market)}. CIR-certified by HomeBridge.</description>
+    <description>Verified real estate content by {esc(agent_name)}, {esc(market)}. CPR-reviewed by HomeBridge.</description>
     <language>en-us</language>
     <atom:link href="https://api.homebridgegroup.co/public/agent/{slug}/feed" rel="self" type="application/rss+xml"/>
     <managingEditor>support@homebridgegroup.co ({esc(agent_name)})</managingEditor>
-    <generator>HomeBridge CIR Platform</generator>
+    <generator>HomeBridge CPR Platform</generator>
 {items_xml}
   </channel>
 </rss>"""
@@ -2573,7 +2573,7 @@ async def public_verify_cir(cir_id: str):
     conn.close()
 
     if not row:
-        raise HTTPException(404, "CIR record not found.")
+        raise HTTPException(404, "CPR record not found.")
 
     row = dict(row)
 
@@ -4673,7 +4673,7 @@ function toggleChip(cb) {
     {secondary_btn}
   </form>
   <div class="footer">
-    Approving creates a CIR™ Certified Identity Record.<br>
+    Approving creates a CPR™ Certified Provenance Record.<br>
     <a href="{app_url}">Edit in App instead →</a>
   </div>
 </div>{plat_script}</body></html>"""
@@ -4690,12 +4690,12 @@ function toggleChip(cb) {
                 for p in published_to
             )
             pub_html    = f"<div class='pub-list'>{pub_chips}</div>"
-            action_line = "Your post has been approved, a CIR™ record created, and queued for publishing."
+            action_line = "Your post has been approved, a CPR™ record created, and queued for publishing."
             btn_label   = "Open App →"
             open_app_url = f"https://app.homebridgegroup.co?view=agent&panel=library{'&item=' + str(item_id) if item_id else ''}"
         else:
             pub_html     = ""
-            action_line  = "Your approval has been recorded and a CIR™ Certified Identity Record has been created. Open the app to publish when ready."
+            action_line  = "Your approval has been recorded and a Certified Provenance Record™ (CPR™) has been created. Open the app to publish when ready."
             btn_label    = "Publish Now →"
             open_app_url = f"https://app.homebridgegroup.co?view=agent&panel=library{'&item=' + str(item_id) if item_id else ''}"
 
