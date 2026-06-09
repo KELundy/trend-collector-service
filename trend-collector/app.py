@@ -2850,6 +2850,20 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
     )
     auth_stmt_esc = _esc_html(auth_stmt)
 
+    # Fixed-template meta description for search engines -- capped at 155 characters
+    _meta_parts = [d.get('agent_name', ''), " | Licensed Real Estate Agent"]
+    if d.get('market'):
+        _meta_parts.append(f" in {d.get('market','')}")
+    if posts_total:
+        _meta_parts.append(f" | {posts_total} CPR-reviewed posts")
+    if niche_str:
+        _meta_parts.append(f" on {niche_str}")
+    if area_str:
+        _meta_parts.append(f". Serving {area_str}.")
+    _meta_desc_raw = "".join(_meta_parts)
+    meta_desc = _meta_desc_raw if len(_meta_desc_raw) <= 155 else _meta_desc_raw[:152] + "..."
+    meta_desc_esc = _esc_html(meta_desc)
+
     page_title = _esc_html(
         f"{d.get('agent_name','')} — {d.get('market','') or 'Real Estate'} | Real Estate Expert | AutoMates"
     )
@@ -3056,11 +3070,11 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="robots" content="index,follow">
 <title>{page_title}</title>
-<meta name="description" content="{auth_stmt_esc}">
+<meta name="description" content="{meta_desc_esc}">
 <meta property="og:type" content="profile">
 <meta property="og:site_name" content="AutoMates">
 <meta property="og:title" content="{page_title}">
-<meta property="og:description" content="{auth_stmt_esc}">
+<meta property="og:description" content="{meta_desc_esc}">
 <meta property="og:url" content="{_esc_html(profile_url)}">
 <link rel="alternate" type="application/rss+xml" href="{_esc_html(rss_url)}" title="{name} &#8212; Verified Real Estate Insights">
 <link rel="canonical" href="{_esc_html(profile_url)}">
