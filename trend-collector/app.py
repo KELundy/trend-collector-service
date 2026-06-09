@@ -1435,17 +1435,20 @@ async def download_compliance_report(req: ComplianceReportRequest, current_user=
 async def get_agent_compliance_history(
     date_from: str = "",
     date_to:   str = "",
+    context:   str = "",
     current_user=Depends(get_current_user)
 ):
     """
     Return the agent's permanent compliance record history.
     Newest first. Optionally filtered by date range (ISO strings).
+    Optionally filtered by context ('agent' or 'hb_marketing').
     Records persist even after library items are deleted.
     """
     records = get_compliance_records(
         user_id   = current_user["id"],
         date_from = date_from,
         date_to   = date_to,
+        context   = context,
     )
     return {"records": records, "total": len(records)}
 
@@ -1454,11 +1457,13 @@ async def get_agent_compliance_history(
 async def download_agent_compliance_history_pdf(
     date_from: str = "",
     date_to:   str = "",
+    context:   str = "",
     current_user=Depends(get_current_user)
 ):
     """
     Generate a PDF compliance report from the permanent compliance_records
     table instead of content_library — survives post deletions.
+    Optionally filtered by context ('agent' or 'hb_marketing').
     """
     try:
         pdf_bytes = generate_compliance_pdf(
