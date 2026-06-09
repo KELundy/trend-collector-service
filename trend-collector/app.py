@@ -2617,6 +2617,991 @@ async def public_verify_cir(cir_id: str):
         "record_confirmed": True,
     }
 
+
+# =============================================================================
+# SERVER-SIDE RENDERED AUTHORITY PAGES — Session 66
+# =============================================================================
+# Replaces client-side agent.html / verify.html with fully-rendered HTML
+# served directly from the backend. All content is in the page source at
+# the moment the server responds. Crawlers see everything.
+#
+# Routes:
+#   GET /public/agent/{slug}/page        — full authority page HTML
+#   GET /public/agent/{slug}/posts/{post_slug}/page  — per-record post page HTML
+#   GET /public/verify/{cir_id}/page     — CPR record verification page HTML
+#   GET /public/sitemap.xml              — platform-wide sitemap
+#   GET /public/agent/{slug}/sitemap.xml — per-agent sitemap
+#   GET /robots.txt                      — robots file pointing to sitemap
+#
+# The host-detection middleware at the bottom of this block automatically
+# routes requests arriving at {slug}.homebridgegroup.co to the authority
+# page HTML without requiring the /page suffix.
+# =============================================================================
+
+def _esc_html(s: str) -> str:
+    """Escape a string for safe embedding in HTML."""
+    return (str(s or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;"))
+
+
+def _fmt_date_long(s: str) -> str:
+    """Format ISO date string as 'Month DD, YYYY'."""
+    if not s:
+        return ""
+    try:
+        from datetime import datetime as _dt2
+        return _dt2.fromisoformat(s[:10]).strftime("%B %d, %Y").replace(" 0", " ")
+    except Exception:
+        return s[:10]
+
+
+def _fmt_date_short(s: str) -> str:
+    """Format ISO date string as 'Mon YYYY'."""
+    if not s:
+        return ""
+    try:
+        from datetime import datetime as _dt2
+        return _dt2.fromisoformat(s[:10]).strftime("%B %Y")
+    except Exception:
+        return s[:10]
+
+
+def _headline_to_question(h: str) -> str:
+    """Convert a headline to a question form for FAQ schema."""
+    h = (h or "").strip()
+    if not h:
+        return ""
+    if h.endswith("?"):
+        return h
+    import re as _re2
+    if _re2.match(r"^(why|how|what|when|is|are|should|can|do|does)\s", h, _re2.IGNORECASE):
+        return h + "?"
+    if len(h) < 80:
+        return "What should I know about: " + h.lower() + "?"
+    return ""
+
+
+def _post_slug_make(headline: str, post_id: int) -> str:
+    import re as _re3
+    base = _re3.sub(r"[^a-z0-9]+", "-", (headline or "post").lower().strip()).strip("-")[:60]
+    return f"{base}-{post_id}"
+
+
+_AUTHORITY_CSS = """
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#F8F7F5;--white:#FFF;--ink:#1A1A1A;--ink-2:#2E2E2E;
+  --ink-3:#4A4540;--ink-4:#7A7470;--border:#E8E4DE;
+  --gold:#A67C2E;--gold-on-dark:#C8963C;--gold-dim:rgba(166,124,46,.10);--gold-mid:rgba(166,124,46,.25);
+  --green:#1A7A4A;--green-dim:rgba(26,122,74,.08);--green-mid:rgba(26,122,74,.18);
+  --amber:#b45309;--nav:#101620;
+  --shadow:0 2px 16px rgba(0,0,0,.06);--r:12px;
+}
+html{scroll-behavior:smooth}
+body{font-family:'DM Sans',sans-serif;background:var(--white);color:var(--ink);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{text-decoration:none;color:inherit}
+.top-bar{background:var(--nav);height:52px;padding:0 40px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.tb-logo{font-size:15px;font-weight:700;color:#fff;letter-spacing:.01em}
+.tb-logo span{color:var(--gold-on-dark)}
+.tb-cta{font-size:12px;font-weight:600;color:var(--gold-on-dark);border:1px solid rgba(200,150,60,.35);padding:6px 16px;border-radius:999px;transition:all .2s}
+.tb-cta:hover{background:var(--gold-on-dark);color:#fff}
+@media(max-width:600px){.top-bar{padding:0 20px}}
+.hero{background:var(--nav);padding:72px 40px 64px}
+.hero-inner{max-width:960px;margin:0 auto;display:grid;grid-template-columns:1fr auto;gap:48px;align-items:start}
+@media(max-width:680px){.hero-inner{grid-template-columns:1fr}.hero-badge-col{display:none}.hero{padding:52px 20px 44px}}
+.hero-eyebrow{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:rgba(200,150,60,.9);margin-bottom:18px;display:flex;align-items:center;gap:10px}
+.hero-eyebrow::before{content:'';width:24px;height:1px;background:rgba(200,150,60,.6)}
+.hero-name{font-family:'Outfit','DM Sans',sans-serif;font-size:clamp(42px,6vw,72px);font-weight:700;line-height:.95;letter-spacing:-.025em;color:#fff;margin-bottom:14px}
+.hero-role{font-size:16px;color:rgba(255,255,255,.45);margin-bottom:6px;font-weight:300}
+.hero-market{font-size:13px;color:rgba(255,255,255,.3);margin-bottom:22px}
+.authority-statement{font-size:16px;line-height:1.72;color:rgba(255,255,255,.55);max-width:580px;font-weight:300;margin-bottom:28px}
+.authority-statement strong{color:rgba(255,255,255,.8);font-weight:500}
+.hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.btn-gold{display:inline-flex;align-items:center;gap:6px;background:var(--gold);color:#fff;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;padding:10px 22px;border-radius:999px;border:none;cursor:pointer;transition:opacity .2s}
+.btn-gold:hover{opacity:.88}
+.btn-outline-lt{display:inline-flex;align-items:center;gap:6px;background:transparent;color:rgba(255,255,255,.55);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;padding:9px 20px;border-radius:999px;border:1px solid rgba(255,255,255,.18);cursor:pointer;transition:all .2s}
+.btn-outline-lt:hover{border-color:rgba(255,255,255,.4);color:rgba(255,255,255,.85)}
+.hero-badge-col{text-align:right}
+.cir-hero-badge{display:inline-flex;flex-direction:column;align-items:center;background:rgba(26,122,74,.12);border:1px solid rgba(26,122,74,.28);border-radius:16px;padding:22px 26px;gap:4px}
+.chb-icon{font-size:26px;color:var(--green);margin-bottom:6px}
+.chb-n{font-family:'Outfit','DM Sans',sans-serif;font-size:40px;font-weight:700;line-height:1;color:#fff}
+.chb-l{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--green)}
+.chb-s{font-size:11px;color:rgba(255,255,255,.3);margin-top:2px}
+.stats-strip{background:var(--bg);border-bottom:1px solid var(--border)}
+.stats-row{max-width:960px;margin:0 auto;padding:0 40px;display:grid;grid-template-columns:repeat(4,1fr)}
+.stat-item{padding:26px 0;border-right:1px solid var(--border);text-align:center}
+.stat-item:last-child{border-right:none}
+.si-n{font-family:'Outfit','DM Sans',sans-serif;font-size:36px;font-weight:700;line-height:1;color:var(--ink);margin-bottom:5px}
+.si-n.gold{color:var(--gold)}.si-n.green{color:var(--green)}
+.si-l{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-4)}
+.si-stmt{font-size:13px;font-weight:600;color:var(--green);line-height:1.35;margin-bottom:5px;padding:0 8px}
+@media(max-width:640px){.stats-row{grid-template-columns:repeat(2,1fr);padding:0 20px}.stat-item:nth-child(2){border-right:none}.stat-item:nth-child(3){border-right:1px solid var(--border)}}
+.main{max-width:960px;margin:0 auto;padding:0 40px}
+@media(max-width:600px){.main{padding:0 20px}}
+.sec{padding:52px 0 0}
+.sec-hdr{display:flex;align-items:center;gap:12px;margin-bottom:24px}
+.sec-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--ink-4);white-space:nowrap}
+.sec-line{flex:1;height:1px;background:var(--border)}
+.compliance-block{background:var(--green-dim);border:1px solid var(--green-mid);border-radius:var(--r);padding:24px 28px;display:flex;gap:18px;align-items:flex-start}
+.cb-icon{font-size:22px;flex-shrink:0;margin-top:1px}
+.cb-title{font-size:15px;font-weight:700;color:var(--green);margin-bottom:5px}
+.cb-body{font-size:13px;color:var(--ink-3);line-height:1.6}
+.chip-row{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-size:12px;font-weight:500;padding:5px 14px;border-radius:999px;background:var(--bg);border:1px solid var(--border);color:var(--ink-3)}
+.chip.niche{background:var(--gold-dim);border-color:var(--gold-mid);color:var(--gold);font-weight:600}
+.desig{font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;background:var(--nav);color:rgba(255,255,255,.8);letter-spacing:.04em}
+.streak-badge{display:inline-flex;align-items:center;gap:8px;background:var(--gold-dim);border:1px solid var(--gold-mid);border-radius:999px;padding:8px 16px;font-size:13px;font-weight:600;color:var(--gold)}
+.faq-list{display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.faq-item{background:var(--white)}
+.faq-q{width:100%;text-align:left;padding:20px 24px;background:none;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;color:var(--ink);display:flex;justify-content:space-between;align-items:center;gap:12px}
+.faq-icon{font-size:18px;color:var(--ink-4);flex-shrink:0;line-height:1}
+.faq-a{padding:0 24px 20px;font-size:14px;color:var(--ink-3);line-height:1.7}
+.post-list{display:flex;flex-direction:column;gap:16px}
+.post-card{background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:28px}
+.post-card.featured{border-left:3px solid var(--gold)}
+.post-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.post-niche{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--gold)}
+.post-dot{color:var(--border);font-size:11px}
+.post-date{font-size:11px;color:var(--ink-4)}
+.post-h{font-family:'Outfit','DM Sans',sans-serif;font-size:20px;font-weight:700;line-height:1.25;color:var(--ink);margin-bottom:10px}
+.post-body{font-size:14px;line-height:1.75;color:var(--ink-3);white-space:pre-line}
+.post-footer{display:flex;align-items:center;justify-content:space-between;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);flex-wrap:wrap;gap:8px}
+.cir-stamp{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--green)}
+.post-permalink{font-size:11px;color:var(--ink-4)}
+.post-permalink:hover{color:var(--gold)}
+.tools-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:640px){.tools-grid{grid-template-columns:1fr}}
+.tool-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:24px}
+.tool-t{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:6px}
+.tool-p{font-size:12px;color:var(--ink-4);line-height:1.6;margin-bottom:14px}
+.tool-code{background:var(--nav);border-radius:8px;padding:12px 14px;font-family:'SF Mono','Courier New',monospace;font-size:11px;color:rgba(255,255,255,.65);line-height:1.6;word-break:break-all}
+.trust-footer{margin:56px 0 80px;background:var(--nav);border-radius:var(--r);padding:36px 40px;display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap}
+.tf-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.35);margin-bottom:5px}
+.tf-headline{font-family:'Outfit','DM Sans',sans-serif;font-size:20px;color:#fff;margin-bottom:4px}
+.tf-sub{font-size:13px;color:rgba(255,255,255,.45);line-height:1.5}
+.tf-cta{font-size:13px;font-weight:600;color:var(--gold);border:1px solid rgba(200,150,60,.4);padding:10px 22px;border-radius:999px;white-space:nowrap}
+.tf-cta:hover{background:var(--gold);color:#fff}
+@media(max-width:600px){.trust-footer{padding:28px 24px;flex-direction:column}}
+/* Verify page styles */
+.page{max-width:680px;margin:0 auto;padding:48px 24px 80px}
+.verify-header{text-align:center;margin-bottom:40px}
+.verify-eyebrow{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:12px}
+.verify-title{font-family:'Outfit','DM Sans',sans-serif;font-size:32px;font-weight:700;color:var(--ink);margin-bottom:8px}
+.verify-sub{font-size:14px;color:var(--ink-4);line-height:1.6}
+.result-card{background:var(--white);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.result-card.valid{border-color:var(--green-mid)}
+.rc-header{padding:24px 28px;display:flex;gap:16px;align-items:flex-start}
+.rc-icon{font-size:28px;flex-shrink:0}
+.rc-cir{font-family:'DM Sans',sans-serif;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--green);margin-bottom:4px}
+.rc-headline{font-family:'Outfit','DM Sans',sans-serif;font-size:20px;font-weight:700;color:var(--ink);line-height:1.2;margin-bottom:6px}
+.rc-agent{font-size:14px;color:var(--ink-3)}
+.rc-rows{border-top:1px solid var(--border)}
+.rc-row{display:flex;justify-content:space-between;align-items:center;padding:14px 28px;border-bottom:1px solid var(--border);gap:12px}
+.rc-row:last-child{border-bottom:none}
+.rc-row-label{font-size:12px;color:var(--ink-4);font-weight:500}
+.rc-row-val{font-size:13px;font-weight:600;color:var(--ink)}
+.badge-pass{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:var(--green);background:var(--green-dim);border:1px solid var(--green-mid);padding:3px 10px;border-radius:999px}
+.rc-footer{padding:20px 28px;border-top:1px solid var(--border);background:var(--bg);font-size:12px;color:var(--ink-4);line-height:1.6}
+.rc-link{display:inline-block;margin-top:12px;font-size:13px;font-weight:600;color:var(--gold)}
+"""
+
+
+def _build_authority_page_html(d: dict, slug: str) -> str:
+    """
+    Build a fully server-side rendered HTML page for an agent authority page.
+    Every piece of content is present in the raw HTML source.
+    No JavaScript required to see content — crawlers see everything.
+    """
+    import json as _json2
+    import re as _re4
+
+    name       = _esc_html(d.get("agent_name", "Real Estate Agent"))
+    brokerage  = _esc_html(d.get("brokerage", ""))
+    market     = _esc_html(d.get("market", ""))
+    niches     = d.get("niches", [])
+    areas      = d.get("service_areas", [])
+    desigs     = d.get("designations", [])
+    posts      = d.get("posts", [])
+    cir_count  = int(d.get("cir_count", 0))
+    posts_total= int(d.get("posts_total", 0))
+    member_since = _esc_html(d.get("member_since", ""))
+    week_streak  = int(d.get("week_streak", 0))
+    cta_url    = _esc_html(d.get("cta_url", "") or d.get("website", "") or "https://app.homebridgegroup.co")
+    cta_label  = _esc_html(d.get("cta_label", "") or f"Connect with {d.get('agent_name','').split(' ')[0]}")
+    profile_url = f"https://{slug}.homebridgegroup.co"
+    rss_url     = f"https://api.homebridgegroup.co/public/agent/{slug}/feed"
+    state       = d.get("state", "")
+
+    # Authority statement — in source for crawlers
+    niche_str = ", ".join(niches[:3])
+    area_str  = ", ".join(areas[:3])
+    auth_stmt = (
+        f"{d.get('agent_name','')} is a licensed real estate agent"
+        + (f" with {d.get('brokerage','')}" if d.get("brokerage") else "")
+        + (f" in {d.get('market','')}" if d.get("market") else "")
+        + (f", specializing in {niche_str}" if niche_str else "")
+        + (f". Serving {area_str}" if area_str else "")
+        + f". {posts_total} professionally reviewed posts. Each post carries a CPR\u2122 record "
+          f"confirming pre-publication review by a licensed real estate professional."
+    )
+    auth_stmt_esc = _esc_html(auth_stmt)
+
+    page_title = _esc_html(
+        f"{d.get('agent_name','')} — {d.get('market','') or 'Real Estate'} | Real Estate Expert | AutoMates"
+    )
+
+    # JSON-LD schema — fully server-side
+    schema = {
+        "@context": "https://schema.org",
+        "@type": ["Person", "RealEstateAgent"],
+        "name": d.get("agent_name", ""),
+        "jobTitle": "Licensed Real Estate Agent",
+        "url": profile_url,
+        "description": auth_stmt,
+    }
+    if d.get("brokerage"):
+        schema["worksFor"] = {"@type": "Organization", "name": d["brokerage"]}
+    if niches:
+        schema["knowsAbout"] = niches
+    if areas:
+        schema["areaServed"] = [{"@type": "City", "name": a} for a in areas]
+    if d.get("market"):
+        schema["homeLocation"] = {"@type": "Place", "name": d["market"]}
+    creds = []
+    if desigs:
+        creds = [{"@type": "EducationalOccupationalCredential", "name": x} for x in desigs]
+    if cir_count > 0:
+        creds.append({
+            "@type": "EducationalOccupationalCredential",
+            "credentialCategory": "CPR\u2122 \u2014 Certified Provenance Record",
+            "description": f"{cir_count} posts carrying CPR\u2122 provenance records confirming pre-publication professional compliance review",
+            "recognizedBy": {"@type": "Organization", "name": "AutoMates by HomeBridge Group, LLC", "url": "https://homebridgegroup.co"},
+        })
+    if creds:
+        schema["hasCredential"] = creds
+    schema["review"] = {
+        "@type": "Review",
+        "reviewAspect": "Professional compliance review",
+        "reviewBody": "Each post reviewed by a licensed real estate professional prior to publication. Review process covers federal advertising standards, NAR Code of Ethics, and applicable state real estate commission requirements.",
+        "author": {
+            "@type": "Person",
+            "name": d.get("agent_name", ""),
+            "hasCredential": {
+                "@type": "EducationalOccupationalCredential",
+                "credentialCategory": "Real Estate License",
+                "recognizedBy": {"@type": "Organization", "name": f"{state or 'State'} Real Estate Commission"},
+            },
+        },
+    }
+    faq_items = []
+    for p in posts[:10]:
+        q = _headline_to_question(p.get("headline", ""))
+        if q and p.get("body"):
+            faq_items.append({
+                "@type": "Question",
+                "name": q,
+                "acceptedAnswer": {"@type": "Answer", "text": p["body"][:500]},
+            })
+    if faq_items:
+        schema["mainEntity"] = {"@type": "FAQPage", "mainEntity": faq_items}
+    if posts:
+        schema["subjectOf"] = {
+            "@type": "ItemList",
+            "numberOfItems": len(posts),
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": i + 1,
+                    "item": {
+                        "@type": "Article",
+                        "headline": p.get("headline", ""),
+                        "articleBody": (p.get("body", "") or "")[:500],
+                        "datePublished": p.get("approved_at", ""),
+                        "url": p.get("post_url", profile_url),
+                        "author": {"@type": "Person", "name": d.get("agent_name", "")},
+                        "publisher": {"@type": "Organization", "name": "AutoMates", "url": "https://homebridgegroup.co"},
+                        "about": {"@type": "Thing", "name": p.get("niche", "Real Estate")},
+                    },
+                }
+                for i, p in enumerate(posts[:20])
+            ],
+        }
+    schema["speakable"] = {"@type": "SpeakableSpecification", "cssSelector": [".authority-statement", ".hero-name"]}
+    schema_json = _json2.dumps(schema, ensure_ascii=False, indent=2)
+
+    # Niche chips
+    niche_chips_html = "".join(
+        f'<span class="chip niche">{_esc_html(n)}</span>' for n in niches
+    ) if niches else ""
+
+    # Area chips
+    area_chips_html = "".join(
+        f'<span class="chip">{_esc_html(a)}</span>' for a in areas
+    ) if areas else ""
+
+    # Designation chips
+    desig_chips_html = "".join(
+        f'<span class="desig">{_esc_html(x)}</span>' for x in desigs
+    ) if desigs else ""
+
+    # Streak section
+    streak_html = ""
+    if week_streak > 1:
+        streak_html = f"""
+    <div class="sec" id="streak-sec">
+      <div class="sec-hdr"><span class="sec-label">Publishing Consistency</span><span class="sec-line"></span></div>
+      <div class="streak-badge">&#128293; Publishing consistently for {week_streak} consecutive week{'s' if week_streak > 1 else ''}</div>
+      <p style="font-size:13px;color:var(--ink-4);margin-top:10px">Consistent publishing is one of the strongest signals search engines and AI platforms use to evaluate expertise.</p>
+    </div>"""
+
+    # FAQ section — answers fully in source
+    faq_html = ""
+    faq_posts = [p for p in posts if _headline_to_question(p.get("headline", "")) and p.get("body")][:12]
+    if faq_posts:
+        faq_items_html = ""
+        for p in faq_posts:
+            q = _headline_to_question(p.get("headline", ""))
+            body_preview = _esc_html((p.get("body", "") or "")[:600])
+            cir_note = f'<div style="margin-top:10px;font-size:11px;font-weight:700;color:var(--green)">&#10003; CPR&#8482; {_esc_html(p.get("cir_id",""))}</div>' if p.get("cir_id") else ""
+            post_link = f'<p style="margin-top:10px"><a href="{_esc_html(p.get("post_url",""))}" style="font-size:12px;color:var(--gold);font-weight:600">Read full post &#8594;</a></p>' if p.get("post_url") else ""
+            faq_items_html += f"""
+      <div class="faq-item">
+        <div class="faq-q" style="width:100%;text-align:left;padding:20px 24px;font-family:\'DM Sans\',sans-serif;font-size:14px;font-weight:600;color:var(--ink);display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span>{_esc_html(q)}</span>
+        </div>
+        <div class="faq-a">
+          <p>{body_preview}</p>
+          {cir_note}
+          {post_link}
+        </div>
+      </div>"""
+        faq_intro = _esc_html(f"Questions {d.get('market','local buyers and homeowners')} ask {d.get('agent_name','').split(' ')[0]} most.")
+        faq_html = f"""
+    <div class="sec" id="faq-sec">
+      <div class="sec-hdr"><span class="sec-label">Recent Questions</span><span class="sec-line"></span></div>
+      <p style="font-size:13px;color:var(--ink-4);margin-bottom:20px">{faq_intro}</p>
+      <div class="faq-list">{faq_items_html}</div>
+    </div>"""
+
+    # Posts — all content in source
+    posts_html = ""
+    if posts:
+        post_cards = ""
+        for i, p in enumerate(posts):
+            headline = _esc_html(p.get("headline", ""))
+            body     = _esc_html(p.get("body", "") or "")
+            niche_lbl = _esc_html(p.get("niche", ""))
+            date_lbl  = _esc_html(_fmt_date_long(p.get("approved_at", "")))
+            cir_id    = p.get("cir_id", "")
+            post_url  = p.get("post_url", "")
+            verify_url = f"https://{slug}.homebridgegroup.co/verify/{cir_id}" if cir_id else ""
+            featured  = " featured" if i == 0 else ""
+            cir_stamp = f'<div class="cir-stamp"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5.5" stroke="#1A7A4A"/><path d="M3.5 6l2 2 3-3" stroke="#1A7A4A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>CPR&#8482; {_esc_html(cir_id)}</div>' if cir_id else "<div></div>"
+            permalink = f'<a href="{_esc_html(post_url)}" class="post-permalink">Read Full Post &#8594;</a>' if post_url else ""
+            post_cards += f"""
+        <div class="post-card{featured}" itemscope itemtype="https://schema.org/Article">
+          <div class="post-meta">
+            {f'<span class="post-niche">{niche_lbl}</span>' if niche_lbl else ''}
+            {f'<span class="post-dot">&middot;</span>' if niche_lbl and date_lbl else ''}
+            {f'<span class="post-date">{date_lbl}</span>' if date_lbl else ''}
+          </div>
+          {f'<h2 class="post-h" itemprop="headline">{headline}</h2>' if headline else ''}
+          {f'<div class="post-body" itemprop="articleBody">{body}</div>' if body else ''}
+          <div class="post-footer">
+            {cir_stamp}
+            {permalink}
+          </div>
+        </div>"""
+        posts_html = f"""
+    <div class="sec" id="posts-sec">
+      <div class="sec-hdr"><span class="sec-label">Recently Reviewed</span><span class="sec-line"></span></div>
+      <div class="post-list">{post_cards}</div>
+    </div>"""
+
+    # Sitemap and RSS tool section
+    tools_html = f"""
+    <div class="sec" id="tools-sec">
+      <div class="sec-hdr"><span class="sec-label">Share &amp; Syndicate</span><span class="sec-line"></span></div>
+      <div class="tools-grid">
+        <div class="tool-card">
+          <div class="tool-t">&#128225; RSS Feed</div>
+          <div class="tool-p">Paste this URL into WordPress, Squarespace, or any CMS to auto-display reviewed posts.</div>
+          <div class="tool-code">{_esc_html(rss_url)}</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-t">&#60;/&#62; Embed Widget</div>
+          <div class="tool-p">One line of code. Your reviewed posts appear automatically on any webpage.</div>
+          <div class="tool-code">&lt;script src="https://app.homebridgegroup.co/widget.js" data-agent="{_esc_html(slug)}"&gt;&lt;/script&gt;</div>
+        </div>
+      </div>
+    </div>"""
+
+    # Compliance block
+    compliance_body = (
+        "CPR&#8482; &#8212; Certified Provenance Record &#8212; is a timestamped provenance record "
+        "confirming that a licensed real estate professional personally reviewed this content for "
+        "professional compliance before publication. CPR&#8482; certifies the completion of that review "
+        "process. It does not certify the accuracy of market data, valuations, or predictions."
+        + (f" Publishing since {_esc_html(member_since)}." if member_since else "")
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="robots" content="index,follow">
+<title>{page_title}</title>
+<meta name="description" content="{auth_stmt_esc}">
+<meta property="og:type" content="profile">
+<meta property="og:site_name" content="AutoMates">
+<meta property="og:title" content="{page_title}">
+<meta property="og:description" content="{auth_stmt_esc}">
+<meta property="og:url" content="{_esc_html(profile_url)}">
+<link rel="alternate" type="application/rss+xml" href="{_esc_html(rss_url)}" title="{name} &#8212; Verified Real Estate Insights">
+<link rel="canonical" href="{_esc_html(profile_url)}">
+<script type="application/ld+json">{schema_json}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<style>{_AUTHORITY_CSS}</style>
+</head>
+<body>
+<nav class="top-bar">
+  <a class="tb-logo" href="https://homebridgegroup.co"><span>Auto</span>Mates</a>
+  <a class="tb-cta" href="https://app.homebridgegroup.co">Sign In &#8594;</a>
+</nav>
+<div class="hero">
+  <div class="hero-inner">
+    <div>
+      <div class="hero-eyebrow">CPR&#8482; Reviewed Professional</div>
+      <h1 class="hero-name">{name}</h1>
+      <div class="hero-role">Licensed Real Estate Agent{(' &middot; ' + brokerage) if brokerage else ''}</div>
+      {f'<div class="hero-market">&#128205; {market}</div>' if market else ''}
+      <p class="authority-statement">{auth_stmt_esc}</p>
+      <div class="hero-actions">
+        <a href="{cta_url}" class="btn-gold" target="_blank">{cta_label} &#8594;</a>
+        <a href="#posts-sec" class="btn-outline-lt">View reviewed posts &#8595;</a>
+      </div>
+    </div>
+    <div class="hero-badge-col">
+      <div class="cir-hero-badge">
+        <div class="chb-icon">&#10003;</div>
+        <div class="chb-n">{cir_count}</div>
+        <div class="chb-l">CPR&#8482; Records</div>
+        <div class="chb-s">Provenance Certified</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stats-strip">
+  <div class="stats-row">
+    <div class="stat-item"><div class="si-n gold">{cir_count}</div><div class="si-l">CPR&#8482; Records</div></div>
+    <div class="stat-item"><div class="si-stmt">Every post on this page was reviewed before publication</div><div class="si-l">Pre-Publication Review</div></div>
+    <div class="stat-item"><div class="si-n">{posts_total}</div><div class="si-l">Professionally Reviewed</div></div>
+    <div class="stat-item"><div class="si-n">{_esc_html(member_since) if member_since else '&#8212;'}</div><div class="si-l">Publishing Since</div></div>
+  </div>
+</div>
+<div class="main">
+  <div class="sec">
+    <div class="sec-hdr"><span class="sec-label">Compliance Record</span><span class="sec-line"></span></div>
+    <div class="compliance-block">
+      <div class="cb-icon">&#10003;</div>
+      <div>
+        <div class="cb-title">Every post on this page carries a CPR&#8482; record</div>
+        <div class="cb-body">{compliance_body}</div>
+      </div>
+    </div>
+  </div>
+  {streak_html}
+  {'<div class="sec" id="niches-sec"><div class="sec-hdr"><span class="sec-label">Specializations</span><span class="sec-line"></span></div><div class="chip-row">' + niche_chips_html + '</div></div>' if niche_chips_html else ''}
+  {'<div class="sec" id="areas-sec"><div class="sec-hdr"><span class="sec-label">Markets Served</span><span class="sec-line"></span></div><div class="chip-row">' + area_chips_html + '</div></div>' if area_chips_html else ''}
+  {'<div class="sec" id="desig-sec"><div class="sec-hdr"><span class="sec-label">Designations &amp; Certifications</span><span class="sec-line"></span></div><div class="chip-row">' + desig_chips_html + '</div></div>' if desig_chips_html else ''}
+  {faq_html}
+  {posts_html}
+  {tools_html}
+  <div class="trust-footer">
+    <div>
+      <div class="tf-label">Reviewed by AutoMates</div>
+      <div class="tf-headline">Real professionals. Reviewed content.</div>
+      <div class="tf-sub">Every post reviewed by a licensed agent. Checked against Fair Housing,<br>NAR Standards, and state advertising rules.</div>
+      <div style="margin-top:10px;font-size:11px;"><a href="https://homebridgegroup.co" style="color:rgba(255,255,255,.35);text-decoration:underline;">What is AutoMates? &#8594;</a></div>
+    </div>
+    <a href="https://homebridgegroup.co" class="tf-cta" target="_blank">What is AutoMates? &#8594;</a>
+  </div>
+</div>
+</body>
+</html>"""
+    return html
+
+
+def _build_verify_page_html(d: dict) -> str:
+    """
+    Build a fully server-side rendered HTML page for a single CPR record.
+    All content in source. No JavaScript needed for crawlers.
+    """
+    import json as _json3
+
+    cir_id     = _esc_html(d.get("cir_id", ""))
+    agent_name = _esc_html(d.get("agent_name", ""))
+    brokerage  = _esc_html(d.get("brokerage", ""))
+    headline   = _esc_html(d.get("headline", ""))
+    niche      = _esc_html(d.get("niche", ""))
+    approved   = _esc_html(_fmt_date_long(d.get("approved_at", "")))
+    overall    = d.get("overall_status", "")
+    slug       = d.get("agent_slug", "")
+    profile_url = f"https://{slug}.homebridgegroup.co" if slug else "https://homebridgegroup.co"
+    rules_ver  = _esc_html(d.get("rules_version", ""))
+    page_title = f"CPR&#8482; Record {cir_id} &#8212; {agent_name} | AutoMates"
+    desc       = f"Certified Provenance Record {d.get('cir_id','')} issued to {d.get('agent_name','')}. Pre-publication compliance review confirmed."
+
+    badge_html = '<span class="badge-pass">&#10003; Reviewed</span>'
+    if overall in ("warn", "review-recommended"):
+        badge_html = '<span style="font-size:11px;font-weight:700;color:var(--amber)">&#9888; Note</span>'
+    elif overall in ("fail", "attention-required"):
+        badge_html = '<span style="font-size:11px;font-weight:700;color:#b91c1c">&#10007; Attention Required</span>'
+
+    # JSON-LD schema for per-record page
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": d.get("headline", ""),
+        "datePublished": d.get("approved_at", ""),
+        "author": {
+            "@type": "Person",
+            "name": d.get("agent_name", ""),
+            "worksFor": {"@type": "Organization", "name": d.get("brokerage", "")} if d.get("brokerage") else None,
+        },
+        "publisher": {"@type": "Organization", "name": "AutoMates", "url": "https://homebridgegroup.co"},
+        "identifier": d.get("cir_id", ""),
+        "about": {"@type": "Thing", "name": niche or "Real Estate"},
+        "review": {
+            "@type": "Review",
+            "reviewAspect": "Professional compliance review",
+            "reviewBody": "This content was reviewed by a licensed real estate professional prior to publication under the AutoMates CPR (Certified Provenance Record) system.",
+            "reviewRating": {"@type": "Rating", "ratingValue": "5", "bestRating": "5"},
+        },
+    }
+    schema_json = _json3.dumps(schema, ensure_ascii=False, indent=2)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="robots" content="index,follow">
+<title>{page_title}</title>
+<meta name="description" content="{_esc_html(desc)}">
+<meta property="og:title" content="{page_title}">
+<meta property="og:description" content="{_esc_html(desc)}">
+<meta property="og:url" content="https://{_esc_html(slug)}.homebridgegroup.co/verify/{cir_id}">
+<link rel="canonical" href="https://{_esc_html(slug)}.homebridgegroup.co/verify/{cir_id}">
+<script type="application/ld+json">{schema_json}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{_AUTHORITY_CSS}</style>
+</head>
+<body>
+<nav class="top-bar">
+  <a class="tb-logo" href="https://homebridgegroup.co"><span>Auto</span>Mates</a>
+  <a class="tb-cta" href="https://app.homebridgegroup.co">Sign In &#8594;</a>
+</nav>
+<div class="page">
+  <div class="verify-header">
+    <div class="verify-eyebrow">CPR&#8482; Record Lookup</div>
+    <h1 class="verify-title">Certified Provenance Record&#8482; (CPR&#8482;)</h1>
+    <p class="verify-sub">This record confirms a licensed real estate professional reviewed and approved this content prior to publication.</p>
+  </div>
+  <div class="result-card valid">
+    <div class="rc-header">
+      <div class="rc-icon">&#10003;</div>
+      <div>
+        <div class="rc-cir">{cir_id}</div>
+        {f'<div class="rc-headline">{headline}</div>' if headline else ''}
+        <div class="rc-agent">{agent_name}{(' &middot; ' + brokerage) if brokerage else ''}</div>
+      </div>
+    </div>
+    <div class="rc-rows">
+      <div class="rc-row"><span class="rc-row-label">Review outcome</span>{badge_html}</div>
+      <div class="rc-row"><span class="rc-row-label">Niche</span><span class="rc-row-val">{niche or '&#8212;'}</span></div>
+      <div class="rc-row"><span class="rc-row-label">Reviewed</span><span class="rc-row-val">{approved or '&#8212;'}</span></div>
+      {f'<div class="rc-row"><span class="rc-row-label">Rules version at time of review</span><span class="rc-row-val">{rules_ver}</span></div>' if rules_ver else ''}
+    </div>
+    <div class="rc-footer">
+      <strong>What this record confirms:</strong> A licensed real estate professional reviewed this content prior to publication.
+      The review covered federal advertising standards, NAR Code of Ethics requirements, and applicable state real estate commission rules active at the time of review.
+      <strong>What this record does not confirm:</strong> The accuracy of market data, valuations, predictions, or any factual claims in the content.
+      CPR&#8482; certifies the completion of the review process, not the accuracy of the content.
+      {f'<br><a href="{_esc_html(profile_url)}" class="rc-link">View agent profile &#8594;</a>' if slug else ''}
+    </div>
+  </div>
+</div>
+</body>
+</html>"""
+    return html
+
+
+@app.get("/public/agent/{slug}/page")
+async def public_agent_authority_page(slug: str, request: Request):
+    """
+    Server-side rendered authority page for an agent.
+    All content baked into HTML source — fully crawlable by Google and AI systems.
+    URL: https://{slug}.homebridgegroup.co (via host middleware) or
+         https://api.homebridgegroup.co/public/agent/{slug}/page (direct test)
+    """
+    from fastapi.responses import HTMLResponse as _HTMLResponse
+    import json as _json4
+
+    user = _get_agent_by_slug(slug)
+    if not user:
+        raise HTTPException(404, "Agent not found.")
+
+    # Reuse the existing public_agent_profile data assembly
+    # Call the data-gathering logic directly rather than duplicating it
+    response_data = await public_agent_profile(slug)
+
+    html = _build_authority_page_html(response_data, slug)
+    return _HTMLResponse(content=html, status_code=200, headers={
+        "Cache-Control": "public, max-age=300",  # 5-minute cache — fresh enough, fast enough
+        "X-Robots-Tag": "index, follow",
+    })
+
+
+@app.get("/public/agent/{slug}/posts/{post_slug}/page")
+async def public_agent_post_page(slug: str, post_slug: str):
+    """
+    Server-side rendered individual post page.
+    Each approved post gets its own crawlable, citable URL.
+    URL: https://{slug}.homebridgegroup.co/posts/{post-slug}
+    """
+    from fastapi.responses import HTMLResponse as _HTMLResponse
+    import json as _json5, re as _re5
+    from database import get_conn as _gc5
+
+    user = _get_agent_by_slug(slug)
+    if not user:
+        raise HTTPException(404, "Agent not found.")
+
+    conn = _gc5()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, niche, content, cir_id, approved_at, status
+        FROM content_library
+        WHERE user_id = ? AND status IN ('approved','published')
+        ORDER BY approved_at DESC
+    """, (user["id"],))
+    items = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    matched = None
+    for item in items:
+        try:
+            cd = _json5.loads(item.get("content") or "{}")
+        except Exception:
+            cd = {}
+        headline = cd.get("headline", "") or cd.get("title", "")
+        if _post_slug_make(headline, item["id"]) == post_slug:
+            body = cd.get("body", "") or cd.get("post", "") or cd.get("content", "")
+            matched = {
+                "headline":    headline,
+                "body":        body,
+                "niche":       item.get("niche", ""),
+                "cir_id":      item.get("cir_id", ""),
+                "approved_at": (item.get("approved_at") or "")[:10],
+                "agent_name":  user["agent_name"],
+                "brokerage":   user.get("brokerage", ""),
+            }
+            break
+
+    if not matched:
+        raise HTTPException(404, "Post not found.")
+
+    import json as _j6
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": matched["headline"],
+        "articleBody": matched["body"],
+        "datePublished": matched["approved_at"],
+        "author": {"@type": "Person", "name": matched["agent_name"]},
+        "publisher": {"@type": "Organization", "name": "AutoMates", "url": "https://homebridgegroup.co"},
+    }
+    if matched["cir_id"]:
+        schema["identifier"] = matched["cir_id"]
+    schema_json = _j6.dumps(schema, ensure_ascii=False, indent=2)
+
+    profile_url = f"https://{slug}.homebridgegroup.co"
+    verify_url  = f"https://{slug}.homebridgegroup.co/verify/{matched['cir_id']}" if matched["cir_id"] else ""
+    page_title  = _esc_html(f"{matched['headline']} — {matched['agent_name']} | AutoMates")
+    desc        = _esc_html((matched["body"] or "")[:160])
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="robots" content="index,follow">
+<title>{page_title}</title>
+<meta name="description" content="{desc}">
+<meta property="og:title" content="{page_title}">
+<meta property="og:description" content="{desc}">
+<link rel="canonical" href="https://{_esc_html(slug)}.homebridgegroup.co/posts/{_esc_html(post_slug)}">
+<script type="application/ld+json">{schema_json}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{_AUTHORITY_CSS}</style>
+</head>
+<body>
+<nav class="top-bar">
+  <a class="tb-logo" href="https://homebridgegroup.co"><span>Auto</span>Mates</a>
+  <a class="tb-cta" href="https://app.homebridgegroup.co">Sign In &#8594;</a>
+</nav>
+<div class="hero">
+  <div class="hero-inner">
+    <div>
+      <div class="hero-eyebrow">{_esc_html(matched['niche']) if matched['niche'] else 'Real Estate'}</div>
+      <h1 class="hero-name" style="font-size:clamp(28px,4vw,48px)">{_esc_html(matched['headline'])}</h1>
+      <div class="hero-role">{_esc_html(matched['agent_name'])}{(' &middot; ' + _esc_html(matched['brokerage'])) if matched['brokerage'] else ''}</div>
+      {f'<div class="hero-market">Reviewed {_esc_html(_fmt_date_long(matched["approved_at"]))}</div>' if matched["approved_at"] else ''}
+      <div class="hero-actions">
+        <a href="{_esc_html(profile_url)}" class="btn-outline-lt">&#8592; Back to profile</a>
+        {f'<a href="{_esc_html(verify_url)}" class="btn-outline-lt">Verify CPR&#8482; &#8594;</a>' if verify_url else ''}
+      </div>
+    </div>
+  </div>
+</div>
+<div class="main">
+  <div class="sec">
+    <div class="compliance-block" style="margin-bottom:0">
+      <div class="cb-icon">&#10003;</div>
+      <div>
+        <div class="cb-title">CPR&#8482; Reviewed</div>
+        <div class="cb-body">{_esc_html(matched['cir_id']) if matched['cir_id'] else 'This post was reviewed by a licensed professional prior to publication.'}</div>
+      </div>
+    </div>
+  </div>
+  <div class="sec" id="posts-sec">
+    <div class="post-list">
+      <div class="post-card featured" itemscope itemtype="https://schema.org/Article">
+        <h2 class="post-h" itemprop="headline">{_esc_html(matched['headline'])}</h2>
+        <div class="post-body" itemprop="articleBody" style="margin-top:12px">{_esc_html(matched['body'])}</div>
+      </div>
+    </div>
+  </div>
+  <div class="trust-footer">
+    <div>
+      <div class="tf-label">Reviewed by AutoMates</div>
+      <div class="tf-headline">Real professionals. Reviewed content.</div>
+      <div class="tf-sub">Every post reviewed by a licensed agent before publication.</div>
+    </div>
+    <a href="https://homebridgegroup.co" class="tf-cta" target="_blank">What is AutoMates? &#8594;</a>
+  </div>
+</div>
+</body>
+</html>"""
+    return _HTMLResponse(content=html, status_code=200, headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/public/verify/{cir_id}/page")
+async def public_verify_cir_page(cir_id: str):
+    """
+    Server-side rendered CPR record verification page.
+    All content in HTML source — crawlable, citable.
+    URL: https://{slug}.homebridgegroup.co/verify/{cir_id}
+    """
+    from fastapi.responses import HTMLResponse as _HTMLResponse
+
+    # Reuse existing verify data endpoint
+    data = await public_verify_cir(cir_id)
+    html = _build_verify_page_html(data)
+    return _HTMLResponse(content=html, status_code=200, headers={
+        "Cache-Control": "public, max-age=300",
+        "X-Robots-Tag": "index, follow",
+    })
+
+
+@app.get("/public/agent/{slug}/sitemap.xml")
+async def public_agent_sitemap(slug: str):
+    """
+    Per-agent sitemap listing authority page + all per-record post pages.
+    Auto-generated from database. Submit to Google Search Console.
+    """
+    from fastapi.responses import Response as _Resp
+    import json as _json7
+
+    user = _get_agent_by_slug(slug)
+    if not user:
+        raise HTTPException(404, "Agent not found.")
+
+    from database import get_conn as _gc7
+    conn = _gc7()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT id, content, cir_id, approved_at
+        FROM content_library
+        WHERE user_id = ? AND status IN ('approved','published','archived')
+        ORDER BY approved_at DESC
+    """, (user["id"],))
+    items = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    base = f"https://{slug}.homebridgegroup.co"
+    urls = [f"  <url><loc>{base}</loc><changefreq>daily</changefreq><priority>1.0</priority></url>"]
+    for item in items:
+        try:
+            cd = _json7.loads(item.get("content") or "{}")
+        except Exception:
+            cd = {}
+        headline = cd.get("headline", "") or cd.get("title", "")
+        if not headline:
+            continue
+        ps  = _post_slug_make(headline, item["id"])
+        loc = f"{base}/posts/{ps}"
+        lastmod = (item.get("approved_at") or "")[:10]
+        urls.append(
+            f"  <url><loc>{loc}</loc>"
+            + (f"<lastmod>{lastmod}</lastmod>" if lastmod else "")
+            + "<changefreq>monthly</changefreq><priority>0.8</priority></url>"
+        )
+        if item.get("cir_id"):
+            verify_loc = f"{base}/verify/{item['cir_id']}"
+            urls.append(
+                f"  <url><loc>{verify_loc}</loc>"
+                + (f"<lastmod>{lastmod}</lastmod>" if lastmod else "")
+                + "<changefreq>never</changefreq><priority>0.6</priority></url>"
+            )
+
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    xml += "\n".join(urls)
+    xml += "\n</urlset>"
+    return _Resp(content=xml, media_type="application/xml")
+
+
+@app.get("/public/sitemap.xml")
+async def public_platform_sitemap():
+    """
+    Platform-wide sitemap listing all active agent authority pages.
+    Submit this to Google Search Console as the master sitemap.
+    """
+    from fastapi.responses import Response as _Resp2
+    from database import get_conn as _gc8
+
+    conn = _gc8()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT agent_slug, created_at
+        FROM users
+        WHERE agent_slug IS NOT NULL AND agent_slug != '' AND is_active = 1
+        ORDER BY created_at DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    urls = []
+    for row in rows:
+        slug_val = row.get("agent_slug", "")
+        if not slug_val:
+            continue
+        loc     = f"https://{slug_val}.homebridgegroup.co"
+        lastmod = (row.get("created_at") or "")[:10]
+        urls.append(
+            f"  <url><loc>{loc}</loc>"
+            + (f"<lastmod>{lastmod}</lastmod>" if lastmod else "")
+            + "<changefreq>daily</changefreq><priority>1.0</priority></url>"
+        )
+
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    xml += "\n".join(urls)
+    xml += "\n</urlset>"
+    return _Resp2(content=xml, media_type="application/xml")
+
+
+@app.get("/robots.txt")
+async def robots_txt():
+    """
+    Robots.txt served from the backend.
+    Allows all crawlers. Points to platform sitemap.
+    """
+    from fastapi.responses import PlainTextResponse
+    content = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "\n"
+        "Sitemap: https://api.homebridgegroup.co/public/sitemap.xml\n"
+    )
+    return PlainTextResponse(content=content)
+
+
+# ── Host-based middleware for slug subdomain routing ──────────────────────────
+# When a request arrives with Host: {slug}.homebridgegroup.co
+# route it to the server-side rendered authority page automatically.
+# This fires AFTER Cloudflare changes the wildcard to point to this backend.
+# app and api subdomains are excluded — they have explicit DNS records and
+# their requests will never reach this middleware via the wildcard.
+# The path is inspected so /feed, /posts/*, /verify/*, /sitemap.xml all work.
+
+@app.middleware("http")
+async def slug_subdomain_router(request: Request, call_next):
+    """
+    Detects requests arriving at {slug}.homebridgegroup.co and routes them
+    to the appropriate server-side rendered page without requiring the /page suffix.
+    """
+    host = request.headers.get("host", "")
+    # Strip port if present (local testing)
+    host = host.split(":")[0]
+
+    # Only act on *.homebridgegroup.co subdomains
+    # Exclude known non-agent subdomains
+    EXCLUDED = {"www", "app", "api", "homebridgegroup", ""}
+    parts = host.split(".")
+    if len(parts) >= 3 and parts[-2] == "homebridgegroup" and parts[-1] == "co":
+        subdomain = parts[0]
+        if subdomain not in EXCLUDED:
+            path = request.url.path
+
+            # /feed — RSS, already handled by existing route, pass through
+            if path == "/feed" or path.startswith("/feed"):
+                # Rewrite to /public/agent/{slug}/feed
+                from fastapi.responses import RedirectResponse as _RR
+                return _RR(url=f"https://api.homebridgegroup.co/public/agent/{subdomain}/feed", status_code=301)
+
+            # /posts/{post_slug} — server-rendered post page
+            import re as _re_mw
+            post_match = _re_mw.match(r"^/posts/([^/]+)$", path)
+            if post_match:
+                post_slug_val = post_match.group(1)
+                return await public_agent_post_page(subdomain, post_slug_val)
+
+            # /verify/{cir_id} — server-rendered verify page
+            verify_match = _re_mw.match(r"^/verify/([^/]+)$", path)
+            if verify_match:
+                cir_val = verify_match.group(1)
+                return await public_verify_cir_page(cir_val)
+
+            # /sitemap.xml — per-agent sitemap
+            if path == "/sitemap.xml":
+                return await public_agent_sitemap(subdomain)
+
+            # /robots.txt — already handled globally, pass through
+            if path == "/robots.txt":
+                return await call_next(request)
+
+            # Root and anything else — serve the authority page
+            if path == "/" or path == "":
+                return await public_agent_authority_page(subdomain, request)
+
+    # Not a slug subdomain request — proceed normally
+    return await call_next(request)
+
+# ── End SSR authority pages block ─────────────────────────────────────────────
+
+
 @app.post("/setup/slug")
 async def set_agent_slug(request: Request, current_user: dict = Depends(get_current_user)):
     """
