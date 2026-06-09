@@ -688,6 +688,12 @@ def init_db():
         )
     except Exception:
         pass
+    # Non-destructive migration — add context column if not present
+    try:
+        c.execute("ALTER TABLE compliance_records ADD COLUMN context TEXT DEFAULT 'agent'")
+        print("[DB] compliance_records: context column added")
+    except Exception:
+        pass  # column already exists
 
     # VIDEO JOBS — Session 49
     # Tracks every avatar video render request submitted to the video API.
@@ -1189,12 +1195,14 @@ def record_compliance_approval(
     content: dict,
     compliance: dict,
     approved_at: str,
+    context: str = "agent",
 ) -> None:
     """
     Write a permanent compliance record at the moment a CIR is issued.
     Called from library_update() immediately after the CIR ID is generated.
     Never raises — a write failure here must never block the approval flow.
     The record is immutable once written: no update or delete path exists.
+    context separates agent records from hb_marketing records.
     """
     try:
         headline = ""
@@ -1215,14 +1223,16 @@ def record_compliance_approval(
             INSERT INTO compliance_records
                 (user_id, cir_id, library_item_id, niche, headline,
                  overall_status, fair_housing, disclosure, nar_standards,
-                 state_compliance, rules_version, compliance_json, approved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 state_compliance, rules_version, compliance_json, approved_at,
+                 context)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, cir_id, library_item_id,
             niche or "", headline,
             overall, fh, disc, nar, state_c, rules_v,
             json.dumps(compliance),
             approved_at,
+            context if context in ("agent", "hb_marketing") else "agent",
         ))
         conn.commit()
         conn.close()
@@ -1236,10 +1246,13 @@ def get_compliance_records(
     date_from: str = "",
     date_to: str = "",
     limit: int = 200,
+    context: str = "",
 ) -> list:
     """
     Return permanent compliance records for an agent, newest first.
     Optionally filtered by approved_at date range (ISO strings).
+    Optionally filtered by context ('agent' or 'hb_marketing').
+    If context is empty, returns all records (backward compatible).
     Used by agent history view and broker compliance tab.
     """
     conn = get_conn()
@@ -1254,6 +1267,9 @@ def get_compliance_records(
     if date_to:
         query  += " AND approved_at <= ?"
         params.append(date_to)
+    if context in ("agent", "hb_marketing"):
+        query  += " AND (context = ? OR (context IS NULL AND ? = 'agent'))"
+        params.extend([context, context])
 
     query += " ORDER BY approved_at DESC LIMIT ?"
     params.append(limit)
@@ -1522,7 +1538,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     _item_for_record = None  # full item snapshot for compliance_records write
     if updates.get("status") == "approved":
         c.execute(
-            "SELECT cir_id, niche, content, compliance FROM content_library WHERE id = ? AND user_id = ?",
+            "SELECT cir_id, niche, content, compliance, context FROM content_library WHERE id = ? AND user_id = ?",
             (item_id, user_id)
         )
         existing = c.fetchone()
@@ -1539,7 +1555,8 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
             _snap_content    = updates.get("content")    or (json.loads(existing["content"])    if existing["content"]    else {})
             _snap_compliance = updates.get("compliance") or (json.loads(existing["compliance"]) if existing["compliance"] else {})
             _snap_niche      = existing["niche"] or ""
-            _item_for_record = (_snap_niche, _snap_content, _snap_compliance)
+            _snap_context    = existing["context"] or "agent"
+            _item_for_record = (_snap_niche, _snap_content, _snap_compliance, _snap_context)
 
     values += [item_id, user_id]
     c.execute(
@@ -1551,7 +1568,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
 
     # Write permanent compliance record — after DB commit, never blocks
     if _new_cir_id and _item_for_record:
-        _niche, _content, _compliance = _item_for_record
+        _niche, _content, _compliance, _context = _item_for_record
         record_compliance_approval(
             user_id         = user_id,
             cir_id          = _new_cir_id,
@@ -1560,6 +1577,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
             content         = _content,
             compliance      = _compliance,
             approved_at     = datetime.utcnow().isoformat(),
+            context         = _context,
         )
 
     return library_get_item(item_id)
