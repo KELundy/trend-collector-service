@@ -2354,7 +2354,7 @@ async def public_agent_profile(slug: str):
             "cir_id":      item.get("cir_id",""),
             "approved_at": (item.get("approved_at") or "")[:10],
             "post_url":    f"https://{slug}.homebridgegroup.co/posts/{ps}",
-            "verify_url":  f"https://homebridgegroup.co/verify/{item.get('cir_id','')}" if item.get("cir_id") else "",
+            "verify_url":  f"https://{slug}.homebridgegroup.co/verify/{item.get('cir_id','')}" if item.get("cir_id") else "",
         })
 
     conn.close()
@@ -2448,7 +2448,7 @@ async def public_agent_rss(slug: str):
         except: pass
         link = f"https://{slug}.homebridgegroup.co"
         if item.get("cir_id"):
-            link = f"https://homebridgegroup.co/verify/{item['cir_id']}"
+            link = f"https://{slug}.homebridgegroup.co/verify/{item['cir_id']}"
         items_xml += f"""
   <item>
     <title>{esc(headline)}</title>
@@ -2532,7 +2532,7 @@ async def public_agent_post(slug: str, post_slug: str):
                 "agent_name":  user["agent_name"],
                 "brokerage":   user.get("brokerage",""),
                 "profile_url": f"https://{slug}.homebridgegroup.co",
-                "verify_url":  f"https://homebridgegroup.co/verify/{item['cir_id']}" if item.get("cir_id") else "",
+                "verify_url":  f"https://{slug}.homebridgegroup.co/verify/{item['cir_id']}" if item.get("cir_id") else "",
             }
             break
 
