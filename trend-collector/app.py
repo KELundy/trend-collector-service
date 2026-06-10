@@ -2993,7 +2993,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
           {post_link}
         </div>
       </div>"""
-        faq_intro = _esc_html(f"Questions {d.get('market','local buyers and homeowners')} ask {d.get('agent_name','').split(' ')[0]} most.")
+        faq_intro = _esc_html(f"Questions {d.get('agent_name','').split(' ')[0]}'s clients ask most.")
         faq_html = f"""
     <div class="sec" id="faq-sec">
       <div class="sec-hdr"><span class="sec-label">Recent Questions</span><span class="sec-line"></span></div>
@@ -3056,7 +3056,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
 
     # Compliance block
     compliance_body = (
-        "CPR&#8482; &#8212; Certified Provenance Record &#8212; is a timestamped provenance record "
+        "CPR&#8482; (Certified Provenance Record) is a timestamped provenance record "
         "confirming that a licensed real estate professional personally reviewed this content for "
         "professional compliance before publication. CPR&#8482; certifies the completion of that review "
         "process. It does not certify the accuracy of market data, valuations, or predictions."
@@ -3170,7 +3170,7 @@ def _build_verify_page_html(d: dict) -> str:
     slug       = d.get("agent_slug", "")
     profile_url = f"https://{slug}.homebridgegroup.co" if slug else "https://homebridgegroup.co"
     rules_ver  = _esc_html(d.get("rules_version", ""))
-    page_title = f"CPR&#8482; Record {cir_id} &#8212; {agent_name} | AutoMates"
+    page_title = f"CPR&#8482; Record {cir_id} | {agent_name} | AutoMates"
     desc       = f"Certified Provenance Record {d.get('cir_id','')} issued to {d.get('agent_name','')}. Pre-publication compliance review confirmed."
 
     badge_html = '<span class="badge-pass">&#10003; Reviewed</span>'
