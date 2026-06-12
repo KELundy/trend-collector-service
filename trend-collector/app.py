@@ -1092,13 +1092,17 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
             # Verify the scheduled niche still exists in the agent's current
             # primaryNiches before generating. If not, deactivate the schedule
             # (do not delete -- admin may want to inspect) and skip.
+            # HB Marketing schedules are exempt -- their niches live in
+            # hb_marketing_setup_json, not agent_setup primaryNiches.
             # Spec: Niche Taxonomy v2.1 Specification, Scheduler-Niche Lifecycle Part C.
-            _current_niches = setup.get("primaryNiches", []) or []
-            if niche not in _current_niches:
-                print(f"[Scheduler] Stale schedule: '{niche}' not in user {user_id} active niches {_current_niches}. Deactivating.")
-                schedule_deactivate(sched_id)
-                failed_niches.append(niche)
-                continue
+            _sched_context = sched.get("context", "agent")
+            if _sched_context != "hb_marketing":
+                _current_niches = setup.get("primaryNiches", []) or []
+                if niche not in _current_niches:
+                    print(f"[Scheduler] Stale schedule: '{niche}' not in user {user_id} active niches {_current_niches}. Deactivating.")
+                    schedule_deactivate(sched_id)
+                    failed_niches.append(niche)
+                    continue
 
             # ── Usage limit check — never generate beyond backstop limit ────────
             # Protects against runaway token costs from auto-generation.
