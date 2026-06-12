@@ -35,6 +35,7 @@ STRIPE_PRICES = {
     "power_monthly":            os.getenv("STRIPE_PRICE_POWER_MONTHLY",           ""),
     "power_annual":             os.getenv("STRIPE_PRICE_POWER_ANNUAL",            ""),
     "founding_member_monthly":  os.getenv("STRIPE_PRICE_FOUNDING_MEMBER_MONTHLY", ""),
+    "founding_member_annual":   os.getenv("STRIPE_PRICE_FOUNDING_MEMBER_ANNUAL",  ""),
     "coach_monthly":            os.getenv("STRIPE_PRICE_COACH_MONTHLY",           ""),
     # Office / team plans
     "office_starter_monthly":   os.getenv("STRIPE_PRICE_OFFICE_STARTER_MONTHLY",  ""),
@@ -1714,7 +1715,7 @@ async def create_checkout(request: Request, current_user=Depends(get_current_use
         customer    = _stripe.Customer.create(email=current_user["email"], name=current_user.get("agent_name",""), metadata={"hb_user_id": str(current_user["id"])})
         customer_id = customer.id
     # Founding Member and Coach both get a 20-day free trial — card required, not charged until day 21
-    subscription_data = {"trial_period_days": 20} if price_key in ("founding_member_monthly", "coach_monthly") else {}
+    subscription_data = {"trial_period_days": 20} if price_key == "coach_monthly" else {}
     session = _stripe.checkout.Session.create(customer=customer_id, mode="subscription", line_items=[{"price": price_id, "quantity": 1}], success_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}?billing=success", cancel_url=f"{os.getenv('FRONTEND_URL','https://app.homebridgegroup.co')}?billing=cancelled", metadata={"hb_user_id": str(current_user["id"]), "price_key": price_key}, allow_promotion_codes=True, subscription_data=subscription_data)
     return {"checkout_url": session.url}
 
