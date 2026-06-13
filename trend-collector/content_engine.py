@@ -111,6 +111,9 @@ class ContentRequest(BaseModel):
     content_mode: Optional[str] = Field("agent")
     generation_mode: Optional[str] = Field(None)   # "guided" | "idea" | "freeform" | "pulse" | "intel"
     personal_mode:   Optional[bool] = Field(False)  # freeform only — True = purely personal, no RE bridge/CTA/image
+    # Voice Phase 4 — generation-time steering. "standard" matches current behavior
+    # exactly; warmer/sharper/quieter modulate the prompt (VOICE_AUTHENTICITY §5.2).
+    modulation:      Optional[str] = Field("standard")  # "standard" | "warmer" | "sharper" | "quieter"
 
 
 def _get_anthropic_client():
@@ -133,8 +136,80 @@ EM_DASH_RULE = (
     "Em dashes are a well-known AI writing tell and undermine authenticity.\n"
 )
 
+# Extraction architecture — Build O (POSITIONING_FUNNEL_SPINE_v3 §2 points 1-2).
+# Content is engineered for answer engines (AI Overviews, assistants), which lift
+# question-headed sections answered in a few definitive sentences. Shared across
+# all prompt builders so the framing lives in one place.
+EXTRACTION_RULE = (
+    "EXTRACTION ARCHITECTURE — written to be quoted by answer engines (AI Overviews, AI assistants):\n"
+    "1. HEADING AS A REAL QUESTION: Make the headline the actual question a consumer would ask out "
+    "loud or type into an AI assistant — the literal question this piece answers (for example: "
+    "'What are closing costs running here right now?' or 'Is it a buyer's market this summer?'). "
+    "Not a clever teaser. The real question, in the words a real person would use.\n"
+    "2. DEFINITIVE OPENING: Open with 2-3 direct, quotable sentences that answer that question "
+    "outright — a clear position stated plainly — BEFORE any story, context, or elaboration. "
+    "Answer engines lift these opening sentences verbatim, so they must be specific, self-contained, "
+    "and stand on their own. Save the texture and nuance for after the answer.\n"
+)
 
-def _build_content_prompt(payload):
+
+# ── Voice Authenticity Phase 1 + 4 helpers ───────────────────────────────────
+# Voice is captured as demonstration (recent approved posts), not description.
+# These helpers are shared by all four prompt builders so the framing text from
+# VOICE_AUTHENTICITY_BUILD_SPEC §2.2 and §5.3 lives in exactly one place.
+
+def _get_voice_exemplars(user_id, context, limit=3, min_chars=200):
+    """
+    Returns up to `limit` recent approved posts for the user, filtered by context
+    ('agent' or 'hb_marketing'), each at least min_chars long. Most-recent first.
+    Returns [] if none qualify — caller must handle the empty case.
+    Voice Authenticity Phase 1 (VOICE_AUTHENTICITY_BUILD_SPEC §2.1).
+    """
+    if not user_id:
+        return []
+    try:
+        from database import get_voice_exemplars as _gve
+        return _gve(user_id, context or "agent", limit=limit, min_chars=min_chars)
+    except Exception:
+        return []  # exemplars are best-effort — never block generation
+
+
+def _build_voice_exemplar_block(user_id, context, agent_name, limit=3):
+    """
+    Builds the few-shot voice-exemplar block (VOICE_AUTHENTICITY_BUILD_SPEC §2.2).
+    Returns "" when the agent has no qualifying approved posts, so callers can
+    inject it unconditionally.
+    """
+    exemplars = _get_voice_exemplars(user_id, context, limit=limit)
+    if not exemplars:
+        return ""
+    return (
+        f"\nHOW {agent_name.upper()} ACTUALLY WRITES — READ THESE CAREFULLY\n"
+        + "─" * 40 + "\n"
+        + "Below are recent posts this agent approved and published. "
+        + "Match the rhythm, sentence length, vocabulary register, and how warmth is expressed. "
+        + "Borrow voice, not phrasing. Do not lift sentences. Do not blend registers from across samples — "
+        + "pick the closest match to the situation you are writing about and stay inside it.\n\n"
+        + "\n\n---\n\n".join(f'Sample {i+1}:\n"{post}"' for i, post in enumerate(exemplars))
+        + "\n"
+    )
+
+
+def _build_modulation_block(modulation):
+    """
+    Generation-time steering (VOICE_AUTHENTICITY_BUILD_SPEC §5.3). Default
+    ('standard') is an empty string, preserving current behavior exactly.
+    """
+    mod = (modulation or "standard").lower()
+    return {
+        "standard": "",
+        "warmer":   "MODULATION: Lean warmer. More personal, more invitation, slower rhythm. Compassion over efficiency. Imagine writing to one person who is going through something.\n",
+        "sharper":  "MODULATION: Lean sharper. More direct, more position-taking, denser. Cut hedge phrases. Write as a peer to peers, not as a teacher to students.\n",
+        "quieter":  "MODULATION: Lean quieter. Less performance, shorter sentences, more space. Trust the reader to fill in. State less; imply more.\n",
+    }.get(mod, "")
+
+
+def _build_content_prompt(payload, user_id=None):
     identity = payload.identity
     profile  = payload.agentProfile or AgentProfileModel()
 
@@ -165,7 +240,14 @@ def _build_content_prompt(payload):
     trend_prefs     = ", ".join(identity.trendPreferences) or "current market conditions"
     selected_trends = ", ".join(payload.selectedTrends)    or "current market activity"
 
-    tone_text    = f"Voice: {payload.tone}.\n"    if payload.tone   else f"Voice: {brand_voice}.\n"
+    # §2.3 — the agent's prose Brand Voice description is supplementary context,
+    # not the primary voice source. The primary source is the exemplar block below.
+    # An explicit per-post tone selection remains a direct style instruction.
+    tone_text    = (
+        f"Voice: {payload.tone}.\n" if payload.tone else
+        f"How the agent describes their own voice (use as supplementary context, "
+        f"not as the primary voice source): {brand_voice}.\n"
+    )
     # ── Content length — precise definitions, not just a word ──────────────────
     _length_val = (payload.length or "medium").lower().strip()
     if _length_val == "short":
@@ -281,6 +363,13 @@ def _build_content_prompt(payload):
             '"Days on market dropped from 18 to 11" beats "homes are selling faster."\n'
         )
 
+    # ── Voice exemplars (Phase 1) + modulation (Phase 4) ──────────────────────
+    # Demonstration over description: recent approved posts are the primary voice
+    # source. Computed before the Zone of Greatness block so that block can
+    # de-emphasize itself when real samples exist (§2.3).
+    voice_exemplar_block = _build_voice_exemplar_block(user_id, "agent", agent_name)
+    modulation_block     = _build_modulation_block(payload.modulation)
+
     # ── Voice Profile / Zone of Greatness block ───────────────────────────────
     origin      = profile.originStory          or ""
     advantage   = profile.unfairAdvantage      or ""
@@ -294,13 +383,26 @@ def _build_content_prompt(payload):
         if advantage:   parts.append(f"Their unfair advantage: {advantage}")
         if perspective: parts.append(f"Their signature belief: {perspective}")
         if not_for:     parts.append(f"Who they are NOT for: {not_for}")
+        # §2.3 — when real writing samples exist, this block is biographical
+        # identity context, not the voice source. When no samples exist yet
+        # (new agents), it remains the primary signal as before.
+        if voice_exemplar_block:
+            zog_instruction = (
+                "INSTRUCTION: These are biographical context about who this agent is. "
+                "The actual voice comes from the samples above. Use these to ensure the "
+                "content reflects this person's worldview, not to dictate sentence rhythm or vocabulary.\n"
+            )
+        else:
+            zog_instruction = (
+                "INSTRUCTION: Let these shape the texture and point of view of the content. "
+                "This agent is not trying to sound like every other agent. They have a specific perspective. "
+                "The content should feel like it could only come from this person.\n"
+            )
         voice_profile_block = (
             f"\nZONE OF GREATNESS — {agent_name.upper()}'S AUTHENTIC VOICE\n"
             + "─" * 40 + "\n"
             + "\n".join(parts) + "\n\n"
-            "INSTRUCTION: Let these shape the texture and point of view of the content. "
-            "This agent is not trying to sound like every other agent. They have a specific perspective. "
-            "The content should feel like it could only come from this person.\n"
+            + zog_instruction
         )
 
     market_first_word = market.split()[0].replace(",", "")
@@ -319,6 +421,7 @@ def _build_content_prompt(payload):
         + f"Specialization: {primary_categories}\n"
         + f"Areas of depth: {subniches_text}\n"
         + voice_profile_block
+        + voice_exemplar_block
         + (
             f"\nAUDIENCE FILTER — NON-NEGOTIABLE\n"
             + "─" * 40 + "\n"
@@ -340,7 +443,7 @@ def _build_content_prompt(payload):
         + mls_block
         + f"\nVOICE & STYLE\n"
         + "─" * 40 + "\n"
-        + tone_text + length_text + EM_DASH_RULE + avoid_text + prefer_text
+        + tone_text + length_text + EM_DASH_RULE + avoid_text + prefer_text + modulation_block
         + "\nTHE MOST IMPORTANT THING\n"
         + "─" * 40 + "\n"
         "This content must sound like a real person thinking out loud. The reader should feel like "
@@ -406,18 +509,23 @@ def _build_content_prompt(payload):
         "- NAR Code of Ethics Article 12: Truthful only. No guaranteed outcomes. No 'best agent' language.\n"
         f"- Brokerage disclosure: {brokerage_compliance} must be identifiable. Agent's licensed name must appear.\n"
         "- No specific financial predictions. No guaranteed investment returns.\n\n"
+        + "EXTRACTION ARCHITECTURE\n"
+        + "─" * 40 + "\n"
+        + EXTRACTION_RULE + "\n"
         "OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE\n"
         + "─" * 40 + "\n"
         "{\n"
-        '  "headline": "A clear, specific, human headline with a real point of view. One sentence, no period. Something worth sharing.",\n'
+        '  "headline": "The actual question a consumer would ask an AI assistant or type into search — the literal question this post answers, in a real person\'s words. One sentence, ends with a question mark.",\n'
         f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words that capture the visual scene. Use the local architecture style typical of {market} (ranch-style, craftsman, mid-century modern, or new construction — never colonial), the neighborhood feel, season, lighting, and niche context. No people, no agents. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk / Cherry Hills estate manicured lawn summer afternoon. Write only the brief, no sentences.",\n'
         f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
-        f'  "post": "A full social post in {agent_name}\'s voice. Takes a real position. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
+        f'  "post": "A full social post in {agent_name}\'s voice. Opens with 2-3 definitive, quotable sentences that answer the headline question outright, then elaborates. Takes a real position. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
         '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
         '  "script": "News-format teleprompter script with [B-ROLL] and [GREEN SCREEN] direction notes."\n'
         "}\n\n"
         "HARD RULES:\n"
         "- Every value must be complete — no placeholders\n"
+        "- headline MUST be phrased as a real consumer question, ending with a question mark\n"
+        "- post MUST open with 2-3 definitive sentences answering that question before any elaboration\n"
         f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
         "- post MUST end with a genuine local question (not generic)\n"
         f"- {market} must appear in the post or script\n"
@@ -429,7 +537,7 @@ def _build_content_prompt(payload):
 
 
 
-def _build_b2b_content_prompt(payload):
+def _build_b2b_content_prompt(payload, user_id=None):
     identity = payload.identity
     profile  = payload.agentProfile or AgentProfileModel()
 
@@ -450,6 +558,10 @@ def _build_b2b_content_prompt(payload):
     prefer_text = f"Naturally weave in these words or phrases: {words_prefer}.\n" if words_prefer else ""
     persona_context = f"The person this post will resonate with most: {payload.persona}." if payload.persona else ""
 
+    # Voice Phase 1 + 4 — HB Marketing pulls exemplars from the hb_marketing context.
+    voice_exemplar_block = _build_voice_exemplar_block(user_id, "hb_marketing", company_name)
+    modulation_block     = _build_modulation_block(payload.modulation)
+
     return f"""You are writing thought leadership content FOR {company_name}, a real estate technology company.
 
 This is NOT ghostwriting for a real estate agent. This is B2B content marketing — {company_name} speaking directly to brokers and office managers about challenges they face with agent visibility, compliance, and brand consistency.
@@ -462,7 +574,7 @@ WHO THIS REACHES
 {"─" * 40}
 Primary audience: {audience}
 {persona_context}
-
+{voice_exemplar_block}
 WHAT THIS CONTENT IS ABOUT
 {"─" * 40}
 Situation: {payload.situation}
@@ -471,7 +583,7 @@ Relevant signals: {selected_trends}
 
 VOICE & STYLE
 {"─" * 40}
-{tone_text}{length_text}{EM_DASH_RULE}{avoid_text}{prefer_text}
+{tone_text}{length_text}{EM_DASH_RULE}{avoid_text}{prefer_text}{modulation_block}
 THE MOST IMPORTANT THING
 {"─" * 40}
 This content must position {company_name} as the company that actually understands what brokers are dealing with — not the company trying to sell them something. The reader should feel understood before they feel pitched.
@@ -503,19 +615,24 @@ Bad: "Sign up for HomeBridge today and transform your brokerage's digital presen
 
 Every post must end with: — {disclaimer}
 
+EXTRACTION ARCHITECTURE
+{"─" * 40}
+{EXTRACTION_RULE}
 OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE
 {"─" * 40}
 {{
-  "headline": "A sharp specific headline that a broker would immediately recognize as relevant. One sentence, no period. A point of view — not a product pitch.",
+  "headline": "The actual question a broker would ask or type into an AI assistant — the literal question this post answers, in their own words. One sentence, ends with a question mark.",
   "thumbnailIdea": "A specific, concrete image brief for a real estate technology brand post. Write 6-10 descriptive words capturing the visual: modern office, laptop with dashboard, real estate agent reviewing content on screen, clean desk professional setting, city skyline background. No people's faces visible. No logos. No generic handshakes. Examples: 'modern home office laptop dashboard clean minimal natural light' or 'real estate agent reviewing phone screen coffee shop warm light'. Write only the brief — no sentences, no explanation.",
   "hashtags": "#hashtag1 #hashtag2 (8-10 tags — mix of real estate tech, brokerage management, PropTech)",
-  "post": "A full LinkedIn/social post written as {company_name}. Reads like a company with a genuine point of view. Ends with: — {disclaimer}",
+  "post": "A full LinkedIn/social post written as {company_name}. Opens with 2-3 definitive, quotable sentences that answer the headline question outright, then elaborates. Reads like a company with a genuine point of view. Ends with: — {disclaimer}",
   "cta": "A low-pressure invitation — a conversation offer, not a sales command.",
   "script": "A 45-75 second spoken script. Sounds like a real person from the company talking — no announcer voice, genuine and specific."
 }}
 
 HARD RULES:
 - Every value must be complete — no placeholders
+- headline MUST be phrased as a real question, ending with a question mark
+- post MUST open with 2-3 definitive sentences answering that question before any elaboration
 - post MUST contain "{disclaimer}" as the footer
 - No line breaks inside JSON string values
 - Do NOT mention specific pricing or make competitive comparisons by name
@@ -532,7 +649,7 @@ HARD RULES:
 # that started with a random observation.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_freeform_content_prompt(payload):
+def _build_freeform_content_prompt(payload, user_id=None):
     profile  = payload.agentProfile or AgentProfileModel()
 
     agent_name    = profile.agentName    or "the agent"
@@ -609,6 +726,10 @@ def _build_freeform_content_prompt(payload):
     raw_thought       = payload.situation
     personal_mode     = bool(getattr(payload, "personal_mode", False))
 
+    # Voice Phase 1 + 4 — voice samples and steering carry into freeform too (§2.4).
+    voice_exemplar_block = _build_voice_exemplar_block(user_id, "agent", agent_name)
+    modulation_block     = _build_modulation_block(payload.modulation)
+
     # ── Shared opening ────────────────────────────────────────────────────────
     opening = (
         f"You are ghostwriting for {agent_display}, a real estate professional in {market}.\n\n"
@@ -617,7 +738,8 @@ def _build_freeform_content_prompt(payload):
         + bio_text
         + f"Voice: {brand_voice}\n"
         + (lang_instruction if lang_instruction else "")
-        + EM_DASH_RULE + avoid_text + prefer_text
+        + EM_DASH_RULE + avoid_text + prefer_text + modulation_block
+        + voice_exemplar_block
         + f"\nTHE AGENT'S RAW THOUGHT\n"
         + "─" * 40 + "\n"
         + f"\"{raw_thought}\"\n\n"
@@ -3423,11 +3545,11 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
     content_mode    = (payload.content_mode    or "agent").lower()
     generation_mode = (payload.generation_mode or "").lower()
     if content_mode == "b2b":
-        prompt = _build_b2b_content_prompt(payload)
+        prompt = _build_b2b_content_prompt(payload, user_id=_uid)
     elif generation_mode == "freeform":
-        prompt = _build_freeform_content_prompt(payload)
+        prompt = _build_freeform_content_prompt(payload, user_id=_uid)
     else:
-        prompt = _build_content_prompt(payload)
+        prompt = _build_content_prompt(payload, user_id=_uid)
 
     try:
         response = client.messages.create(
@@ -3943,9 +4065,14 @@ def _build_video_script_prompt(topic: str, tone: str, agent_name: str,
                                 origin_story: str, unfair_advantage: str,
                                 signature_perspective: str,
                                 words_avoid: str, words_prefer: str,
-                                service_areas: list) -> str:
+                                service_areas: list,
+                                user_id=None, modulation: str = "standard") -> str:
 
     market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+
+    # Voice Phase 1 + 4 — same exemplar/steering pattern as the other builders (§2.4).
+    voice_exemplar_block = _build_voice_exemplar_block(user_id, "agent", agent_name)
+    modulation_block     = _build_modulation_block(modulation)
 
     agent_display = agent_name
     if brokerage:
@@ -3979,7 +4106,7 @@ This is a talking-head video script — the agent will speak directly to camera.
 WHO {agent_name.upper()} IS
 {"─" * 40}
 {bio_text}{origin_text}{advantage_text}{perspective_text}{niche_text}Brand voice: {brand_voice}
-{EM_DASH_RULE}{avoid_text}{prefer_text}
+{EM_DASH_RULE}{avoid_text}{prefer_text}{modulation_block}{voice_exemplar_block}
 VIDEO TOPIC
 {"─" * 40}
 {topic}

@@ -705,6 +705,21 @@ def init_db():
         print("[DB] compliance_records: context column added")
     except Exception:
         pass  # column already exists
+    # Human-origin provenance flag — DQ-1 (FOUNDATION_DAILY_QUESTION_SPEC_v2 §7/§8)
+    # origin_type: 'engine_draft' (default for existing flows) | 'member_answer_voice'
+    #   | 'member_answer_text' | 'studio_authored'. Set ONLY by the answer pipeline —
+    #   no backfill, no manual setting. The flag's value is that it cannot be faked.
+    # answer_ref: nullable FK to member_answers — links a record to its source answer.
+    try:
+        c.execute("ALTER TABLE compliance_records ADD COLUMN origin_type TEXT DEFAULT 'engine_draft'")
+        print("[DB] compliance_records: origin_type column added")
+    except Exception:
+        pass  # column already exists
+    try:
+        c.execute("ALTER TABLE compliance_records ADD COLUMN answer_ref INTEGER DEFAULT NULL")
+        print("[DB] compliance_records: answer_ref column added")
+    except Exception:
+        pass  # column already exists
 
     # VIDEO JOBS — Session 49
     # Tracks every avatar video render request submitted to the video API.
@@ -770,6 +785,80 @@ def init_db():
     except Exception:
         pass
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # DAILY QUESTION SYSTEM — DQ-1 (FOUNDATION_DAILY_QUESTION_SPEC_v2 Section 8)
+    # One mechanic: the platform asks a question, the member answers in their own
+    # words, the engine shapes it into a record. Three additive tables, no
+    # existing table altered except the two columns added to compliance_records
+    # (origin_type / answer_ref) below.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # question_bank — the approved pool the engine draws from. The engine never
+    # invents questions outside these banks (signal-template rendering excepted).
+    # source: 'foundation' | 'evergreen' | 'signal_template'
+    # niche_tags: JSON array string of niche tags, or '' for universal questions.
+    # text_template: may contain [market] / [niche audience] placeholders rendered
+    #   per member at delivery time.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS question_bank (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            text_template TEXT    NOT NULL,
+            category      TEXT    DEFAULT '',
+            source        TEXT    NOT NULL DEFAULT 'evergreen',
+            niche_tags    TEXT    DEFAULT '',
+            active        INTEGER DEFAULT 1
+        )
+    """)
+
+    # member_questions — one row per question delivered to a member.
+    # question_id is nullable so signal-generated questions (no bank row) fit.
+    # signal_ref is nullable, set only for signal-driven questions.
+    # status: 'delivered' | 'answered' | 'skipped' | 'expired'
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS member_questions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            question_id   INTEGER DEFAULT NULL,
+            rendered_text TEXT    NOT NULL,
+            signal_ref    TEXT    DEFAULT NULL,
+            delivered_at  TEXT    DEFAULT (datetime('now')),
+            status        TEXT    NOT NULL DEFAULT 'delivered',
+            FOREIGN KEY (user_id)     REFERENCES users(id),
+            FOREIGN KEY (question_id) REFERENCES question_bank(id)
+        )
+    """)
+    try:
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_member_questions_user "
+            "ON member_questions(user_id, delivered_at DESC)"
+        )
+    except Exception:
+        pass
+
+    # member_answers — the member's raw answer, stored as voice source material
+    # and provenance evidence. input_type: 'voice' | 'text'. audio_ref nullable
+    # (typed answers have no audio; voice answers may have audio discarded later).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS member_answers (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_question_id  INTEGER NOT NULL,
+            user_id             INTEGER NOT NULL,
+            input_type          TEXT    NOT NULL DEFAULT 'text',
+            transcript          TEXT    DEFAULT '',
+            audio_ref           TEXT    DEFAULT NULL,
+            created_at          TEXT    DEFAULT (datetime('now')),
+            FOREIGN KEY (member_question_id) REFERENCES member_questions(id),
+            FOREIGN KEY (user_id)            REFERENCES users(id)
+        )
+    """)
+    try:
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_member_answers_user "
+            "ON member_answers(user_id, created_at DESC)"
+        )
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -814,6 +903,9 @@ def migrate_content_library_columns():
     - image_url: generated image URL
     - compliance_checked_at: timestamp of last compliance re-check
     - edited_at: timestamp of last workspace edit
+    - draft_content: the originally-generated content, stored at generation time
+      so the agent's edit is implicitly (draft_content vs content). Phase 5 / G2
+      prerequisite (VOICE_AUTHENTICITY_BUILD_SPEC §6.4, COMPLETE_PLATFORM_BUILD_SPEC G2).
     Safe to run multiple times — skips columns that already exist.
     """
     conn = get_conn()
@@ -824,6 +916,7 @@ def migrate_content_library_columns():
         ("compliance_checked_at", "TEXT"),
         ("edited_at",             "TEXT"),
         ("image_regen_count",     "INTEGER DEFAULT 0"),
+        ("draft_content",         "TEXT"),
     ]
     for col, coltype in columns:
         try:
@@ -833,6 +926,141 @@ def migrate_content_library_columns():
         except Exception:
             pass  # Already exists
     conn.close()
+
+
+def seed_question_bank():
+    """
+    Seeds question_bank with the Foundation 10 and 60 evergreen questions
+    (FOUNDATION_DAILY_QUESTION_SPEC_v2 §3, §4, §8).
+
+    Idempotent: each question is inserted only if its exact text_template is not
+    already present, so this is safe to run on every startup and never disturbs
+    questions Kevin adds later. Foundation questions use exact verbatim text from
+    the spec; evergreen questions are the approved bank generated per §4 across
+    the five categories (client education, process transparency, opinion, local
+    texture, story). Placeholders ([market], [primary niche audience]) are
+    rendered per-member at delivery time. No question touches family, health,
+    finances, politics, or religion (§2 standing rule).
+    """
+    foundation = [
+        # (text_template, category) — order: F1-F3 (signup trio), then the
+        # day-1-7 Daily-Question order Q2, Q4, Q7, Q5, Q9, Q6, Q10 (§4).
+        ("What do you wish every [primary niche audience] knew before they ever called anyone?", "client_education"),
+        ("What was the moment you knew this was the work for you?", "story"),
+        ("What's a question clients ask where you think they deserve a more honest answer than they usually get? Give them the honest answer.", "opinion"),
+        ("What do people moving into [market] always ask you first, and what do you tell them?", "client_education"),
+        ("Tell me about a deal or a client situation that almost went sideways, and what saved it.", "story"),
+        ("Describe a completely ordinary place in your area that you love, and why.", "local_texture"),
+        ("What's a mistake you made early on that changed how you work?", "story"),
+        ("What does working with you actually feel like, day to day? Not the brochure version.", "process_transparency"),
+        ("Outside of work, what's something you can talk about for an hour without noticing the time?", "personal"),
+        ("What are you genuinely excited about in [market] over the next year?", "opinion"),
+    ]
+
+    evergreen = []
+    # Client education (12)
+    for t in [
+        "What's the most expensive mistake you've watched someone make?",
+        "What's something buyers in [market] worry about that they really shouldn't?",
+        "What's something sellers underestimate every single time?",
+        "What's a question clients almost never ask but absolutely should?",
+        "What's the one piece of homework you wish every client did before they called you?",
+        "What's a number people fixate on that matters less than they think?",
+        "What surprises first-time buyers the most once they're actually in it?",
+        "What's something people believe about timing the market that you'd push back on?",
+        "If a client only had a weekend to get ready, what would you tell them to do first?",
+        "What's the difference between a smooth closing and a stressful one, from where you sit?",
+        "What do people get wrong about what an inspection actually tells you?",
+        "What's a small thing clients do that makes a deal go so much easier?",
+    ]:
+        evergreen.append((t, "client_education"))
+    # Process transparency (12)
+    for t in [
+        "Walk me through what actually happens in the 48 hours after an offer's accepted.",
+        "What does a normal Tuesday actually look like for you?",
+        "What's a part of your job people would be surprised takes up so much time?",
+        "Walk me through the first conversation you have with a brand-new client.",
+        "What happens behind the scenes between 'we found the house' and 'you have the keys'?",
+        "What's something you handle for clients that they never even find out about?",
+        "How do you decide what a home should actually list for?",
+        "What does the week before closing really look like?",
+        "What's the most misunderstood step in the whole process?",
+        "When something goes wrong in a deal, what does fixing it actually involve?",
+        "What do you do to get a home ready that most people wouldn't think of?",
+        "Walk me through how you prep for a showing.",
+    ]:
+        evergreen.append((t, "process_transparency"))
+    # Opinion (12)
+    for t in [
+        "What's a piece of common advice in your field you think is wrong?",
+        "What's a trend in real estate right now that you're not buying into?",
+        "What's something everyone in your industry does that you refuse to?",
+        "What's an unpopular opinion you hold about buying a home?",
+        "What's advice you'd give that other agents might disagree with?",
+        "What's a 'rule' about real estate you think people should ignore?",
+        "What's something the headlines get wrong about the housing market?",
+        "What's a shortcut people take that you think backfires?",
+        "What do you think is the most overrated feature buyers chase?",
+        "What's underrated that buyers almost never ask about?",
+        "What would you change about how this industry works if you could?",
+        "What's a hill you're willing to die on when it comes to your work?",
+    ]:
+        evergreen.append((t, "opinion"))
+    # Local texture (12)
+    for t in [
+        "What's a corner of [market] you send people to that isn't on any list?",
+        "What's changed most about [market] since you started?",
+        "What's a neighborhood in [market] that's quietly become a great place to live?",
+        "Where do you take someone who's deciding whether [market] is for them?",
+        "What's the best-kept secret about living in [market]?",
+        "What's something only locals know about [market]?",
+        "What's a spot in [market] you never get tired of?",
+        "What makes [market] feel like home to the people who live there?",
+        "What's a small business in [market] you find yourself rooting for?",
+        "What time of year does [market] show its best self?",
+        "What's a question people from out of town always ask about [market]?",
+        "What's an everyday thing about [market] that you'd miss if you left?",
+    ]:
+        evergreen.append((t, "local_texture"))
+    # Story prompts (12)
+    for t in [
+        "Tell me about a client who stuck with you long after the deal closed.",
+        "What's a moment in this work that reminded you why you do it?",
+        "Tell me about the first deal you ever closed.",
+        "What's the most unusual home you've ever shown or sold?",
+        "Tell me about a time you talked someone out of a decision.",
+        "What's a win that didn't look like a win at first?",
+        "Tell me about a client who completely changed your mind about something.",
+        "What's a moment from this year you'll remember for a long time?",
+        "Tell me about a time everything almost fell apart and then didn't.",
+        "What's the best thank-you you've ever gotten from a client?",
+        "Tell me about someone you helped who almost gave up.",
+        "What's a story from your work that you still tell people?",
+    ]:
+        evergreen.append((t, "story"))
+
+    conn = get_conn()
+    c    = conn.cursor()
+    inserted = 0
+    for text_template, category, source in (
+        [(t, cat, "foundation") for (t, cat) in foundation]
+        + [(t, cat, "evergreen") for (t, cat) in evergreen]
+    ):
+        c.execute("SELECT 1 FROM question_bank WHERE text_template = ?", (text_template,))
+        if c.fetchone():
+            continue  # already seeded — never duplicate
+        c.execute(
+            "INSERT INTO question_bank (text_template, category, source, niche_tags, active) "
+            "VALUES (?, ?, ?, '', 1)",
+            (text_template, category, source),
+        )
+        inserted += 1
+    conn.commit()
+    conn.close()
+    if inserted:
+        print(f"[DB] question_bank seeded: {inserted} new questions "
+              f"({len(foundation)} foundation + {len(evergreen)} evergreen defined)")
+    return inserted
 
 
 def tag_existing_as_marketing(user_id: int):
@@ -1467,13 +1695,19 @@ def library_save(user_id: int, niche: str, content: dict,
     c = conn.cursor()
     if context not in ("agent", "hb_marketing"):
         context = "agent"
+    # draft_content captures the originally-generated content at save time. The
+    # agent's later edits go through library_update (which only touches `content`),
+    # so draft_content preserves the pre-edit draft for Phase 5 edit-pattern
+    # learning (VOICE_AUTHENTICITY §6.4 / COMPLETE_PLATFORM_BUILD_SPEC G2).
+    content_json = json.dumps(content)
     c.execute("""
         INSERT INTO content_library
-            (user_id, niche, status, content, compliance, source, saved_at, context)
-        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+            (user_id, niche, status, content, draft_content, compliance, source, saved_at, context)
+        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
     """, (
         user_id, niche,
-        json.dumps(content),
+        content_json,
+        content_json,
         json.dumps(compliance),
         source,
         datetime.utcnow().isoformat(),
@@ -1516,6 +1750,46 @@ def library_get_item(item_id: int, user_id: int = None) -> Optional[dict]:
     row = c.fetchone()
     conn.close()
     return _row_to_item(row) if row else None
+
+
+def get_voice_exemplars(user_id: int, context: str = "agent",
+                        limit: int = 3, min_chars: int = 200) -> list:
+    """
+    Returns up to `limit` recent approved post bodies for the user, filtered by
+    context ('agent' or 'hb_marketing'), each at least `min_chars` long, most
+    recent first (by approval timestamp, falling back to save time). Returns []
+    if none qualify. Voice Authenticity Phase 1 (VOICE_AUTHENTICITY_BUILD_SPEC §2.1).
+
+    `content` is stored as JSON; the post body lives under the 'post' key, so the
+    length filter is applied in Python after parsing rather than in SQL.
+    """
+    if context not in ("agent", "hb_marketing"):
+        context = "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT content FROM content_library
+        WHERE user_id = ?
+          AND (context = ? OR (context IS NULL AND ? = 'agent'))
+          AND status IN ('approved', 'published')
+        ORDER BY COALESCE(approved_at, saved_at) DESC
+    """, (user_id, context, context))
+    rows = c.fetchall()
+    conn.close()
+    exemplars = []
+    for r in rows:
+        if not r["content"]:
+            continue
+        try:
+            data = json.loads(r["content"])
+        except Exception:
+            continue
+        post = (data.get("post") or "").strip() if isinstance(data, dict) else ""
+        if len(post) >= min_chars:
+            exemplars.append(post)
+        if len(exemplars) >= limit:
+            break
+    return exemplars
 
 
 def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:

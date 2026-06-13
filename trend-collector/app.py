@@ -77,6 +77,7 @@ from database import (
     migrate_add_niche_column,
     migrate_context_column,
     migrate_content_library_columns,
+    seed_question_bank,
     library_save, library_get_all, library_get_item,
     library_update, library_delete,
     schedule_upsert, schedules_get_all, schedule_get,
@@ -409,6 +410,10 @@ async def startup_event():
     migrate_content_library_columns()
     migrate_context_column()  # safe no-op if column already exists
     try:
+        seed_question_bank()  # DQ-1 — idempotent, skips questions already present
+    except Exception as _sqb_e:
+        print(f"[Startup] question_bank seed skipped: {_sqb_e}")
+    try:
         backfill_compliance_records()  # one-time, skips already-present records
     except Exception as _bf_e:
         print(f"[Startup] compliance_records backfill skipped: {_bf_e}")
@@ -520,12 +525,15 @@ async def update_library_item(item_id: int, body: LibraryPatchRequest, current_u
             if not item:
                 raise HTTPException(status_code=404, detail="Item not found")
             record_post_approval(uid, role)
+            _post_approval_indexnow(item, uid, body.status)  # Build N — instant index ping
             return {"success": True, "item": item}
     # ─────────────────────────────────────────────────────────────────────────
 
     item = library_update(item_id, current_user["id"], updates)
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
+    if body.status in ("approved", "published"):
+        _post_approval_indexnow(item, current_user["id"], body.status)  # Build N
     return {"success": True, "item": item}
 
 
@@ -2696,6 +2704,22 @@ def _post_slug_make(headline: str, post_id: int) -> str:
     return f"{base}-{post_id}"
 
 
+def _opening_sentences(text: str, max_sentences: int = 3, hard_cap: int = 600) -> str:
+    """Returns the first 2-3 definitive sentences of a record body — the
+    extraction-grade FAQ answer (POSITIONING_FUNNEL_SPINE_v3 §2 / Build O).
+    Answer engines lift the opening; this keeps the FAQ answer to that quotable
+    opener rather than a mid-sentence character truncation."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    import re as _re4
+    parts = _re4.split(r"(?<=[.!?])\s+", t)
+    out = " ".join(parts[:max_sentences]).strip()
+    if len(out) > hard_cap:
+        out = out[:hard_cap].rstrip()
+    return out
+
+
 _AUTHORITY_CSS = """
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -2923,7 +2947,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
             faq_items.append({
                 "@type": "Question",
                 "name": q,
-                "acceptedAnswer": {"@type": "Answer", "text": p["body"][:500]},
+                "acceptedAnswer": {"@type": "Answer", "text": _opening_sentences(p["body"])},
             })
     if faq_items:
         schema["mainEntity"] = {"@type": "FAQPage", "mainEntity": faq_items}
@@ -2984,7 +3008,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
         faq_items_html = ""
         for p in faq_posts:
             q = _headline_to_question(p.get("headline", ""))
-            body_preview = _esc_html((p.get("body", "") or "")[:600])
+            body_preview = _esc_html(_opening_sentences(p.get("body", "")))
             cir_note = f'<div style="margin-top:10px;font-size:11px;font-weight:700;color:var(--green)">&#10003; CPR&#8482; {_esc_html(p.get("cir_id",""))}</div>' if p.get("cir_id") else ""
             post_link = f'<p style="margin-top:10px"><a href="{_esc_html(p.get("post_url",""))}" style="font-size:12px;color:var(--gold);font-weight:600">Read full post &#8594;</a></p>' if p.get("post_url") else ""
             faq_items_html += f"""
@@ -3565,6 +3589,101 @@ async def robots_txt():
 # their requests will never reach this middleware via the wildcard.
 # The path is inspected so /feed, /posts/*, /verify/*, /sitemap.xml all work.
 
+# ── IndexNow — instant index notification (POSITIONING_FUNNEL_SPINE_v3 Build N) ──
+# Records live at {slug}.homebridgegroup.co/posts/{post_slug}. IndexNow validates
+# that submitted URLs and the key file share a host, so each record is submitted
+# under its own subdomain host with the key file served from that same subdomain
+# (every subdomain routes to this app). One key value covers all of them.
+_INDEXNOW_KEY_PATH = os.path.join(
+    os.path.dirname(os.getenv("DB_PATH", "/data/homebridge.db")) or "/data",
+    "indexnow_key.txt",
+)
+
+
+def _get_indexnow_key() -> str:
+    """Returns the IndexNow key, generating and persisting it once."""
+    try:
+        if os.path.exists(_INDEXNOW_KEY_PATH):
+            with open(_INDEXNOW_KEY_PATH) as _f:
+                _k = _f.read().strip()
+                if _k:
+                    return _k
+    except Exception:
+        pass
+    import secrets as _sec
+    key = _sec.token_hex(16)  # 32 hex chars (IndexNow accepts 8-128 hex chars)
+    try:
+        os.makedirs(os.path.dirname(_INDEXNOW_KEY_PATH), exist_ok=True)
+        with open(_INDEXNOW_KEY_PATH, "w") as _f:
+            _f.write(key)
+        print("[IndexNow] generated and stored new key")
+    except Exception as _e:
+        print(f"[IndexNow] key persist skipped: {_e}")
+    return key
+
+
+def _indexnow_submit(urls: list, host: str) -> None:
+    """Best-effort IndexNow ping. Never raises — indexing must never block or
+    fail an approval."""
+    if not urls or not host:
+        return
+    try:
+        import requests as _rq
+        key = _get_indexnow_key()
+        body = {
+            "host": host,
+            "key": key,
+            "keyLocation": f"https://{host}/{key}.txt",
+            "urlList": urls,
+        }
+        r = _rq.post("https://api.indexnow.org/indexnow", json=body, timeout=8)
+        print(f"[IndexNow] submitted {len(urls)} url(s) for {host} -> HTTP {r.status_code}")
+    except Exception as _e:
+        print(f"[IndexNow] submit skipped: {_e}")
+
+
+def _record_public_url(item: dict, user_id: int):
+    """Canonical public URL for an approved record, or None if no slug."""
+    try:
+        from database import get_conn as _gc
+        _c = _gc()
+        _cur = _c.cursor()
+        _cur.execute("SELECT agent_slug FROM users WHERE id = ?", (user_id,))
+        _row = _cur.fetchone()
+        _c.close()
+        slug = _row["agent_slug"] if _row else None
+        if not slug:
+            return None
+        content = item.get("content") or {}
+        headline = content.get("headline") or content.get("title") or "post"
+        import re as _re
+        base = _re.sub(r"[^a-z0-9]+", "-", headline.lower().strip()).strip("-")[:60]
+        ps = f"{base}-{item['id']}"
+        return f"https://{slug}.homebridgegroup.co/posts/{ps}"
+    except Exception:
+        return None
+
+
+def _post_approval_indexnow(item: dict, user_id: int, status: str) -> None:
+    """Fire IndexNow + log sitemap resubmit when a record is approved/published.
+    Build N. Best-effort; swallows all errors."""
+    if status not in ("approved", "published"):
+        return
+    try:
+        url = _record_public_url(item, user_id)
+        if not url:
+            return
+        host = url.split("/")[2]  # {slug}.homebridgegroup.co
+        _indexnow_submit([url], host)
+        # Build N.2 — sitemaps are generated dynamically (no static file to
+        # rebuild). Google has no instant-submit equivalent to IndexNow and GSC
+        # API credentials are not wired, so log the sitemap URL for manual
+        # resubmission to Google Search Console.
+        print(f"[Sitemap] {host} updated — resubmit https://{host}/sitemap.xml to Google Search Console")
+    except Exception as _e:
+        print(f"[IndexNow] post-approval hook skipped: {_e}")
+
+
 @app.middleware("http")
 async def slug_subdomain_router(request: Request, call_next):
     """
@@ -3602,6 +3721,12 @@ async def slug_subdomain_router(request: Request, call_next):
             if verify_match:
                 cir_val = verify_match.group(1)
                 return await public_verify_cir_page(cir_val)
+
+            # /{key}.txt — IndexNow key file (Build N). Served on every agent
+            # subdomain so IndexNow can verify ownership of {slug}.homebridgegroup.co.
+            if path == f"/{_get_indexnow_key()}.txt":
+                from fastapi.responses import PlainTextResponse as _PT
+                return _PT(_get_indexnow_key())
 
             # /sitemap.xml — per-agent sitemap
             if path == "/sitemap.xml":
