@@ -50,6 +50,11 @@ STRIPE_PRICES = {
 # HEYGEN_API_KEY: added to Render env vars end of Session 48.
 # Never logged. Never returned to frontend. Backend use only.
 HEYGEN_API_KEY  = os.getenv("HEYGEN_API_KEY", "")
+# HEYGEN_WEBHOOK_SECRET: shared secret for verifying /video/webhook payloads (H2 /
+# N8). When set, the webhook rejects unsigned or invalid requests. When unset,
+# the webhook degrades to "process + warn" so it doesn't break before the secret
+# is configured in Render.
+HEYGEN_WEBHOOK_SECRET = os.getenv("HEYGEN_WEBHOOK_SECRET", "")
 BACKEND_URL     = os.getenv("BACKEND_URL", "https://api.homebridgegroup.co")
 
 # ── Voice Identity — LMNT API — Session 51 ───────────────────────────────────
@@ -8886,11 +8891,32 @@ async def video_webhook(request: Request):
       avatar_video.success — video completed successfully
       avatar_video.fail    — video render failed
 
-    No signature verification required by HeyGen for this endpoint type.
-    We validate that the video_id exists in our DB before acting on it.
+    Signature verification (H2 / N8): when HEYGEN_WEBHOOK_SECRET is configured,
+    the raw payload is verified with HMAC-SHA256 and unsigned/invalid requests are
+    rejected. When the secret is unset, the request is processed with a warning so
+    the live webhook keeps working until the secret is added in Render.
     """
+    raw = await request.body()
+
+    # H2 — verify the webhook signature when a secret is configured.
+    if HEYGEN_WEBHOOK_SECRET:
+        import hmac as _hmac, hashlib as _hl
+        sig = (request.headers.get("x-heygen-signature")
+               or request.headers.get("heygen-signature")
+               or request.headers.get("signature")
+               or "").strip()
+        if sig.lower().startswith("sha256="):
+            sig = sig[7:]
+        expected = _hmac.new(HEYGEN_WEBHOOK_SECRET.encode(), raw, _hl.sha256).hexdigest()
+        if not sig or not _hmac.compare_digest(sig, expected):
+            print("[Video Webhook] Rejected — missing or invalid signature.")
+            raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+    else:
+        print("[Video Webhook] WARNING: HEYGEN_WEBHOOK_SECRET not set — signature not verified.")
+
     try:
-        body = await request.json()
+        import json as _jw
+        body = _jw.loads(raw.decode("utf-8")) if raw else {}
     except Exception:
         return {"ok": True}
 
@@ -9211,6 +9237,13 @@ async def serve_voice_audio(token: str, job_id: int):
     token_user_id = photo_token_validate(token)
     if not token_user_id:
         raise HTTPException(status_code=404, detail="Not found.")
+
+    # Ownership check (H1 / N7) — the token's user must own this job. Prevents
+    # anyone with a valid token from fetching another user's voice audio by
+    # guessing or iterating job_id.
+    _job = video_job_get(job_id)
+    if not _job or str(_job.get("userId")) != str(token_user_id):
+        raise HTTPException(status_code=403, detail="Forbidden.")
 
     # Locate the audio file
     import pathlib as _pathlib_serve
