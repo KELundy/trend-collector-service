@@ -231,6 +231,14 @@ def init_db():
         # Set at the end of the Foundation flow: 'daily' | 'weekdays' | 'off'.
         # Default 'off' — the Daily Question only runs once the member opts in.
         ("daily_question_pref",      "TEXT DEFAULT 'off'"),
+        # DEMO / GHOST PAGES — CC-6A (COMPLETE_PLATFORM_BUILD_SPEC Part B)
+        # is_demo: 1 = seeded demo persona (Brooke) or a temporary Ghost Page
+        #   prospect. Demo/ghost users never trigger real API calls, social
+        #   posting, billing, or the scheduler worker.
+        # ghost_expires_at: ISO timestamp; ghost pages 404 after this (7 days).
+        #   NULL for the permanent demo persona (Brooke never expires).
+        ("is_demo",                  "INTEGER DEFAULT 0"),
+        ("ghost_expires_at",         "TEXT DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -1747,6 +1755,245 @@ def admin_setting_set(key: str, value) -> None:
     )
     conn.commit()
     conn.close()
+
+
+# ─────────────────────────────────────────────
+# DEMO + GHOST PAGE SEEDING — CC-6A (COMPLETE_PLATFORM_BUILD_SPEC Part B / B9)
+# Brooke Callahan is the locked demo persona (Austin TX). Ghost pages reuse the
+# same seeding with a temporary, 7-day-expiring prospect user.
+# ─────────────────────────────────────────────
+DEMO_BROOKE = {
+    "email":       "brooke.callahan@demo.homebridgegroup.co",
+    "agent_name":  "Brooke Callahan",
+    "brokerage":   "eXp Realty",
+    "slug":        "brooke-callahan-austin",
+    "market":      "Austin, TX",
+    "state":       "TX",
+    "niches":      ["First-Time Homebuyers", "Relocation"],
+    "brand_voice": "Clear, warm, direct. I talk to people like a neighbor who happens to know real estate.",
+    "short_bio":   "I help first-time buyers and relocating families find their place in Austin. Every piece of content I publish goes on record.",
+}
+
+_FTB = "First-Time Homebuyers"
+_REL = "Relocation"
+# 15 static records across ~30 days: 2 distributed, 8 approved (CPR), 5 pending.
+DEMO_POSTS = [
+    {"days": 28, "status": "published", "niche": _FTB, "platforms": ["linkedin"],
+     "headline": "What does it actually cost to buy your first home in Austin?",
+     "post": "Most first-time buyers I meet have saved for the down payment and forgotten everything else. In Austin right now, plan for closing costs of roughly 2 to 3 percent of the price on top of your down payment. That covers loan origination, title, appraisal, and the first chunk of property taxes and insurance held in escrow. The good news: a lot of it is negotiable, and some sellers will help. Ask before you assume you can't afford it."},
+    {"days": 25, "status": "published", "niche": _REL, "platforms": ["facebook"],
+     "headline": "Moving to Austin? Here's what nobody tells you about the neighborhoods.",
+     "post": "Relocating families always ask me which neighborhood is best. There isn't one. There's the one that fits how you actually live. If your commute is downtown, look hard at the east side before you pay a premium north of the river. If schools drive the decision, Round Rock and Leander stretch your dollar further than people expect. Tell me your day-to-day and I'll tell you where it gets easier, not just where it looks good online."},
+    {"days": 23, "status": "approved", "niche": _FTB,
+     "headline": "Is it a buyer's market for first-timers in Austin right now?",
+     "post": "More than it was a year ago. Inventory is up, homes are sitting longer, and sellers are negotiating again. That doesn't mean prices fell off a cliff, but it does mean you have room to ask for repairs, a rate buydown, or help with closing costs. The buyers who win right now are the ones ready to move when the right house shows up, not the ones waiting for a bottom that already passed."},
+    {"days": 21, "status": "approved", "niche": _REL,
+     "headline": "How much house does a relocation budget really buy in Austin?",
+     "post": "If you're moving from a coastal market, your money goes further here, but not as far as the headlines promise. A relocating family at the median Austin price gets a comfortable home in the suburbs or a smaller place closer in. The trade is space versus commute, same as everywhere. What surprises most transferees is property tax, which runs higher than income-tax states. I'll walk you through the real monthly number before you fall in love with a listing."},
+    {"days": 19, "status": "approved", "niche": _FTB,
+     "headline": "What credit score do you actually need to buy in Austin?",
+     "post": "Lower than most people think. Plenty of first-time buyers close with a score in the low 600s using an FHA loan. A higher score gets you a better rate, which matters over thirty years, but a perfect score was never the requirement. If you're in the 580 to 660 range, don't count yourself out. Talk to a lender first, fix the one or two things that move the needle, and you may be closer than you assumed."},
+    {"days": 17, "status": "approved", "niche": _REL,
+     "headline": "Should you buy before you move to Austin, or rent first?",
+     "post": "If you're confident about the job and the city, buying first saves you a move and locks your housing cost. If you're not sure where you'll land day to day, rent for six months in the general area and learn the traffic patterns. There's no wrong answer, only the one that fits your certainty level. I help relocating clients both ways and I'll tell you honestly which one fits your situation."},
+    {"days": 15, "status": "approved", "niche": _FTB,
+     "headline": "What's the smallest down payment that actually works in Austin?",
+     "post": "Three percent on a conventional loan, three and a half on FHA, and zero on a VA loan if you qualify. There are also Texas down-payment assistance programs that most first-time buyers never hear about. A small down payment means mortgage insurance, which adds to the monthly cost, but it also means you stop paying someone else's mortgage sooner. Run both scenarios before you decide waiting is the safer move."},
+    {"days": 13, "status": "approved", "niche": _REL,
+     "headline": "Which Austin suburbs are relocating families actually choosing?",
+     "post": "Right now I'm seeing relocating families land in Pflugerville, Leander, and Buda more than the trophy names. The reason is simple: newer homes, more space, and a monthly payment that doesn't keep them up at night. The close-in neighborhoods are wonderful, but for a family moving sight-unseen, the suburbs reduce risk. We can always trade up once you know the city."},
+    {"days": 11, "status": "approved", "niche": _FTB,
+     "headline": "What happens in the 48 hours after your offer is accepted?",
+     "post": "This is where first-time buyers feel lost, so here's the map. You deliver earnest money, the clock starts on your option period, and you schedule the inspection fast because you only have a few days to negotiate repairs. Your lender orders the appraisal. You'll feel like nothing is happening and everything is happening at once. My job is to keep all of it on track so you can keep living your life."},
+    {"days": 9, "status": "approved", "niche": _REL,
+     "headline": "How do property taxes in Austin change your real monthly payment?",
+     "post": "Texas has no state income tax, and the trade-off shows up in property taxes. On an Austin-area home, expect an effective rate around two percent of value, paid through your mortgage escrow. For a relocating family, that can add several hundred dollars a month compared to the same-priced home in a high-income-tax state. It's not a reason to avoid Texas, it's a reason to budget honestly. I'll give you the all-in number, not the listing-price fantasy."},
+    {"days": 7, "status": "pending", "niche": _FTB,
+     "headline": "Do first-time buyers in Austin still need to waive the inspection?",
+     "post": "No. That was 2021. Today you can and should get a full inspection, and you have real leverage to ask for repairs or credits. Waiving the inspection was always a gamble, and the market no longer requires the gamble. Protect yourself. A good inspection on a first home is the cheapest insurance you'll ever buy."},
+    {"days": 5, "status": "pending", "niche": _REL,
+     "headline": "What's the one thing relocating buyers always forget to check?",
+     "post": "Commute at the actual time you'll drive it. A house fifteen minutes from downtown at noon can be forty-five at eight in the morning. Before you commit to a neighborhood, drive the route on a weekday during rush hour. It's the cheapest thing you can do to avoid the most common relocation regret I see."},
+    {"days": 4, "status": "pending", "niche": _FTB,
+     "headline": "How long does it really take to buy your first home in Austin?",
+     "post": "From the day you're pre-approved to the day you get keys, plan on 30 to 45 days once you're under contract, plus a few weeks of looking before that. The part you control is getting financing lined up early. The buyers who close fastest are the ones who did the boring paperwork before they started touring homes."},
+    {"days": 3, "status": "pending", "niche": _REL,
+     "headline": "Renting in Austin while you house-hunt: how to do it right.",
+     "post": "Sign the shortest lease you can and ask about a month-to-month option, even if it costs a little more. The flexibility is worth it when the right home shows up. Relocating families who lock into a twelve-month lease often end up paying two housing costs at once when they find their place in month four."},
+    {"days": 1, "status": "pending", "niche": _FTB,
+     "headline": "What's a healthy emergency fund after you buy your first home?",
+     "post": "Three to six months of your full housing payment, sitting untouched, after you close. New homeowners get surprised by the water heater, the AC, the first big property-tax bill. Buying the home is the start, not the finish line. If a stretch purchase would wipe out your savings, we'll find a number that lets you sleep at night."},
+]
+
+
+def _demo_compliance(headline):
+    return {
+        "overallStatus": "compliant", "fairHousing": "pass", "brokerageDisclosure": "pass",
+        "narStandards": "pass", "stateCompliance": "pass", "rules_version": "v6", "headline": headline,
+    }
+
+
+def _seed_persona(fields, posts, is_ghost=False, ghost_expires_at=None):
+    """
+    Create/reset a demo-like user (Brooke or a Ghost prospect) with seeded content.
+    Idempotent — clears the user's prior seeded content first. Returns user_id.
+    """
+    import secrets as _sec
+    from datetime import datetime as _dtc, timedelta as _td
+    conn = get_conn()
+    c = conn.cursor()
+    email = fields["email"]
+    c.execute("SELECT id FROM users WHERE email = ?", (email,))
+    row = c.fetchone()
+    if row:
+        uid = row["id"]
+        c.execute(
+            """UPDATE users SET agent_name=?, brokerage=?, agent_slug=?, plan='founding_member',
+               is_active=1, role='agent', is_licensed=1, is_demo=1, ghost_expires_at=? WHERE id=?""",
+            (fields["agent_name"], fields["brokerage"], fields["slug"], ghost_expires_at, uid),
+        )
+    else:
+        c.execute(
+            """INSERT INTO users (email, password_hash, agent_name, brokerage, role, is_active,
+               plan, agent_slug, is_licensed, is_demo, ghost_expires_at)
+               VALUES (?, '!demo-no-login', ?, ?, 'agent', 1, 'founding_member', ?, 1, 1, ?)""",
+            (email, fields["agent_name"], fields["brokerage"], fields["slug"], ghost_expires_at),
+        )
+        uid = c.lastrowid
+
+    setup = {
+        "agentName": fields["agent_name"], "brokerage": fields["brokerage"],
+        "market": fields["market"], "state": fields.get("state", ""),
+        "primaryNiches": fields["niches"], "brandVoice": fields.get("brand_voice", ""),
+        "shortBio": fields.get("short_bio", ""), "authoritySlug": fields["slug"],
+    }
+    c.execute(
+        """INSERT INTO agent_setup (user_id, setup_json, updated_at) VALUES (?, ?, datetime('now'))
+           ON CONFLICT(user_id) DO UPDATE SET setup_json=excluded.setup_json, updated_at=datetime('now')""",
+        (uid, json.dumps(setup)),
+    )
+    c.execute("DELETE FROM content_library  WHERE user_id=?", (uid,))
+    c.execute("DELETE FROM compliance_records WHERE user_id=?", (uid,))
+    c.execute("DELETE FROM schedules         WHERE user_id=?", (uid,))
+
+    now = _dtc.utcnow()
+    for p in posts:
+        ts     = (now - _td(days=p.get("days", 0))).isoformat()
+        status = p["status"]
+        content    = {"headline": p["headline"], "post": p["post"], "generated_at": ts}
+        compliance = _demo_compliance(p["headline"])
+        cir_id = approved_at = published_at = None
+        copied = "[]"
+        if status in ("approved", "published"):
+            cir_id      = f"CIR-{(now - _td(days=p.get('days',0))).strftime('%Y%m%d')}-{_sec.token_hex(3).upper()}"
+            approved_at = ts
+        if status == "published":
+            published_at = ts
+            copied = json.dumps(p.get("platforms", []))
+        c.execute(
+            """INSERT INTO content_library
+               (user_id, niche, status, content, draft_content, compliance, copied_platforms,
+                source, saved_at, approved_at, published_at, cir_id, context, origin_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'demo_seed', ?, ?, ?, ?, 'agent', 'engine_draft')""",
+            (uid, p["niche"], status, json.dumps(content), json.dumps(content), json.dumps(compliance),
+             copied, ts, approved_at, published_at, cir_id),
+        )
+        lib_id = c.lastrowid
+        if cir_id:
+            c.execute(
+                """INSERT INTO compliance_records
+                   (user_id, cir_id, library_item_id, niche, headline, overall_status, fair_housing,
+                    disclosure, nar_standards, state_compliance, rules_version, compliance_json,
+                    approved_at, context, origin_type)
+                   VALUES (?, ?, ?, ?, ?, 'compliant', 'pass', 'pass', 'pass', 'pass', 'v6', ?, ?, 'agent', 'engine_draft')""",
+                (uid, cir_id, lib_id, p["niche"], p["headline"], json.dumps(compliance), approved_at),
+            )
+
+    if not is_ghost and len(fields["niches"]) >= 2:
+        for niche, freq in [(fields["niches"][0], "3x_week"), (fields["niches"][1], "2x_week")]:
+            c.execute(
+                """INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run)
+                   VALUES (?, ?, ?, '08:00', 'America/Chicago', 1, ?)
+                   ON CONFLICT(user_id, niche) DO UPDATE SET frequency=excluded.frequency, active=1""",
+                (uid, niche, freq, (now + _td(days=1)).isoformat()),
+            )
+
+    conn.commit()
+    conn.close()
+    return uid
+
+
+def seed_demo_user():
+    """Create/reset the locked Brooke Callahan demo persona. Returns her user_id."""
+    return _seed_persona(DEMO_BROOKE, DEMO_POSTS, is_ghost=False, ghost_expires_at=None)
+
+
+def get_demo_user():
+    """Return Brooke's user row (dict) if seeded, else None."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE email = ?", (DEMO_BROOKE["email"],))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def _ghost_sample_posts(name, market, niche):
+    nl = (niche or "real estate").lower()
+    templates = [
+        ("What should {niche} clients in {market} know before they start?",
+         "This is sample content showing the kind of post {name} could publish — written in their voice, reviewed for compliance, and permanently on record."),
+        ("The most common mistake {nl} clients make in {market}.",
+         "Sample preview. Real posts are generated from {name}'s own market knowledge and approved before anything publishes."),
+        ("How the {market} market is shifting for {nl} clients right now.",
+         "Sample content. {name}'s actual page would track {market} signals and turn them into timely, compliant posts."),
+        ("Three questions to ask before working with anyone in {market}.",
+         "Sample preview of {name}'s authority page. Every real post carries a Certified Provenance Record."),
+        ("What makes {market} different for {nl} clients.",
+         "Sample content placeholder for {name}'s page."),
+        ("A quick guide for {nl} clients new to {market}.",
+         "Sample preview content for {name}."),
+    ]
+    out = []
+    for i, (h, p) in enumerate(templates):
+        out.append({
+            "days": (i + 1) * 4,
+            "status": "approved" if i < 4 else "pending",
+            "niche": niche,
+            "headline": h.format(niche=niche, nl=nl, market=market, name=name),
+            "post": p.format(niche=niche, nl=nl, market=market, name=name),
+        })
+    return out
+
+
+def seed_ghost_user(name, market, niche, slug, ghost_expires_at):
+    """Create a temporary Ghost Page prospect with sample content. Returns user_id."""
+    fields = {
+        "email": f"ghost-{slug}@demo.homebridgegroup.co",
+        "agent_name": name, "brokerage": "", "slug": slug,
+        "market": market, "state": "", "niches": [niche],
+        "brand_voice": "", "short_bio": f"{name} helps {(niche or 'real estate').lower()} clients in {market}.",
+    }
+    return _seed_persona(fields, _ghost_sample_posts(name, market, niche), is_ghost=True, ghost_expires_at=ghost_expires_at)
+
+
+def purge_expired_ghosts():
+    """Delete ghost users (and their content) whose 7-day token has expired."""
+    from datetime import datetime as _dtc
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE is_demo=1 AND ghost_expires_at IS NOT NULL AND ghost_expires_at < ?",
+              (_dtc.utcnow().isoformat(),))
+    ids = [r["id"] for r in c.fetchall()]
+    for uid in ids:
+        c.execute("DELETE FROM content_library   WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM compliance_records WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM schedules          WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM agent_setup        WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM users              WHERE id=?",      (uid,))
+    conn.commit()
+    conn.close()
+    return len(ids)
 
 
 # ─────────────────────────────────────────────

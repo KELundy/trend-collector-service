@@ -1355,6 +1355,18 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
     saved_items   = []  # (niche, item_id, headline) tuples
     failed_niches = []
 
+    # Demo / ghost users never trigger real scheduled generation (Part B5.7).
+    try:
+        from database import get_conn as _gc_demo
+        _cd = _gc_demo(); _cc = _cd.cursor()
+        _cc.execute("SELECT is_demo FROM users WHERE id = ?", (user_id,))
+        _r = _cc.fetchone(); _cd.close()
+        if _r and _r["is_demo"]:
+            print(f"[Scheduler] Skipping demo/ghost user {user_id}.")
+            return
+    except Exception:
+        pass
+
     for sched in scheds:
         niche    = sched["niche"]
         sched_id = sched["id"]
@@ -1897,7 +1909,31 @@ async def validate_demo_token(token: str, request: Request):
     c.execute("UPDATE demo_tokens SET open_count=open_count+1, last_opened=?, ip_log=? WHERE id=?", (_dt.utcnow().isoformat(), _json.dumps(ip_log), row["id"]))
     conn.commit()
     conn.close()
-    return {"valid": True, "message": "Demo access granted"}
+
+    # Issue a restricted session as the seeded Brooke persona so the demo loads
+    # her real workspace (Part B4). Seed her on demand if she doesn't exist yet.
+    from database import get_demo_user, seed_demo_user
+    brooke = get_demo_user()
+    if not brooke:
+        seed_demo_user()
+        brooke = get_demo_user()
+    from auth import create_token as _ct
+    jwt = _ct(brooke["id"], brooke["email"], "agent")
+    return {
+        "valid": True,
+        "message": "Demo access granted",
+        "token": jwt,
+        "user": {
+            "id":         brooke["id"],
+            "email":      brooke["email"],
+            "agent_name": brooke["agent_name"],
+            "brokerage":  brooke["brokerage"],
+            "role":       "agent",
+            "is_demo":    True,
+            "agent_slug": brooke["agent_slug"],
+            "plan":       "founding_member",
+        },
+    }
 
 
 @app.post("/office/invite")
@@ -3403,12 +3439,22 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
         + (f" Publishing since {_esc_html(member_since)}." if member_since else "")
     )
 
+    # Demo / Ghost treatment (Part B / B9): demo + ghost pages are noindex; ghost
+    # pages also show a SAMPLE watermark. Brooke (demo, no expiry) is noindex but
+    # unwatermarked — a real, viewable demo page.
+    _robots_content = "noindex,nofollow" if d.get("is_demo") else "index,follow"
+    _sample_banner = (
+        '<div style="position:fixed;top:0;left:0;right:0;z-index:99999;background:#A67C2E;color:#fff;'
+        'text-align:center;font-size:12px;font-weight:700;letter-spacing:.08em;padding:6px 12px;">'
+        'SAMPLE &mdash; PREVIEW ONLY &middot; Illustrative AutoMates authority page</div>'
+        if d.get("is_ghost") else ""
+    )
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<meta name="robots" content="index,follow">
+<meta name="robots" content="{_robots_content}">
 <title>{page_title}</title>
 <meta name="description" content="{meta_desc_esc}">
 <meta property="og:type" content="profile">
@@ -3429,6 +3475,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
   <a class="tb-logo" href="https://homebridgegroup.co"><span>Auto</span>Mates</a>
   <a class="tb-cta" href="https://app.homebridgegroup.co">Sign In &#8594;</a>
 </nav>
+{_sample_banner}
 <div class="hero">
   <div class="hero-inner">
     <div>
@@ -3614,14 +3661,29 @@ async def public_agent_authority_page(slug: str, request: Request):
     if not user:
         raise HTTPException(404, "Agent not found.")
 
+    # Demo / Ghost handling (Part B / B9). Ghost pages expire after 7 days; demo
+    # and ghost pages are noindex (ghosts also carry a SAMPLE watermark).
+    is_demo   = bool(user.get("is_demo"))
+    ghost_exp = user.get("ghost_expires_at")
+    is_ghost  = bool(ghost_exp)
+    if is_ghost:
+        from datetime import datetime as _dtg
+        try:
+            expired = _dtg.fromisoformat(ghost_exp) < _dtg.utcnow()
+        except Exception:
+            expired = False
+        if expired:
+            raise HTTPException(404, "This preview has expired.")
+
     # Reuse the existing public_agent_profile data assembly
-    # Call the data-gathering logic directly rather than duplicating it
     response_data = await public_agent_profile(slug)
+    response_data["is_demo"]  = is_demo
+    response_data["is_ghost"] = is_ghost
 
     html = _build_authority_page_html(response_data, slug)
     return _HTMLResponse(content=html, status_code=200, headers={
-        "Cache-Control": "public, max-age=300",  # 5-minute cache — fresh enough, fast enough
-        "X-Robots-Tag": "index, follow",
+        "Cache-Control": "no-store" if is_demo else "public, max-age=300",
+        "X-Robots-Tag": "noindex, nofollow" if is_demo else "index, follow",
     })
 
 
@@ -4980,6 +5042,55 @@ async def admin_dashboard_settings(request: Request, current_user: dict = Depend
         if k in body and body[k] is not None:
             admin_setting_set(k, body[k])
     return {"ok": True}
+
+
+@app.post("/admin/demo/seed")
+async def admin_demo_seed(current_user: dict = Depends(get_current_user)):
+    """Reset Demo — create/re-seed the locked Brooke Callahan demo persona (Part B8)."""
+    _require_super_admin(current_user)
+    from database import seed_demo_user, get_demo_user
+    seed_demo_user()
+    brooke = get_demo_user()
+    return {
+        "ok": True,
+        "user_id": brooke["id"],
+        "slug": brooke["agent_slug"],
+        "authority_url": f"https://{brooke['agent_slug']}.homebridgegroup.co",
+    }
+
+
+@app.post("/admin/ghost/create")
+async def admin_ghost_create(request: Request, current_user: dict = Depends(get_current_user)):
+    """
+    Ghost Page generator (GROWTH_ENGINE_BRIEF Build B / spec B9). Creates a
+    temporary is_demo prospect with sample content + a 7-day, unguessable preview
+    URL that reuses the SSR authority template (SAMPLE watermark, noindex, 404 on
+    expiry). Never publishable — it is a demo user and expires.
+    """
+    _require_super_admin(current_user)
+    body   = await request.json()
+    name   = (body.get("name") or "").strip()
+    market = (body.get("market") or "").strip()
+    niche  = (body.get("niche") or "").strip()
+    if not name or not market or not niche:
+        raise HTTPException(400, "name, market, and niche are required.")
+
+    import re as _reg, secrets as _sec
+    from datetime import datetime as _dtg, timedelta as _tdg
+    from database import seed_ghost_user, purge_expired_ghosts
+
+    purge_expired_ghosts()  # opportunistic cleanup of expired ghosts
+    base    = _reg.sub(r"[^a-z0-9]+", "-", f"{name} {market.split(',')[0]}".lower()).strip("-")[:48]
+    slug    = f"{base}-{_sec.token_hex(2)}"          # random suffix = the private token
+    expires = (_dtg.utcnow() + _tdg(days=7)).isoformat()
+    uid     = seed_ghost_user(name, market, niche, slug, expires)
+    return {
+        "ok": True,
+        "user_id": uid,
+        "slug": slug,
+        "preview_url": f"https://{slug}.homebridgegroup.co",
+        "expires_at": expires,
+    }
 
 
 @app.post("/admin/set-active")

@@ -3601,6 +3601,37 @@ async def get_situations_multi(niches: Optional[str] = None, include_lighter: bo
     return {"niches": niche_list, "situations": merged}
 
 
+# Demo generation bank (Part B5.1) — pre-written, rotated. No LLM call.
+_DEMO_GEN_BANK = [
+    {"headline": "What's the very first thing first-time buyers in Austin should do?",
+     "post": "Get pre-approved before you tour a single home. It tells you the real number you can spend, it makes your offer credible when you find the one, and it surfaces anything on your credit while there's still time to fix it. Touring homes you can't finance is the fastest way to fall in love with the wrong house."},
+    {"headline": "Relocating to Austin? Start with your actual commute, not the listing photos.",
+     "post": "Before you pick a neighborhood, drive the route to your office at the time you'll really drive it. A fifteen-minute trip at noon can be forty-five at eight in the morning. The neighborhood that looks perfect online can quietly cost you ten hours a week. Pick the life, then pick the house."},
+    {"headline": "How much do closing costs really run on an Austin first home?",
+     "post": "Plan for roughly 2 to 3 percent of the price on top of your down payment. That covers loan origination, title, appraisal, and the escrow setup for taxes and insurance. A good chunk is negotiable, and some sellers will contribute. Ask before you assume the number is fixed."},
+    {"headline": "Should a relocating family rent first or buy right away in Austin?",
+     "post": "If you're sure about the job and the city, buying first locks your cost and saves you a second move. If you're not sure where your day-to-day will land, rent for six months and learn the traffic. There's no wrong answer, only the one that matches how certain you are."},
+    {"headline": "Do first-time buyers in Austin still need to waive the inspection?",
+     "post": "No. That was the 2021 market. Today you can and should get a full inspection, and you have real room to ask for repairs or credits. A thorough inspection on your first home is the cheapest insurance you will ever buy. Protect yourself."},
+]
+_demo_gen_idx = [0]
+
+
+def _demo_generated_response(payload):
+    pick = _DEMO_GEN_BANK[_demo_gen_idx[0] % len(_DEMO_GEN_BANK)]
+    _demo_gen_idx[0] += 1
+    badge = ComplianceBadge(
+        fairHousing="pass", brokerageDisclosure="pass", narStandards="pass",
+        stateCompliance="pass", mlsCompliance="pass", overallStatus="reviewed",
+        statusLabel="AI-Reviewed",
+    )
+    return ContentResponse(
+        headline=pick["headline"], thumbnailIdea="", hashtags="",
+        post=pick["post"], cta="", script="", compliance=badge,
+        generated_at=datetime.utcnow(),
+    )
+
+
 @router.post("/generate-content", response_model=ContentResponse)
 async def generate_content(payload: ContentRequest, request: Request) -> ContentResponse:
     # ── Generation backstop gate ──────────────────────────────────────────────
@@ -3629,12 +3660,17 @@ async def generate_content(payload: ContentRequest, request: Request) -> Content
                 decoded = _jwt.decode(token, SECRET, algorithms=["HS256"])
                 uid = decoded.get("user_id") or decoded.get("sub")
                 if uid:
-                    _c.execute("SELECT id, role, plan FROM users WHERE id = ?", (int(uid),))
+                    _c.execute("SELECT id, role, plan, is_demo FROM users WHERE id = ?", (int(uid),))
                     urow = _c.fetchone()
                     if urow:
                         _uid  = urow["id"]
                         _role = urow["role"] or "agent"
                         _plan = urow["plan"] or "trial"
+                        # Demo / ghost users never call the LLM (Part B5.1) —
+                        # return pre-written content from a rotating bank.
+                        if urow["is_demo"]:
+                            _conn.close()
+                            return _demo_generated_response(payload)
 
                         # ── Regeneration detection ────────────────────────────
                         # Hash of mode + niche + situation identifies identical requests.
