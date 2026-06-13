@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import io
@@ -852,58 +852,56 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
         raise HTTPException(500, f"Generation failed: {str(e)}")
 
 
-@app.post("/content/generate-from-answer")
-async def generate_from_answer_route(body: dict, current_user=Depends(get_current_user)):
+def _run_foundation_generation(user_id: int, answer_id: int) -> dict:
     """
-    DQ-4 bridge (FOUNDATION_DAILY_QUESTION_SPEC_v2 §6-7). Turn a member's own
-    stored answer into a content_library item in their voice, flagged with
-    human-origin provenance.
+    Shared DQ-4 core (FOUNDATION_DAILY_QUESTION_SPEC_v2 §6-7): read a stored
+    member_answer, generate a record in the member's voice, and save it to
+    content_library flagged with human-origin provenance (origin_type +
+    answer_ref). Used by the /content/generate-from-answer route AND by the DQ-2
+    Foundation flow's background task.
 
-    This is the ONLY path that sets a member_answer origin_type, and it requires a
-    real member_answers row (answer_ref), so the flag cannot be applied to
-    arbitrary content — the §7 honesty constraint. No manual/admin/backfill route
-    exists. Approval then threads origin_type/answer_ref onto the compliance_record.
+    Returns {"ok": True, "item": ..., "origin_type": ...} or
+    {"ok": False, "error": <msg>, "status": <http code>}. Never raises — safe to
+    run as a FastAPI BackgroundTask, where exceptions would otherwise be swallowed.
+
+    Setting a member_answer origin requires a real member_answers row (answer_ref),
+    so the §7 honesty flag cannot be applied to arbitrary content.
     """
-    user_id   = current_user["id"]
-    answer_id = body.get("answer_id")
-    if not answer_id:
-        raise HTTPException(status_code=400, detail="answer_id is required.")
-
-    from database import member_answer_with_question, get_conn as _gc_ans, library_save as _lsave
-    from content_engine import (
-        AgentProfileModel, generate_from_member_answer, foundation_category_for_bank,
-    )
-
-    answer = member_answer_with_question(answer_id, user_id)
-    if not answer:
-        raise HTTPException(status_code=404, detail="Answer not found.")
-
-    # Identity/voice from the agent's saved setup — same source the scheduler uses.
-    conn = _gc_ans()
-    c    = conn.cursor()
-    c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    user_row = c.fetchone()
-    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
-    setup_row = c.fetchone()
-    conn.close()
-    if not user_row:
-        raise HTTPException(status_code=400, detail="User not found.")
-    setup = json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
-
-    profile = AgentProfileModel(
-        agentName  = user_row["agent_name"],
-        brokerage  = user_row["brokerage"],
-        market     = setup.get("market", ""),
-        brandVoice = setup.get("brandVoice", ""),
-        shortBio   = setup.get("shortBio", ""),
-        state      = setup.get("state", ""),
-        mlsNames   = setup.get("mlsNames", []),
-    )
-
-    gen_category = foundation_category_for_bank(answer.get("bank_category"))
-    input_type   = (answer.get("input_type") or "text").lower()
-
     try:
+        from database import member_answer_with_question, get_conn as _gc_ans, library_save as _lsave
+        from content_engine import (
+            AgentProfileModel, generate_from_member_answer, foundation_category_for_bank,
+        )
+
+        answer = member_answer_with_question(answer_id, user_id)
+        if not answer:
+            return {"ok": False, "error": "Answer not found.", "status": 404}
+
+        # Identity/voice from the agent's saved setup — same source the scheduler uses.
+        conn = _gc_ans()
+        c    = conn.cursor()
+        c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        user_row = c.fetchone()
+        c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+        setup_row = c.fetchone()
+        conn.close()
+        if not user_row:
+            return {"ok": False, "error": "User not found.", "status": 400}
+        setup = json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
+
+        profile = AgentProfileModel(
+            agentName  = user_row["agent_name"],
+            brokerage  = user_row["brokerage"],
+            market     = setup.get("market", ""),
+            brandVoice = setup.get("brandVoice", ""),
+            shortBio   = setup.get("shortBio", ""),
+            state      = setup.get("state", ""),
+            mlsNames   = setup.get("mlsNames", []),
+        )
+
+        gen_category = foundation_category_for_bank(answer.get("bank_category"))
+        input_type   = (answer.get("input_type") or "text").lower()
+
         cr = generate_from_member_answer(
             {
                 "transcript":    answer.get("transcript") or "",
@@ -914,36 +912,223 @@ async def generate_from_answer_route(body: dict, current_user=Depends(get_curren
             profile = profile,
             user_id = user_id,
         )
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
+
+        content_to_save = {
+            "headline":      cr.headline,
+            "thumbnailIdea": cr.thumbnailIdea,
+            "hashtags":      cr.hashtags,
+            "post":          cr.post,
+            "cta":           cr.cta,
+            "script":        cr.script,
+            "generated_at":  cr.generated_at.isoformat(),
+        }
+        compliance_to_save = cr.compliance.dict() if hasattr(cr.compliance, "dict") else dict(cr.compliance)
+
+        # 'voice' vs 'text' provenance — the answer's own input_type decides, never the caller.
+        origin_type = "member_answer_voice" if input_type == "voice" else "member_answer_text"
+        saved_item  = _lsave(
+            user_id     = user_id,
+            niche       = "",
+            content     = content_to_save,
+            compliance  = compliance_to_save,
+            source      = "foundation_answer",
+            context     = "agent",
+            origin_type = origin_type,
+            answer_ref  = answer_id,
+        )
+        return {"ok": True, "item": saved_item, "origin_type": origin_type}
     except Exception as e:
         print(f"[FoundationGenerate] Error for user {user_id}, answer {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        return {"ok": False, "error": str(e), "status": 500}
 
-    content_to_save = {
-        "headline":      cr.headline,
-        "thumbnailIdea": cr.thumbnailIdea,
-        "hashtags":      cr.hashtags,
-        "post":          cr.post,
-        "cta":           cr.cta,
-        "script":        cr.script,
-        "generated_at":  cr.generated_at.isoformat(),
-    }
-    compliance_to_save = cr.compliance.dict() if hasattr(cr.compliance, "dict") else dict(cr.compliance)
 
-    # 'voice' vs 'text' provenance — the answer's own input_type decides, never the caller.
-    origin_type = "member_answer_voice" if input_type == "voice" else "member_answer_text"
-    saved_item  = _lsave(
-        user_id     = user_id,
-        niche       = "",
-        content     = content_to_save,
-        compliance  = compliance_to_save,
-        source      = "foundation_answer",
-        context     = "agent",
-        origin_type = origin_type,
-        answer_ref  = answer_id,
+@app.post("/content/generate-from-answer")
+async def generate_from_answer_route(body: dict, current_user=Depends(get_current_user)):
+    """
+    DQ-4 bridge (FOUNDATION_DAILY_QUESTION_SPEC_v2 §6-7). Turn a member's own
+    stored answer into a content_library item in their voice, synchronously.
+    Thin wrapper over _run_foundation_generation().
+    """
+    answer_id = body.get("answer_id")
+    if not answer_id:
+        raise HTTPException(status_code=400, detail="answer_id is required.")
+    result = _run_foundation_generation(current_user["id"], answer_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=result.get("status", 500), detail=result.get("error", "Generation failed."))
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DQ-2 — FOUNDATION FLOW (typed input only this session)
+# FOUNDATION_DAILY_QUESTION_SPEC_v2 §2-3. The platform asks; the member answers
+# in their own words; the engine shapes it; they review/approve. Voice capture is
+# DQ-3. These routes run for new users inside onboarding.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Canonical copy — spec §2, served to the UI so wording lives in one place.
+_FOUNDATION_CONSENT_COPY = {
+    "title": "Three quick questions before your team gets to work.",
+    "body": (
+        "Your answers do two things: they teach your team to write the way you "
+        "actually talk, and they become the first records on your page — your words, "
+        "shaped up, signed by you."
+    ),
+    "promises": [
+        "Nothing publishes without your approval.",
+        "You can edit or discard anything.",
+        "You can skip any question, no reason needed.",
+    ],
+}
+_DAILY_QUESTION_COPY = (
+    "Your team will ask you one quick question most mornings. Answer it and it "
+    "becomes that day's content. Ignore it and nothing happens."
+)
+_F1_PLACEHOLDER = "answer like you're leaving a voicemail to a friend — about 60 seconds of typing"
+
+
+@app.get("/foundation/questions")
+async def foundation_questions(current_user=Depends(get_current_user)):
+    """Return the three Foundation questions (F1-F3) in order plus the §2 copy."""
+    from database import get_conn as _gc_fq
+    conn = _gc_fq()
+    c    = conn.cursor()
+    c.execute(
+        "SELECT id, text_template, category FROM question_bank "
+        "WHERE source = 'foundation' AND active = 1 ORDER BY id LIMIT 3"
     )
-    return {"ok": True, "item": saved_item, "origin_type": origin_type}
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    # Render [market] / [primary niche audience] placeholders from the agent's
+    # setup. A brand-new member usually has no setup yet, so fall back gracefully.
+    setup     = get_agent_setup(current_user["id"]) or {}
+    market    = setup.get("market", "") or "your market"
+    niche_aud = (setup.get("primaryNiches") or ["buyers and sellers"])[0]
+
+    def _render(t):
+        return (t or "").replace("[market]", market).replace("[primary niche audience]", niche_aud)
+
+    questions = [
+        {"id": r["id"], "text": _render(r["text_template"]), "category": r["category"], "position": i + 1}
+        for i, r in enumerate(rows)
+    ]
+    return {
+        "questions":           questions,
+        "consent_copy":        _FOUNDATION_CONSENT_COPY,
+        "daily_question_copy": _DAILY_QUESTION_COPY,
+        "input_placeholder":   _F1_PLACEHOLDER,
+    }
+
+
+@app.post("/foundation/answer")
+async def foundation_answer(body: dict, background_tasks: BackgroundTasks,
+                            current_user=Depends(get_current_user)):
+    """
+    Store a typed Foundation answer (§3) and kick off background generation so the
+    record is ready by the time the next question is answered.
+    body: { question_id (question_bank id, optional), question_text, transcript }
+    """
+    user_id    = current_user["id"]
+    transcript = (body.get("transcript") or "").strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="An answer is required.")
+    question_id   = body.get("question_id")
+    question_text = (body.get("question_text") or "").strip()
+
+    from database import member_question_create, member_answer_create
+    mq_id     = member_question_create(user_id, question_id=question_id,
+                                       rendered_text=question_text, status="answered")
+    answer_id = member_answer_create(user_id, mq_id, "text", transcript)
+
+    # Background generation — reuse the shared DQ-4 core (never raises).
+    background_tasks.add_task(_run_foundation_generation, user_id, answer_id)
+    return {"ok": True, "answer_id": answer_id, "member_question_id": mq_id}
+
+
+@app.post("/foundation/skip")
+async def foundation_skip(body: dict, current_user=Depends(get_current_user)):
+    """Record a skipped question (§3 per-question Skip). No generation triggered."""
+    from database import member_question_create
+    mq_id = member_question_create(
+        current_user["id"],
+        question_id=body.get("question_id"),
+        rendered_text=(body.get("question_text") or "").strip(),
+        status="skipped",
+    )
+    return {"ok": True, "member_question_id": mq_id, "status": "skipped"}
+
+
+@app.get("/foundation/record")
+async def foundation_record(answer_id: int, current_user=Depends(get_current_user)):
+    """
+    Return the generated content_library item for a Foundation answer (the reveal),
+    or {"ready": False} while background generation is still running.
+    """
+    user_id = current_user["id"]
+    from database import get_conn as _gc_fr, library_get_item
+    conn = _gc_fr()
+    c    = conn.cursor()
+    c.execute(
+        "SELECT id FROM content_library WHERE user_id = ? AND answer_ref = ? ORDER BY id DESC LIMIT 1",
+        (user_id, answer_id),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"ready": False}
+    return {"ready": True, "item": library_get_item(row["id"], user_id)}
+
+
+@app.post("/foundation/paste-samples")
+async def foundation_paste_samples(body: dict, current_user=Depends(get_current_user)):
+    """
+    §3 shortcut — seed the voice exemplar pool from 2-3 posts the agent pastes.
+    Each becomes an APPROVED content_library item (so get_voice_exemplars picks it
+    up), but NO CPR is minted: these are the agent's own existing writing, not
+    reviewed Foundation records, so we approve the status directly without routing
+    through the compliance/CIR path. origin stays engine_draft.
+    """
+    user_id = current_user["id"]
+    samples = body.get("samples") or []
+    if isinstance(samples, str):
+        samples = [samples]
+
+    from database import library_save, get_conn as _gc_ps
+    saved_ids = []
+    for s in samples:
+        text = (s or "").strip()
+        if len(text) < 50:
+            continue  # too short to be a useful voice exemplar
+        content = {"headline": "", "post": text, "generated_at": datetime.utcnow().isoformat()}
+        item = library_save(user_id, "", content, {"overallStatus": "voice_sample"},
+                            source="voice_sample", context="agent")
+        # Approve the status directly — voice seed material, not a reviewed record.
+        conn = _gc_ps()
+        c    = conn.cursor()
+        c.execute(
+            "UPDATE content_library SET status = 'approved', approved_at = ? WHERE id = ? AND user_id = ?",
+            (datetime.utcnow().isoformat(), item["id"], user_id),
+        )
+        conn.commit()
+        conn.close()
+        saved_ids.append(item["id"])
+
+    return {"ok": True, "saved": len(saved_ids), "item_ids": saved_ids}
+
+
+@app.post("/foundation/daily-preference")
+async def foundation_daily_preference(body: dict, current_user=Depends(get_current_user)):
+    """Store the Daily Question preference set at the end of Foundation (§2)."""
+    pref = (body.get("preference") or "off").strip().lower()
+    if pref not in ("daily", "weekdays", "off"):
+        pref = "off"
+    from database import get_conn as _gc_dp
+    conn = _gc_dp()
+    c    = conn.cursor()
+    c.execute("UPDATE users SET daily_question_pref = ? WHERE id = ?", (pref, current_user["id"]))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "preference": pref}
 
 
 @app.get("/identity/guidance")

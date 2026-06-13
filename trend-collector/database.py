@@ -227,6 +227,10 @@ def init_db():
         #   Lockout threshold: 5 failures in 15 minutes — locked 30 minutes.
         ("login_fail_count",         "INTEGER DEFAULT 0"),
         ("login_locked_until",       "TEXT DEFAULT NULL"),
+        # DAILY QUESTION PREFERENCE — DQ-2 (FOUNDATION_DAILY_QUESTION_SPEC_v2 §2)
+        # Set at the end of the Foundation flow: 'daily' | 'weekdays' | 'off'.
+        # Default 'off' — the Daily Question only runs once the member opts in.
+        ("daily_question_pref",      "TEXT DEFAULT 'off'"),
     ]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
