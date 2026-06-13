@@ -426,6 +426,16 @@ def init_db():
     except Exception:
         pass  # Column already exists
 
+    # admin_settings — key/value store for manually-entered dashboard metrics
+    # (pages indexed, monthly revenue) that have no automated source yet. A6.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS admin_settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT,
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     # Platform posts — PaperTrail audit of published content
     c.execute("""
         CREATE TABLE IF NOT EXISTS platform_posts (
@@ -1709,6 +1719,34 @@ def backfill_compliance_records() -> int:
     else:
         print("[Backfill] compliance_records: already up to date, nothing to write.")
     return written
+
+
+# ─────────────────────────────────────────────
+# ADMIN SETTINGS — key/value store for manually-entered dashboard metrics (A6)
+# ─────────────────────────────────────────────
+def admin_setting_get(key: str, default=None):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT value FROM admin_settings WHERE key = ?", (key,))
+        row = c.fetchone()
+    except Exception:
+        row = None
+    conn.close()
+    return row["value"] if row else default
+
+
+def admin_setting_set(key: str, value) -> None:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO admin_settings (key, value, updated_at)
+           VALUES (?, ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')""",
+        (key, "" if value is None else str(value)),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ─────────────────────────────────────────────

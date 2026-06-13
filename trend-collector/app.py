@@ -4872,6 +4872,116 @@ async def admin_stats(current_user: dict = Depends(get_current_user)):
     }
 
 
+@app.get("/admin/dashboard-stats")
+async def admin_dashboard_stats(current_user: dict = Depends(get_current_user)):
+    """
+    A6 registry-health dashboard: 4 KPI cards, alerts, 7-day activity, agent quick
+    view. Each metric is wrapped so a missing table never breaks the dashboard.
+    """
+    if not _is_staff_or_above(current_user):
+        raise HTTPException(403, "Staff access required.")
+    from database import get_conn as _gc, admin_setting_get, PLAN_LIMITS
+    conn = _gc()
+    c    = conn.cursor()
+    now  = datetime.utcnow()
+    w7   = (now - timedelta(days=7)).isoformat()
+    d14  = (now + timedelta(days=14)).isoformat()
+
+    def _count(sql, params=()):
+        try:
+            c.execute(sql, params); r = c.fetchone(); return (r[0] if r else 0) or 0
+        except Exception:
+            return 0
+
+    # Row 1 — registry health
+    active_agents = _count("SELECT COUNT(*) FROM users WHERE is_active=1 AND COALESCE(plan,'trial') != 'trial'")
+    cpr_records   = _count("SELECT COUNT(*) FROM compliance_records")
+    pages_indexed = admin_setting_get("pages_indexed")
+    monthly_rev   = admin_setting_get("monthly_revenue")
+
+    # Row 2 — alerts (conditional)
+    alerts = {"oauth": [], "limits": [], "system": []}
+    try:
+        c.execute(
+            """SELECT pc.platform, pc.expires_at, u.agent_name
+               FROM platform_connections pc JOIN users u ON u.id = pc.user_id
+               WHERE pc.expires_at IS NOT NULL AND pc.expires_at != ''
+                 AND pc.expires_at <= ? AND pc.expires_at >= ?
+               ORDER BY pc.expires_at ASC""",
+            (d14, now.isoformat()),
+        )
+        for r in c.fetchall():
+            alerts["oauth"].append({"agent": r["agent_name"], "platform": r["platform"], "expires_at": r["expires_at"]})
+    except Exception:
+        pass
+    try:
+        c.execute("SELECT agent_name, COALESCE(plan,'trial') AS plan, approved_post_count, video_month_count FROM users WHERE is_active=1")
+        for r in c.fetchall():
+            lim   = PLAN_LIMITS.get(r["plan"], PLAN_LIMITS["trial"])
+            posts = r["approved_post_count"] or 0
+            vids  = r["video_month_count"] or 0
+            if lim.get("posts") and posts >= 0.8 * lim["posts"]:
+                alerts["limits"].append({"agent": r["agent_name"], "kind": "posts", "used": posts, "limit": lim["posts"]})
+            elif lim.get("videos") and vids >= 0.8 * lim["videos"]:
+                alerts["limits"].append({"agent": r["agent_name"], "kind": "videos", "used": vids, "limit": lim["videos"]})
+    except Exception:
+        pass
+
+    # Row 3 — 7-day activity
+    activity = {
+        "generations":         _count("SELECT COUNT(*) FROM content_library WHERE saved_at >= ?", (w7,)),
+        "approvals":           _count("SELECT COUNT(*) FROM compliance_records WHERE approved_at >= ?", (w7,)),
+        "distributions":       _count("SELECT COUNT(*) FROM content_library WHERE status='published' AND published_at >= ?", (w7,)),
+        "new_signups":         _count("SELECT COUNT(*) FROM users WHERE created_at >= ?", (w7,)),
+        "checker_submissions": _count("SELECT COUNT(*) FROM compliance_checks WHERE created_at >= ?", (w7,)),
+    }
+
+    # Row 4 — agent quick view (most-recently-active first)
+    agents = []
+    try:
+        c.execute(
+            """SELECT u.id, u.agent_name, COALESCE(u.plan,'trial') AS plan, u.is_active,
+                      (SELECT COUNT(*) FROM compliance_records cr WHERE cr.user_id = u.id) AS cpr,
+                      (SELECT MAX(saved_at) FROM content_library cl WHERE cl.user_id = u.id) AS last_active
+               FROM users u WHERE u.role='agent' AND u.is_active=1
+               ORDER BY (last_active IS NULL), last_active DESC
+               LIMIT 25"""
+        )
+        for r in c.fetchall():
+            agents.append({
+                "id": r["id"], "name": r["agent_name"], "plan": r["plan"],
+                "cpr": r["cpr"] or 0, "last_active": r["last_active"],
+                "status": "active" if r["is_active"] else "inactive",
+            })
+    except Exception:
+        pass
+
+    conn.close()
+    return {
+        "registry_health": {
+            "active_agents": active_agents,
+            "cpr_records":   cpr_records,
+            "pages_indexed": pages_indexed,
+            "monthly_revenue": monthly_rev,
+        },
+        "alerts":      alerts,
+        "activity_7d": activity,
+        "agents":      agents,
+    }
+
+
+@app.post("/admin/dashboard-settings")
+async def admin_dashboard_settings(request: Request, current_user: dict = Depends(get_current_user)):
+    """Super admin — set manually-entered dashboard values (pages indexed, monthly revenue)."""
+    _require_super_admin(current_user)
+    body = await request.json()
+    from database import admin_setting_set
+    for k in ("pages_indexed", "monthly_revenue"):
+        if k in body and body[k] is not None:
+            admin_setting_set(k, body[k])
+    return {"ok": True}
+
+
 @app.post("/admin/set-active")
 async def set_user_active(request: Request, current_user: dict = Depends(get_current_user)):
     """Super admin only — activate or deactivate any user."""
