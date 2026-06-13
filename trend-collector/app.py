@@ -1155,10 +1155,39 @@ async def get_identity_guidance(request: Request, current_user=Depends(get_curre
     return guidance
 
 
-def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America/Denver") -> str:
+def _ignition_active(setup: dict, user_id: int = None) -> bool:
+    """
+    Ignition Mode (Build M): True when on AND within the 14-day window. Once the
+    window elapses, auto-disables (persists ignitionMode=False) so the schedule
+    returns to its normal cadence.
+    """
+    if not setup or not setup.get("ignitionMode"):
+        return False
+    started = setup.get("ignitionActivatedAt")
+    if not started:
+        return False
+    try:
+        start_dt = datetime.fromisoformat(started)
+    except Exception:
+        return False
+    if datetime.utcnow() <= start_dt + timedelta(days=14):
+        return True
+    # Window elapsed — auto-disable.
+    if user_id is not None:
+        try:
+            _s = dict(setup); _s["ignitionMode"] = False
+            save_agent_setup(user_id, _s)
+            print(f"[Ignition] Auto-disabled for user {user_id} — 14-day window elapsed.")
+        except Exception:
+            pass
+    return False
+
+
+def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America/Denver", ignition: bool = False) -> str:
     """
     Compute the next UTC run time for a schedule.
     time_of_day is treated as LOCAL time in the given timezone — not UTC.
+    When ignition is True (Build M), the interval is halved for 2x cadence.
     Returns an ISO-format UTC datetime string for storage and comparison.
     """
     try:
@@ -1176,6 +1205,10 @@ def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America
         delta = timedelta(days=30)
     else:  # "weekly" and any unknown value
         delta = timedelta(days=7)
+
+    # Ignition Mode (Build M) — 2x cadence: halve the interval (min 12h).
+    if ignition:
+        delta = max(timedelta(hours=12), delta / 2)
 
     try:
         from zoneinfo import ZoneInfo
@@ -1346,6 +1379,7 @@ def _run_scheduled_generation(sched: dict):
             sched.get("frequency",  "weekly"),
             sched.get("time_of_day", "08:00"),
             sched.get("timezone",   "America/Denver"),
+            ignition=_ignition_active(get_agent_setup(user_id) or {}, user_id),
         )
         schedule_mark_ran(sched_id, next_run)
 
@@ -1423,6 +1457,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                         sched.get("frequency", "weekly"),
                         sched.get("time_of_day", "08:00"),
                         sched.get("timezone", "America/Denver"),
+                        ignition=_ignition_active(get_agent_setup(user_id) or {}, user_id),
                     ))
                     continue
 
@@ -1475,12 +1510,14 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                     content_to_save["generated_at"] = val.isoformat()
 
             compliance_to_save = dict(result["compliance"])
+            # Tag Ignition-generated posts so the Records page can batch-review them.
+            _sched_source = "ignition" if _ignition_active(setup or {}, user_id) else "scheduled"
             saved_item = library_save(
                 user_id    = user_id,
                 niche      = niche,
                 content    = content_to_save,
                 compliance = compliance_to_save,
-                source     = "scheduled",
+                source     = _sched_source,
             )
             item_id  = saved_item.get("id")
             headline = content_to_save.get("headline", "Your scheduled content is ready")
@@ -1498,6 +1535,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 sched.get("frequency",  "weekly"),
                 sched.get("time_of_day", "08:00"),
                 sched.get("timezone",   "America/Denver"),
+                ignition=_ignition_active(get_agent_setup(user_id) or {}, user_id),
             )
             schedule_mark_ran(sched_id, next_run)
 
@@ -1603,6 +1641,21 @@ async def save_setup(body: SetupSaveRequest, current_user=Depends(get_current_us
     except Exception as _sched_cleanup_e:
         # Never let schedule cleanup block the save
         print(f"[Setup] Schedule cleanup error for user {uid} (non-blocking): {_sched_cleanup_e}")
+
+    # ── Ignition Mode (Build M) — default-on at onboarding (first setup save). ──
+    # 14-day 2x-cadence flag, carried in setup_json. Activated once; preserved on
+    # later saves. Auto-disables in the scheduler after the window elapses.
+    try:
+        _ig_prev = get_agent_setup(uid) or {}
+        if not _ig_prev.get("ignitionActivatedAt"):
+            body.setup["ignitionMode"]        = True
+            body.setup["ignitionActivatedAt"] = datetime.utcnow().isoformat()
+            print(f"[Ignition] Activated for user {uid} — 14-day 2x cadence.")
+        else:
+            body.setup.setdefault("ignitionMode",        _ig_prev.get("ignitionMode", False))
+            body.setup.setdefault("ignitionActivatedAt", _ig_prev.get("ignitionActivatedAt"))
+    except Exception as _ig_e:
+        print(f"[Ignition] activation error for user {uid} (non-blocking): {_ig_e}")
 
     try:
         save_agent_setup(uid, body.setup)
