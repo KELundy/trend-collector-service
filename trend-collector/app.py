@@ -852,6 +852,100 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
         raise HTTPException(500, f"Generation failed: {str(e)}")
 
 
+@app.post("/content/generate-from-answer")
+async def generate_from_answer_route(body: dict, current_user=Depends(get_current_user)):
+    """
+    DQ-4 bridge (FOUNDATION_DAILY_QUESTION_SPEC_v2 §6-7). Turn a member's own
+    stored answer into a content_library item in their voice, flagged with
+    human-origin provenance.
+
+    This is the ONLY path that sets a member_answer origin_type, and it requires a
+    real member_answers row (answer_ref), so the flag cannot be applied to
+    arbitrary content — the §7 honesty constraint. No manual/admin/backfill route
+    exists. Approval then threads origin_type/answer_ref onto the compliance_record.
+    """
+    user_id   = current_user["id"]
+    answer_id = body.get("answer_id")
+    if not answer_id:
+        raise HTTPException(status_code=400, detail="answer_id is required.")
+
+    from database import member_answer_with_question, get_conn as _gc_ans, library_save as _lsave
+    from content_engine import (
+        AgentProfileModel, generate_from_member_answer, foundation_category_for_bank,
+    )
+
+    answer = member_answer_with_question(answer_id, user_id)
+    if not answer:
+        raise HTTPException(status_code=404, detail="Answer not found.")
+
+    # Identity/voice from the agent's saved setup — same source the scheduler uses.
+    conn = _gc_ans()
+    c    = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user_row = c.fetchone()
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (user_id,))
+    setup_row = c.fetchone()
+    conn.close()
+    if not user_row:
+        raise HTTPException(status_code=400, detail="User not found.")
+    setup = json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
+
+    profile = AgentProfileModel(
+        agentName  = user_row["agent_name"],
+        brokerage  = user_row["brokerage"],
+        market     = setup.get("market", ""),
+        brandVoice = setup.get("brandVoice", ""),
+        shortBio   = setup.get("shortBio", ""),
+        state      = setup.get("state", ""),
+        mlsNames   = setup.get("mlsNames", []),
+    )
+
+    gen_category = foundation_category_for_bank(answer.get("bank_category"))
+    input_type   = (answer.get("input_type") or "text").lower()
+
+    try:
+        cr = generate_from_member_answer(
+            {
+                "transcript":    answer.get("transcript") or "",
+                "category":      gen_category,
+                "question_text": answer.get("rendered_text") or "",
+                "input_type":    input_type,
+            },
+            profile = profile,
+            user_id = user_id,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        print(f"[FoundationGenerate] Error for user {user_id}, answer {answer_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+    content_to_save = {
+        "headline":      cr.headline,
+        "thumbnailIdea": cr.thumbnailIdea,
+        "hashtags":      cr.hashtags,
+        "post":          cr.post,
+        "cta":           cr.cta,
+        "script":        cr.script,
+        "generated_at":  cr.generated_at.isoformat(),
+    }
+    compliance_to_save = cr.compliance.dict() if hasattr(cr.compliance, "dict") else dict(cr.compliance)
+
+    # 'voice' vs 'text' provenance — the answer's own input_type decides, never the caller.
+    origin_type = "member_answer_voice" if input_type == "voice" else "member_answer_text"
+    saved_item  = _lsave(
+        user_id     = user_id,
+        niche       = "",
+        content     = content_to_save,
+        compliance  = compliance_to_save,
+        source      = "foundation_answer",
+        context     = "agent",
+        origin_type = origin_type,
+        answer_ref  = answer_id,
+    )
+    return {"ok": True, "item": saved_item, "origin_type": origin_type}
+
+
 @app.get("/identity/guidance")
 async def get_identity_guidance(request: Request, current_user=Depends(get_current_user)):
     """
@@ -2280,7 +2374,7 @@ async def public_agent_profile(slug: str):
 
     c.execute("""
         SELECT id, niche, content, compliance, cir_id,
-               approved_at, published_at, status
+               approved_at, published_at, status, origin_type, answer_ref
         FROM content_library
         WHERE user_id = ? AND status IN ('approved','published','archived')
         ORDER BY approved_at DESC
@@ -2366,6 +2460,7 @@ async def public_agent_profile(slug: str):
             "niche":       item.get("niche",""),
             "cir_id":      item.get("cir_id",""),
             "approved_at": (item.get("approved_at") or "")[:10],
+            "origin_type": item.get("origin_type") or "engine_draft",
             "post_url":    f"https://{slug}.homebridgegroup.co/posts/{ps}",
             "verify_url":  f"https://{slug}.homebridgegroup.co/verify/{item.get('cir_id','')}" if item.get("cir_id") else "",
         })
@@ -2951,27 +3046,37 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
             })
     if faq_items:
         schema["mainEntity"] = {"@type": "FAQPage", "mainEntity": faq_items}
+    _agent_first = (d.get("agent_name", "") or "").split(" ")[0]
+
+    def _record_article(p, position):
+        art = {
+            "@type": "Article",
+            "headline": p.get("headline", ""),
+            "articleBody": (p.get("body", "") or "")[:500],
+            "datePublished": p.get("approved_at", ""),
+            "url": p.get("post_url", profile_url),
+            "author": {"@type": "Person", "name": d.get("agent_name", "")},
+            "publisher": {"@type": "Organization", "name": "AutoMates", "url": "https://homebridgegroup.co"},
+            "about": {"@type": "Thing", "name": p.get("niche", "Real Estate")},
+        }
+        # Human-origin provenance (FOUNDATION_DAILY_QUESTION_SPEC_v2 §7), C2PA-aligned:
+        # human-authored, machine-structured, human-reviewed. Only member_answer
+        # records carry it — engine drafts are left as ordinary Articles.
+        _ot = p.get("origin_type", "engine_draft")
+        if _ot.startswith("member_answer"):
+            _mode = "spoken" if _ot == "member_answer_voice" else "written"
+            art["creator"] = {"@type": "Person", "name": d.get("agent_name", "")}
+            art["creativeWorkStatus"] = (
+                f"Human-originated: began as {_agent_first}'s own {_mode} answer, "
+                "machine-structured, and reviewed by the licensed professional before publication."
+            )
+        return {"@type": "ListItem", "position": position, "item": art}
+
     if posts:
         schema["subjectOf"] = {
             "@type": "ItemList",
             "numberOfItems": len(posts),
-            "itemListElement": [
-                {
-                    "@type": "ListItem",
-                    "position": i + 1,
-                    "item": {
-                        "@type": "Article",
-                        "headline": p.get("headline", ""),
-                        "articleBody": (p.get("body", "") or "")[:500],
-                        "datePublished": p.get("approved_at", ""),
-                        "url": p.get("post_url", profile_url),
-                        "author": {"@type": "Person", "name": d.get("agent_name", "")},
-                        "publisher": {"@type": "Organization", "name": "AutoMates", "url": "https://homebridgegroup.co"},
-                        "about": {"@type": "Thing", "name": p.get("niche", "Real Estate")},
-                    },
-                }
-                for i, p in enumerate(posts[:20])
-            ],
+            "itemListElement": [_record_article(p, i + 1) for i, p in enumerate(posts[:20])],
         }
     schema["speakable"] = {"@type": "SpeakableSpecification", "cssSelector": [".authority-statement", ".hero-name"]}
     schema_json = _json2.dumps(schema, ensure_ascii=False, indent=2)
@@ -3043,6 +3148,20 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
             post_url  = p.get("post_url", "")
             verify_url = f"https://{slug}.homebridgegroup.co/verify/{cir_id}" if cir_id else ""
             featured  = " featured" if i == 0 else ""
+            # Human-origin line — only for records that began as the member's own
+            # answer (FOUNDATION_DAILY_QUESTION_SPEC_v2 §7). engine_draft records
+            # show nothing. itemprop ties it into the Article microdata for crawlers.
+            origin_type = p.get("origin_type", "engine_draft")
+            origin_line = ""
+            if origin_type.startswith("member_answer"):
+                _omode = "spoken" if origin_type == "member_answer_voice" else "written"
+                _ofn   = _esc_html((d.get("agent_name", "").split(" ")[0]) or "")
+                origin_line = (
+                    f'<div class="post-origin" itemprop="creativeWorkStatus" '
+                    f'style="font-size:12px;color:var(--ink-4,#6b7280);font-style:italic;margin:6px 0 0">'
+                    f'This piece began as {_ofn}&#8217;s own {_omode} answer, reviewed and approved before publication.'
+                    f'</div>'
+                )
             cir_stamp = f'<div class="cir-stamp"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5.5" stroke="#1A7A4A"/><path d="M3.5 6l2 2 3-3" stroke="#1A7A4A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>CPR&#8482; {_esc_html(cir_id)}</div>' if cir_id else "<div></div>"
             permalink = f'<a href="{_esc_html(post_url)}" class="post-permalink">Read Full Post &#8594;</a>' if post_url else ""
             post_cards += f"""
@@ -3054,6 +3173,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
           </div>
           {f'<h2 class="post-h" itemprop="headline">{headline}</h2>' if headline else ''}
           {f'<div class="post-body" itemprop="articleBody">{body}</div>' if body else ''}
+          {origin_line}
           <div class="post-footer">
             {cir_stamp}
             {permalink}
@@ -3083,12 +3203,18 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
       </div>
     </div>"""
 
-    # Compliance block
+    # Compliance block — Certified Provenance Record explanation (G3).
+    # Provenance-aligned language optimized for AI-crawler comprehension:
+    # references content provenance, the C2PA standard, and human attestation.
     compliance_body = (
-        "CPR&#8482; (Certified Provenance Record) is a timestamped provenance record "
-        "confirming that a licensed real estate professional personally reviewed this content for "
-        "professional compliance before publication. CPR&#8482; certifies the completion of that review "
-        "process. It does not certify the accuracy of market data, valuations, or predictions."
+        "CPR&#8482; (Certified Provenance Record) is a content-provenance record, aligned with "
+        "the C2PA content-authenticity standard. Each CPR is a timestamped human attestation that a "
+        "licensed real estate professional personally reviewed this content for professional compliance "
+        "before publication, establishing a verifiable, tamper-evident chain of origin and human "
+        "accountability. Records flagged as member-originated carry an additional attestation: the content "
+        "began as the professional&#8217;s own answer, in their own words, was machine-structured, and was "
+        "human-reviewed before publication. CPR&#8482; certifies the provenance and the completion of that "
+        "review; it does not certify the accuracy of market data, valuations, or predictions."
         + (f" Publishing since {_esc_html(member_since)}." if member_since else "")
     )
 

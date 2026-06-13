@@ -691,6 +691,15 @@ async def post_to_platform(body: PostRequest, current_user=Depends(get_current_u
     if not post_text:
         raise HTTPException(400, "No content provided to post.")
 
+    # E2 — recursive verify footer. Every post distributed through the platform
+    # ends with its provenance line pointing back to the CPR verify page. Only
+    # added when the post carries a CIR (approved record); manual ad-hoc text
+    # with no record gets no footer.
+    if item and item.get("cir_id"):
+        _vfooter = _verify_footer_line(item.get("cir_id"), current_user["id"])
+        if _vfooter:
+            post_text = f"{post_text}\n\n{_vfooter}"
+
     # Use image_url from request body; fall back to what's saved on the library item
     if body.image_url:
         image_url = body.image_url
@@ -1174,3 +1183,27 @@ def _format_post_text(content: dict, platform: str) -> str:
         parts = [p for p in [post, cta] if p]
 
     return "\n\n".join(parts)
+
+
+def _verify_footer_line(cir_id, user_id) -> str:
+    """
+    E2 — recursive verify footer (COMPLETE_PLATFORM_BUILD_SPEC §E2). Returns the
+    single provenance line appended to every distributed post:
+        Reviewed and on record: https://{slug}.homebridgegroup.co/verify/{cir_id}
+    Returns "" when there is no CIR or no agent slug, so callers can append
+    unconditionally without emitting a broken line.
+    """
+    if not cir_id:
+        return ""
+    try:
+        conn = database.get_conn()
+        c    = conn.cursor()
+        c.execute("SELECT agent_slug FROM users WHERE id = ?", (user_id,))
+        row  = c.fetchone()
+        conn.close()
+        slug = (row["agent_slug"] if row else "") or ""
+    except Exception:
+        slug = ""
+    if not slug:
+        return ""
+    return f"Reviewed and on record: https://{slug}.homebridgegroup.co/verify/{cir_id}"

@@ -2958,6 +2958,153 @@ def _parse_claude_output(raw_text, compliance):
     )
 
 
+# ── Foundation answer generation — DQ-4 ───────────────────────────────────────
+# Shapes a member's OWN answer (Foundation question or Daily Question) into a
+# record in their voice. Rules are FOUNDATION_DAILY_QUESTION_SPEC_v2 §6 verbatim:
+# the engine structures and trims, it never authors. Voice exemplars (Phase 1)
+# are the primary voice source; Brand Voice description is the cold-start fallback.
+FOUNDATION_GENERATION_RULES = (
+    "FOUNDATION GENERATION — you are shaping this person's OWN answer into a published "
+    "record in their voice. The words and the view are theirs. These rules are absolute:\n"
+    "1. PRESERVE THEIR PHRASING. Distinctive words, rhythms, and expressions survive "
+    "verbatim where possible. You structure and trim; you do NOT rewrite.\n"
+    "2. FIX MECHANICS, KEEP ONE ROUGH EDGE. Correct grammar, spelling, and run-ons, but "
+    "leave one genuine human edge intact. Fully sanded, polished output is a failure.\n"
+    "3. NEVER INVENT facts, numbers, credentials, or events beyond what they said. No "
+    "superlatives — the words 'top', 'leading', 'expert', 'best', '#1' are banned.\n"
+    "4. NEVER DRAMATIZE. Their modest version is the published version.\n"
+    "5. AUTO-STRIP any client-identifying details — names, addresses, or specifics that "
+    "could identify a client or property.\n"
+    "6. LENGTH: 150-400 words.\n"
+    "7. NO marketing. Do not add a call to action, hashtags, or promotional language. "
+    "This is their record, not an ad.\n"
+)
+
+# Per-category shaping (Section 3 question trio → Section 6 heading rules).
+_FOUNDATION_CATEGORY_GUIDE = {
+    # F1 — client-protective stance, written for answer-engine extraction.
+    "definitive-answer": (
+        "CATEGORY — DEFINITIVE ANSWER. The heading MUST be the real question this piece "
+        "answers, phrased the way a consumer would actually ask it, ending in a question mark. "
+        "Open with 2-3 direct, definitive sentences that answer it outright, then their texture."
+    ),
+    # F2 — 'Why I do this work' origin story.
+    "story": (
+        "CATEGORY — STORY ('Why I do this work'). The heading is a short, plain topic line "
+        "(a question mark is optional here). Tell it as the moment they described, first person, "
+        "no dramatization. Strip any client-identifying details completely."
+    ),
+    # F3 — the honest answer; two-sided credibility device.
+    "stance": (
+        "CATEGORY — THE HONEST ANSWER. The heading states the stance or the client question "
+        "being answered. Open with the honest position in 2-3 sentences, then their reasoning. "
+        "Two-sided honesty is the entire point — do not sand off the candor."
+    ),
+}
+
+FOUNDATION_CATEGORIES = set(_FOUNDATION_CATEGORY_GUIDE.keys())
+
+
+def foundation_category_for_bank(bank_category):
+    """
+    Map a question_bank.category (client_education, story, opinion, local_texture,
+    process_transparency, personal, ...) to a Foundation generation category.
+    The trio resolves correctly: F1 'client_education' -> definitive-answer,
+    F2 'story' -> story, F3 'opinion' -> stance.
+    """
+    cat = (bank_category or "").strip().lower()
+    if cat == "story":
+        return "story"
+    if cat == "opinion":
+        return "stance"
+    return "definitive-answer"
+
+
+def generate_from_member_answer(answer_record, profile=None, user_id=None, context="agent"):
+    """
+    DQ-4 (FOUNDATION_DAILY_QUESTION_SPEC_v2 §6). Shape a member's own answer into a
+    content record in their voice and run the full compliance pass.
+
+    answer_record: dict with at least
+        - transcript   (str)  : the member's answer in their own words (required)
+        - category     (str)  : 'definitive-answer' | 'story' | 'stance'
+        - question_text(str)  : the question they answered (optional, improves heading)
+        - input_type   (str)  : 'voice' | 'text' (optional, display only)
+    profile: AgentProfileModel for voice/identity (brandVoice fallback, name, state).
+    user_id: drives voice-exemplar lookup (Phase 1). When the exemplar pool is empty
+        (new agent), generation falls back to the Brand Voice description.
+
+    Returns a ContentResponse (same shape as generate_content), so the caller can
+    persist it through the normal content_library save/approval flow.
+    """
+    category = (answer_record.get("category") or "definitive-answer").strip().lower()
+    if category not in _FOUNDATION_CATEGORY_GUIDE:
+        category = "definitive-answer"
+    transcript = (answer_record.get("transcript") or "").strip()
+    if not transcript:
+        raise ValueError("member_answer has no transcript to shape.")
+    question_text = (answer_record.get("question_text") or "").strip()
+
+    profile     = profile or AgentProfileModel()
+    agent_name  = profile.agentName or ""
+    brokerage   = profile.brokerage or ""
+    brand_voice = profile.brandVoice or "conversational and genuine"
+    mls_names   = profile.mlsNames or []
+    state       = profile.state or ""
+    niche       = ""  # Foundation records are identity content, not niche-targeted.
+
+    # Voice exemplars (Phase 1) are the primary voice source; Brand Voice is the
+    # cold-start fallback when the agent has no approved posts yet (spec §6 point 7).
+    voice_exemplar_block = _build_voice_exemplar_block(user_id, context, agent_name)
+    if voice_exemplar_block:
+        voice_instruction = voice_exemplar_block
+    else:
+        voice_instruction = (
+            f"\nThe agent describes their own voice as: {brand_voice}. "
+            "Use that as the voice guide, since no prior writing samples exist yet.\n"
+        )
+
+    prompt = (
+        f"You are shaping {agent_name or 'this real estate professional'}'s OWN answer into a "
+        "published record on their authority page. The words and the view are theirs; your job "
+        "is to structure and lightly clean, never to author.\n\n"
+        + FOUNDATION_GENERATION_RULES
+        + "\n" + _FOUNDATION_CATEGORY_GUIDE[category] + "\n\n"
+        + EM_DASH_RULE
+        + (f'\nThe question they were asked: "{question_text}"\n' if question_text else "")
+        + f'\nTheir answer, in their own words:\n"""\n{transcript}\n"""\n'
+        + voice_instruction
+        + "\nReturn ONLY valid JSON, no preamble and no code fence, in exactly this shape:\n"
+        + '{"headline": "<heading per the category rule>", '
+        + '"post": "<the 150-400 word record in their voice>"}\n'
+    )
+
+    client   = _get_anthropic_client()
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text_chunks = [b.text for b in (response.content or []) if getattr(b, "type", "") == "text"]
+    raw_text    = "\n\n".join(text_chunks).strip()
+    if not raw_text:
+        raise ValueError("Claude returned empty content.")
+
+    # Full compliance pass on everything — spec §6 point 6.
+    p1_badge, profile_name = _run_compliance_check(
+        raw_text, agent_name, brokerage, mls_names,
+        niche=niche, content_mode="agent", state=state,
+    )
+    semantic = _run_semantic_compliance_check(
+        raw_text, profile_name=profile_name, state=state, niche=niche,
+    )
+    compliance = _build_final_badge(
+        p1_badge, profile_name, semantic, state=state,
+        agent_name=agent_name, brokerage=brokerage,
+    )
+    return _parse_claude_output(raw_text, compliance)
+
+
 NICHE_SITUATIONS = {
   # ── RESIDENTIAL (12 primary niches) ──────────────────────────────────────────
   "First-Time Buyers": [

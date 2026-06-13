@@ -917,6 +917,13 @@ def migrate_content_library_columns():
         ("edited_at",             "TEXT"),
         ("image_regen_count",     "INTEGER DEFAULT 0"),
         ("draft_content",         "TEXT"),
+        # DQ-4 provenance carriers. These let an item remember it came from a
+        # member's own answer so origin_type/answer_ref can be threaded onto the
+        # permanent compliance_record at approval time (FOUNDATION_DAILY_QUESTION
+        # _SPEC_v2 §7). Default 'engine_draft' — only the answer pipeline sets a
+        # member_answer value; there is no manual/admin/backfill path.
+        ("origin_type",           "TEXT DEFAULT 'engine_draft'"),
+        ("answer_ref",            "INTEGER DEFAULT NULL"),
     ]
     for col, coltype in columns:
         try:
@@ -1435,6 +1442,8 @@ def record_compliance_approval(
     compliance: dict,
     approved_at: str,
     context: str = "agent",
+    origin_type: str = "engine_draft",
+    answer_ref: int = None,
 ) -> None:
     """
     Write a permanent compliance record at the moment a CIR is issued.
@@ -1442,8 +1451,20 @@ def record_compliance_approval(
     Never raises — a write failure here must never block the approval flow.
     The record is immutable once written: no update or delete path exists.
     context separates agent records from hb_marketing records.
+
+    origin_type / answer_ref carry human-origin provenance (FOUNDATION_DAILY_
+    QUESTION_SPEC_v2 §7). origin_type is sanitized to the four allowed values and
+    falls back to 'engine_draft' — a member_answer value only survives here when it
+    was set upstream by the answer pipeline. answer_ref is kept only for
+    member_answer origins, so an engine draft can never carry a forged answer link.
     """
     try:
+        _ALLOWED_ORIGINS = (
+            "engine_draft", "member_answer_text", "member_answer_voice", "studio_authored",
+        )
+        origin_type = origin_type if origin_type in _ALLOWED_ORIGINS else "engine_draft"
+        if not origin_type.startswith("member_answer"):
+            answer_ref = None
         headline = ""
         if isinstance(content, dict):
             headline = (content.get("headline") or content.get("title") or "")[:300]
@@ -1463,8 +1484,8 @@ def record_compliance_approval(
                 (user_id, cir_id, library_item_id, niche, headline,
                  overall_status, fair_housing, disclosure, nar_standards,
                  state_compliance, rules_version, compliance_json, approved_at,
-                 context)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 context, origin_type, answer_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, cir_id, library_item_id,
             niche or "", headline,
@@ -1472,6 +1493,7 @@ def record_compliance_approval(
             json.dumps(compliance),
             approved_at,
             context if context in ("agent", "hb_marketing") else "agent",
+            origin_type, answer_ref,
         ))
         conn.commit()
         conn.close()
@@ -1686,15 +1708,96 @@ def backfill_compliance_records() -> int:
 
 
 # ─────────────────────────────────────────────
+# DAILY QUESTION — MEMBER QUESTIONS / ANSWERS
+# Write/read side for the DQ-1 tables. The answer pipeline (DQ-2/DQ-3) and the
+# DQ-4 generate-from-answer bridge use these; they are the ONLY way a record's
+# origin can become a member_answer value.
+# ─────────────────────────────────────────────
+def member_question_create(user_id: int, question_id=None, rendered_text: str = "",
+                           signal_ref=None, status: str = "delivered") -> int:
+    """Insert one delivered question for a member. Returns the new row id."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO member_questions (user_id, question_id, rendered_text, signal_ref, status)
+           VALUES (?, ?, ?, ?, ?)""",
+        (user_id, question_id, rendered_text or "", signal_ref, status),
+    )
+    conn.commit()
+    qid = c.lastrowid
+    conn.close()
+    return qid
+
+
+def member_answer_create(user_id: int, member_question_id: int, input_type: str,
+                         transcript: str, audio_ref=None) -> int:
+    """Store a member's raw answer (provenance evidence). Returns the new row id."""
+    it = "voice" if (input_type or "").strip().lower() == "voice" else "text"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO member_answers (member_question_id, user_id, input_type, transcript, audio_ref)
+           VALUES (?, ?, ?, ?, ?)""",
+        (member_question_id, user_id, it, transcript or "", audio_ref),
+    )
+    conn.commit()
+    aid = c.lastrowid
+    conn.close()
+    return aid
+
+
+def member_answer_with_question(answer_id: int, user_id: int = None) -> Optional[dict]:
+    """
+    Fetch a member answer joined to its question and the question_bank category.
+    Returns a dict (id, user_id, input_type, transcript, member_question_id,
+    rendered_text, question_id, bank_category) or None. When user_id is given,
+    the answer must belong to that user or None is returned.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT a.id, a.user_id, a.input_type, a.transcript, a.member_question_id,
+                  q.rendered_text, q.question_id,
+                  COALESCE(b.category, '') AS bank_category
+             FROM member_answers a
+             LEFT JOIN member_questions q ON q.id = a.member_question_id
+             LEFT JOIN question_bank    b ON b.id = q.question_id
+            WHERE a.id = ?""",
+        (answer_id,),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    if user_id is not None and d.get("user_id") != user_id:
+        return None
+    return d
+
+
+# ─────────────────────────────────────────────
 # CONTENT LIBRARY
 # ─────────────────────────────────────────────
 def library_save(user_id: int, niche: str, content: dict,
                  compliance: dict, source: str = "manual",
-                 context: str = "agent") -> dict:
+                 context: str = "agent",
+                 origin_type: str = "engine_draft",
+                 answer_ref: int = None) -> dict:
     conn = get_conn()
     c = conn.cursor()
     if context not in ("agent", "hb_marketing"):
         context = "agent"
+    # origin_type / answer_ref carry human-origin provenance (DQ-4). Only the
+    # answer pipeline passes a member_answer value; everything else stays the
+    # 'engine_draft' default. Sanitize here too so the marker cannot be forged
+    # by a caller, and drop answer_ref for any non-member_answer origin.
+    _ALLOWED_ORIGINS = (
+        "engine_draft", "member_answer_text", "member_answer_voice", "studio_authored",
+    )
+    if origin_type not in _ALLOWED_ORIGINS:
+        origin_type = "engine_draft"
+    if not origin_type.startswith("member_answer"):
+        answer_ref = None
     # draft_content captures the originally-generated content at save time. The
     # agent's later edits go through library_update (which only touches `content`),
     # so draft_content preserves the pre-edit draft for Phase 5 edit-pattern
@@ -1702,8 +1805,9 @@ def library_save(user_id: int, niche: str, content: dict,
     content_json = json.dumps(content)
     c.execute("""
         INSERT INTO content_library
-            (user_id, niche, status, content, draft_content, compliance, source, saved_at, context)
-        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+            (user_id, niche, status, content, draft_content, compliance, source, saved_at, context,
+             origin_type, answer_ref)
+        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         user_id, niche,
         content_json,
@@ -1711,7 +1815,8 @@ def library_save(user_id: int, niche: str, content: dict,
         json.dumps(compliance),
         source,
         datetime.utcnow().isoformat(),
-        context
+        context,
+        origin_type, answer_ref,
     ))
     conn.commit()
     item_id = c.lastrowid
@@ -1823,7 +1928,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
     _item_for_record = None  # full item snapshot for compliance_records write
     if updates.get("status") == "approved":
         c.execute(
-            "SELECT cir_id, niche, content, compliance, context FROM content_library WHERE id = ? AND user_id = ?",
+            "SELECT cir_id, niche, content, compliance, context, origin_type, answer_ref FROM content_library WHERE id = ? AND user_id = ?",
             (item_id, user_id)
         )
         existing = c.fetchone()
@@ -1841,7 +1946,12 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
             _snap_compliance = updates.get("compliance") or (json.loads(existing["compliance"]) if existing["compliance"] else {})
             _snap_niche      = existing["niche"] or ""
             _snap_context    = existing["context"] or "agent"
-            _item_for_record = (_snap_niche, _snap_content, _snap_compliance, _snap_context)
+            # Provenance carried from the library item (DQ-4). Older rows predate
+            # these columns, so coalesce to the engine_draft default.
+            _snap_origin     = existing["origin_type"] or "engine_draft"
+            _snap_answer_ref = existing["answer_ref"]
+            _item_for_record = (_snap_niche, _snap_content, _snap_compliance, _snap_context,
+                                _snap_origin, _snap_answer_ref)
 
     values += [item_id, user_id]
     c.execute(
@@ -1853,7 +1963,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
 
     # Write permanent compliance record — after DB commit, never blocks
     if _new_cir_id and _item_for_record:
-        _niche, _content, _compliance, _context = _item_for_record
+        _niche, _content, _compliance, _context, _origin, _answer_ref = _item_for_record
         record_compliance_approval(
             user_id         = user_id,
             cir_id          = _new_cir_id,
@@ -1863,6 +1973,8 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
             compliance      = _compliance,
             approved_at     = datetime.utcnow().isoformat(),
             context         = _context,
+            origin_type     = _origin,
+            answer_ref      = _answer_ref,
         )
 
     return library_get_item(item_id)
