@@ -2871,7 +2871,7 @@ async def public_verify_cir(cir_id: str):
     conn.close()
 
     if not row:
-        raise HTTPException(404, "CPR record not found.")
+        raise HTTPException(404, "Record not found.")
 
     row = dict(row)
 
@@ -3154,7 +3154,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
         + (f" in {d.get('market','')}" if d.get("market") else "")
         + (f", specializing in {niche_str}" if niche_str else "")
         + (f". Serving {area_str}" if area_str else "")
-        + f". {posts_total} professionally reviewed posts. Each post carries a CPR\u2122 record "
+        + f". {posts_total} professionally reviewed posts. Each post carries a Certified Provenance Record\u2122 (CPR\u2122) "
           f"confirming pre-publication review by a licensed real estate professional."
     )
     auth_stmt_esc = _esc_html(auth_stmt)
@@ -3466,7 +3466,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
     <div class="compliance-block">
       <div class="cb-icon">&#10003;</div>
       <div>
-        <div class="cb-title">Every post on this page carries a CPR&#8482; record</div>
+        <div class="cb-title">Every post on this page carries a CPR&#8482;</div>
         <div class="cb-body">{compliance_body}</div>
       </div>
     </div>
@@ -3510,7 +3510,7 @@ def _build_verify_page_html(d: dict) -> str:
     slug       = d.get("agent_slug", "")
     profile_url = f"https://{slug}.homebridgegroup.co" if slug else "https://homebridgegroup.co"
     rules_ver  = _esc_html(d.get("rules_version", ""))
-    page_title = f"CPR&#8482; Record {cir_id} | {agent_name} | AutoMates"
+    page_title = f"Certified Provenance Record {cir_id} | {agent_name} | AutoMates"
     desc       = f"Certified Provenance Record {d.get('cir_id','')} issued to {d.get('agent_name','')}. Pre-publication compliance review confirmed."
 
     badge_html = '<span class="badge-pass">&#10003; Reviewed</span>'
@@ -3566,7 +3566,7 @@ def _build_verify_page_html(d: dict) -> str:
 </nav>
 <div class="page">
   <div class="verify-header">
-    <div class="verify-eyebrow">CPR&#8482; Record Lookup</div>
+    <div class="verify-eyebrow">CPR&#8482; Lookup</div>
     <h1 class="verify-title">Certified Provenance Record&#8482; (CPR&#8482;)</h1>
     <p class="verify-sub">This record confirms a licensed real estate professional reviewed and approved this content prior to publication.</p>
   </div>
@@ -6118,7 +6118,7 @@ function toggleChip(cb) {
     {secondary_btn}
   </form>
   <div class="footer">
-    Approving creates a CPR™ Certified Provenance Record.<br>
+    Approving creates a Certified Provenance Record™ (CPR™).<br>
     <a href="{app_url}">Edit in App instead →</a>
   </div>
 </div>{plat_script}</body></html>"""
@@ -6127,7 +6127,7 @@ function toggleChip(cb) {
     if state == "success":
         # niche slot is overloaded with cir_id in the POST handler
         cir_id   = niche  # passed as niche arg from POST handler
-        cir_html = f"<div class='cir-badge'>CIR™ {cir_id}</div><br>" if cir_id else ""
+        cir_html = f"<div class='cir-badge'>CPR™ {cir_id}</div><br>" if cir_id else ""
 
         if published_to:
             pub_chips = "".join(
@@ -6135,7 +6135,7 @@ function toggleChip(cb) {
                 for p in published_to
             )
             pub_html    = f"<div class='pub-list'>{pub_chips}</div>"
-            action_line = "Your post has been approved, a CPR™ record created, and queued for publishing."
+            action_line = "Your post has been approved, a CPR™ created, and queued for publishing."
             btn_label   = "Open App →"
             open_app_url = f"https://app.homebridgegroup.co?view=agent&panel=library{'&item=' + str(item_id) if item_id else ''}"
         else:

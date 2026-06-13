@@ -2320,9 +2320,9 @@ def get_agent_guidance(user_id: int, context: str = "agent") -> dict:
     Returns:
         next_action  — one specific, actionable recommendation (string)
         data_points  — the metrics that informed the recommendation (dict)
-        progress     — milestone indicator string (e.g. "12 of 25 CIR records
+        progress     — milestone indicator string (e.g. "12 of 25 provenance records
                        toward AI search visibility") — never a numerical score
-        cir_count    — total CIR records issued (permanent compliance records)
+        cir_count    — total provenance records issued (permanent compliance records)
     """
     from datetime import datetime as _dt, timedelta as _td
 
@@ -2445,10 +2445,10 @@ def _determine_next_action(dp: dict) -> str:
     if not dp["has_schedule"]:
         return "Set a content schedule so AutoMates builds your presence automatically — even one post per week compounds over time."
     if dp["cir_count"] < 10:
-        return f"You have {dp['cir_count']} CIR records so far. Keep approving content — 10 records is the first visibility milestone."
+        return f"You have {dp['cir_count']} provenance records so far. Keep approving content — 10 records is the first visibility milestone."
     if dp["cir_count"] < 25:
-        return f"You have {dp['cir_count']} CIR records. At 25, AI search platforms begin to have enough indexed content to cite you consistently."
-    return "Your foundation is solid. Keep publishing consistently — your CIR record compounds with every approval."
+        return f"You have {dp['cir_count']} provenance records. At 25, AI search platforms begin to have enough indexed content to cite you consistently."
+    return "Your foundation is solid. Keep publishing consistently — your provenance record compounds with every approval."
 
 
 def _build_progress_indicator(cir_count: int, approved_count: int,
@@ -2458,14 +2458,14 @@ def _build_progress_indicator(cir_count: int, approved_count: int,
     Internal helper for get_agent_guidance().
     """
     if cir_count == 0:
-        return "Approve your first post to issue your first CIR record."
+        return "Approve your first post to issue your first provenance record."
     if cir_count < 10:
-        return f"{cir_count} of 10 CIR records toward your first visibility milestone."
+        return f"{cir_count} of 10 provenance records toward your first visibility milestone."
     if cir_count < 25:
-        return f"{cir_count} of 25 CIR records toward consistent AI search citation."
+        return f"{cir_count} of 25 provenance records toward consistent AI search citation."
     if cir_count < 50:
-        return f"{cir_count} CIR records issued. At 50, you have a substantial authority footprint."
-    return f"{cir_count} CIR records on file. Your permanent record is well established."
+        return f"{cir_count} provenance records issued. At 50, you have a substantial authority footprint."
+    return f"{cir_count} provenance records on file. Your permanent record is well established."
 
 
 # ─────────────────────────────────────────────
