@@ -203,6 +203,17 @@ def init_db():
         #   partner-signup.html. NULL for accounts created before Session 53.
         #   Required field going forward — frontend blocks submission without it.
         ("consent_at",               "TEXT DEFAULT NULL"),
+        # SMS CONSENT — Twilio A2P compliance fix
+        # Separate, optional consent for account-notification text messages.
+        #   Must be distinct from consent_at (ToS/Privacy) — carrier rules forbid
+        #   making SMS consent a condition of service. Captured server-side at
+        #   registration only when the agent checks the standalone SMS checkbox.
+        # sms_consent: 1 = agent opted in to notification texts, 0 = did not.
+        # sms_consent_at: ISO timestamp of opt-in. NULL when sms_consent = 0.
+        # sms_consent_ip: client IP recorded at opt-in for audit. NULL when 0.
+        ("sms_consent",              "INTEGER DEFAULT 0"),
+        ("sms_consent_at",           "TEXT DEFAULT NULL"),
+        ("sms_consent_ip",           "TEXT DEFAULT NULL"),
         # JWT REVOCATION — added Session 53
         # token_version: incremented on password change or admin suspend.
         #   Every JWT includes the version at issue time. get_current_user

@@ -67,6 +67,7 @@ class RegisterRequest(BaseModel):
     office_code:  Optional[str] = ""        # broker's invite code for agent signup
     referral_code: Optional[str] = ""       # partner referral code for attribution
     consent_at:   Optional[str] = None      # ISO timestamp of ToS/Privacy consent — Session 53
+    sms_consent:  Optional[bool] = False    # standalone SMS notification opt-in — Twilio A2P
 
 class LoginRequest(BaseModel):
     email: str
@@ -278,9 +279,13 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 # ENDPOINTS
 # ─────────────────────────────────────────────
 @router.post("/register")
-def register(body: RegisterRequest):
+def register(body: RegisterRequest, request: Request = None):
     if not body.email or not body.password or not body.agent_name:
         raise HTTPException(status_code=400, detail="Email, password, and agent name are required.")
+    # Checkbox 1 (ToS/Privacy) is required — Twilio A2P + Session 53.
+    # Server-side enforcement: block registration if consent was not given.
+    if not body.consent_at:
+        raise HTTPException(status_code=400, detail="You must agree to the Terms of Service and Privacy Policy to create an account.")
     import re
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
@@ -308,15 +313,27 @@ def register(body: RegisterRequest):
     if not user:
         raise HTTPException(status_code=409, detail="An account with that email already exists.")
 
-    # Record ToS/Privacy consent timestamp — Session 53
-    if body.consent_at:
-        try:
-            conn = sqlite3.connect(DB_NAME)
-            conn.execute("UPDATE users SET consent_at = ? WHERE id = ?", (body.consent_at, user["id"]))
-            conn.commit()
-            conn.close()
-        except Exception as _ce:
-            print(f"[Register] consent_at record failed (non-blocking): {_ce}")
+    # Record consent — Session 53 + Twilio A2P compliance.
+    # consent_at (Checkbox 1, ToS/Privacy) is now required above, so it is
+    # always present here. sms_consent (Checkbox 2) is independent and optional:
+    # when opted in, also stamp the timestamp and client IP for the audit trail.
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        if body.sms_consent:
+            sms_ip = _get_client_ip(request)
+            conn.execute(
+                "UPDATE users SET consent_at = ?, sms_consent = 1, sms_consent_at = ?, sms_consent_ip = ? WHERE id = ?",
+                (body.consent_at, datetime.utcnow().isoformat(), sms_ip, user["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET consent_at = ?, sms_consent = 0, sms_consent_at = NULL, sms_consent_ip = NULL WHERE id = ?",
+                (body.consent_at, user["id"]),
+            )
+        conn.commit()
+        conn.close()
+    except Exception as _ce:
+        print(f"[Register] consent record failed (non-blocking): {_ce}")
 
     # Start 14-day trial automatically
     try:
