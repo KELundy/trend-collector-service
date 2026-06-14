@@ -2064,6 +2064,28 @@ def member_answer_with_question(answer_id: int, user_id: int = None) -> Optional
     return d
 
 
+def member_answers_for_user(user_id: int) -> list:
+    """
+    Fetch all of a member's own answers (non-empty) joined to the question text,
+    most recent first. Read-only — used by the /foundation/my-answers display.
+    Returns a list of dicts (id, transcript, input_type, created_at, rendered_text)
+    or [] if the member has answered nothing.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ma.id, ma.transcript, ma.input_type, ma.created_at, mq.rendered_text
+             FROM member_answers ma
+             JOIN member_questions mq ON ma.member_question_id = mq.id
+            WHERE ma.user_id = ? AND ma.transcript != ''
+            ORDER BY ma.created_at DESC""",
+        (user_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ─────────────────────────────────────────────
 # CONTENT LIBRARY
 # ─────────────────────────────────────────────

@@ -1136,6 +1136,13 @@ async def foundation_daily_preference(body: dict, current_user=Depends(get_curre
     return {"ok": True, "preference": pref}
 
 
+@app.get("/foundation/my-answers")
+async def my_foundation_answers(current_user=Depends(get_current_user)):
+    """Return the member's own stored answers (read-only) for the settings display."""
+    from database import member_answers_for_user
+    return member_answers_for_user(current_user["id"])
+
+
 @app.get("/identity/guidance")
 async def get_identity_guidance(request: Request, current_user=Depends(get_current_user)):
     """
