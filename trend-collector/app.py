@@ -155,7 +155,7 @@ except ImportError:
     def migrate_context_column():
         print("[Startup] migrate_context_column not available in this database.py version")
 
-from auth import router as auth_router, get_current_user
+from auth import router as auth_router, get_current_user, forbid_demo
 from content_engine import router as content_engine_router, admin_router as compliance_admin_router, generate_content_core, hb_marketing_router, run_public_compliance_check
 from social import router as social_router
 
@@ -2091,7 +2091,7 @@ async def billing_status(current_user=Depends(get_current_user)):
     return get_subscription_status(current_user["id"])
 
 @app.post("/billing/create-checkout")
-async def create_checkout(request: Request, current_user=Depends(get_current_user)):
+async def create_checkout(request: Request, current_user=Depends(forbid_demo)):
     if not STRIPE_ENABLED: raise HTTPException(503, "Billing not yet configured — check back soon.")
     body      = await request.json()
     price_key = body.get("price_key", "starter_monthly")
@@ -2108,7 +2108,7 @@ async def create_checkout(request: Request, current_user=Depends(get_current_use
     return {"checkout_url": session.url}
 
 @app.post("/billing/portal")
-async def billing_portal(current_user=Depends(get_current_user)):
+async def billing_portal(current_user=Depends(forbid_demo)):
     if not STRIPE_ENABLED: raise HTTPException(503, "Billing not yet configured.")
     sub_data    = get_subscription_status(current_user["id"])
     customer_id = sub_data.get("stripe_customer_id")
@@ -9013,7 +9013,7 @@ async def video_webhook(request: Request):
 # ── Video top-up pack checkout ────────────────────────────────────────────────
 
 @app.post("/billing/video-topup-checkout")
-async def video_topup_checkout(current_user: dict = Depends(get_current_user)):
+async def video_topup_checkout(current_user: dict = Depends(forbid_demo)):
     """
     Create a Stripe checkout session for a Video Top-up Pack.
     $19 one-time purchase — adds 10 video renders to current month.

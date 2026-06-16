@@ -100,6 +100,7 @@ def _normalize_user(d: dict) -> dict:
         "created_at":        d.get("created_at", ""),
         "role":              d.get("role", "agent"),
         "broker_id":         d.get("broker_id", None),
+        "is_demo":           bool(d.get("is_demo", 0)),
     }
 
 def make_office_code(user_id: int) -> str:
@@ -273,6 +274,16 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception:
         pass  # DB check failed — non-blocking, let request through
     return user
+
+
+def forbid_demo(current_user=Depends(get_current_user)):
+    """Block demo / Ghost-Page users from sensitive real-world actions (Stripe
+    billing, social distribution). Reuses get_current_user for authentication and
+    only adds the is_demo gate, returning the same user object so it can cleanly
+    replace get_current_user as a route dependency."""
+    if current_user.get("is_demo"):
+        raise HTTPException(status_code=403, detail="This action is not available in demo mode.")
+    return current_user
 
 
 # ─────────────────────────────────────────────

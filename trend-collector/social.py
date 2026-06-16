@@ -22,7 +22,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional, List
 
-from auth import get_current_user
+from auth import get_current_user, forbid_demo
 import database
 
 router = APIRouter(prefix="/social", tags=["social"])
@@ -114,7 +114,7 @@ def _consume_state(state: str) -> dict:
 # ROUTE 1: Initiate OAuth
 # ─────────────────────────────────────────────
 @router.get("/{platform}/connect")
-async def connect_platform(platform: str, current_user=Depends(get_current_user)):
+async def connect_platform(platform: str, current_user=Depends(forbid_demo)):
     cfg = PLATFORMS.get(platform)
     if not cfg:
         raise HTTPException(404, f"Platform '{platform}' not supported.")
@@ -667,7 +667,7 @@ async def _upload_facebook_video(
 
 
 @router.post("/post")
-async def post_to_platform(body: PostRequest, current_user=Depends(get_current_user)):
+async def post_to_platform(body: PostRequest, current_user=Depends(forbid_demo)):
     platform = body.platform.lower()
 
     conn_data = database.get_platform_connection(current_user["id"], platform)
