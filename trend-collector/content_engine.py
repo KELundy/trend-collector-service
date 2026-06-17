@@ -3632,6 +3632,43 @@ def _demo_generated_response(payload):
     )
 
 
+# ── Demo generation (unauthenticated) ────────────────────────────────────────
+# Serves the frontend demo intercept, which rewrites /content/generate-content ->
+# /content/demo-generate with no auth header (app.js:1448-1449). Returns the same
+# canned ContentResponse the real route's is_demo branch already returns — no JWT
+# decode, no database read/write, no LLM call. In-memory per-IP rate limit mirrors
+# the public compliance checker pattern (_comp_check_rate_limit in app.py).
+_demo_gen_rate: dict = {}          # { ip: [unix_timestamp, ...] }
+_DEMO_GEN_MAX    = 30
+_DEMO_GEN_WINDOW = 600             # 10-minute rolling window
+
+
+def _demo_gen_rate_limit(ip: str) -> bool:
+    """Returns True (allowed) or False (rate limited). Per-IP rolling window."""
+    import time as _t
+    now          = _t.time()
+    window_start = now - _DEMO_GEN_WINDOW
+    hits = [t for t in _demo_gen_rate.get(ip, []) if t > window_start]
+    if len(hits) >= _DEMO_GEN_MAX:
+        return False
+    hits.append(now)
+    _demo_gen_rate[ip] = hits
+    return True
+
+
+@router.post("/demo-generate", response_model=ContentResponse)
+async def demo_generate(payload: ContentRequest, request: Request) -> ContentResponse:
+    # Unauthenticated by design — matches the frontend's no-auth demo rewrite.
+    # No JWT, no database, no LLM: returns canned content from the demo bank.
+    client_ip = request.client.host if request.client else "unknown"
+    if not _demo_gen_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many demo generations from this address. Please wait a few minutes.",
+        )
+    return _demo_generated_response(payload)
+
+
 @router.post("/generate-content", response_model=ContentResponse)
 async def generate_content(payload: ContentRequest, request: Request) -> ContentResponse:
     # ── Generation backstop gate ──────────────────────────────────────────────
