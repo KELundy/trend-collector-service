@@ -3400,7 +3400,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
         for p in faq_posts:
             q = _headline_to_question(p.get("headline", ""))
             body_preview = _esc_html(_opening_sentences(p.get("body", "")))
-            cir_note = f'<div style="margin-top:10px;font-size:11px;font-weight:700;color:var(--green)">&#10003; CPR&#8482; {_esc_html(p.get("cir_id",""))}</div>' if p.get("cir_id") else ""
+            cir_note = f'<div style="margin-top:10px;font-size:11px;font-weight:700;color:var(--green)">&#10003; {_esc_html(p.get("cir_id",""))}</div>' if p.get("cir_id") else ""
             post_link = f'<p style="margin-top:10px"><a href="{_esc_html(p.get("post_url",""))}" style="font-size:12px;color:var(--gold);font-weight:600">Read full post &#8594;</a></p>' if p.get("post_url") else ""
             faq_items_html += f"""
       <div class="faq-item">
@@ -3448,7 +3448,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
                     f'This piece began as {_ofn}&#8217;s own {_omode} answer, reviewed and approved before publication.'
                     f'</div>'
                 )
-            cir_stamp = f'<div class="cir-stamp"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5.5" stroke="#1A7A4A"/><path d="M3.5 6l2 2 3-3" stroke="#1A7A4A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>CPR&#8482; {_esc_html(cir_id)}</div>' if cir_id else "<div></div>"
+            cir_stamp = f'<div class="cir-stamp"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5.5" stroke="#1A7A4A"/><path d="M3.5 6l2 2 3-3" stroke="#1A7A4A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>{_esc_html(cir_id)}</div>' if cir_id else "<div></div>"
             permalink = f'<a href="{_esc_html(post_url)}" class="post-permalink">Read Full Post &#8594;</a>' if post_url else ""
             post_cards += f"""
         <div class="post-card{featured}" itemscope itemtype="https://schema.org/Article">
@@ -6413,7 +6413,7 @@ function toggleChip(cb) {
     if state == "success":
         # niche slot is overloaded with cir_id in the POST handler
         cir_id   = niche  # passed as niche arg from POST handler
-        cir_html = f"<div class='cir-badge'>CPR™ {cir_id}</div><br>" if cir_id else ""
+        cir_html = f"<div class='cir-badge'>{cir_id}</div><br>" if cir_id else ""
 
         if published_to:
             pub_chips = "".join(

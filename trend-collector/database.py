@@ -1885,7 +1885,7 @@ def _seed_persona(fields, posts, is_ghost=False, ghost_expires_at=None):
         cir_id = approved_at = published_at = None
         copied = "[]"
         if status in ("approved", "published"):
-            cir_id      = f"CIR-{(now - _td(days=p.get('days',0))).strftime('%Y%m%d')}-{_sec.token_hex(3).upper()}"
+            cir_id      = f"CPR-{(now - _td(days=p.get('days',0))).strftime('%Y%m%d')}-{_sec.token_hex(3).upper()}"
             approved_at = ts
         if status == "published":
             published_at = ts
@@ -2247,7 +2247,7 @@ def library_update(item_id: int, user_id: int, updates: dict) -> Optional[dict]:
             import secrets as _sec
             cir_date     = datetime.utcnow().strftime("%Y%m%d")
             cir_rand     = _sec.token_hex(3).upper()  # 6 uppercase hex chars
-            _new_cir_id  = f"CIR-{cir_date}-{cir_rand}"
+            _new_cir_id  = f"CPR-{cir_date}-{cir_rand}"
             fields.append("cir_id = ?")
             values.append(_new_cir_id)
             print(f"[CIR] Generated {_new_cir_id} for library item {item_id} (user {user_id})")
