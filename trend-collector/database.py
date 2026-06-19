@@ -2351,9 +2351,14 @@ def _row_to_item(row) -> dict:
 def schedule_upsert(user_id: int, niche: str, frequency: str,
                     time_of_day: str, timezone: str = "America/Denver",
                     day_of_week: str = None,
-                    context: str = "agent") -> dict:
+                    context: str = "agent",
+                    next_run: str = None) -> dict:
     """
     Insert or update a schedule for a user/niche/context combination.
+    next_run is the precomputed first/next future run time (ISO UTC), stored
+    on both insert and update so a saved schedule is never left with
+    next_run = NULL (NULL was treated as perpetually due and caused the
+    every-15-minute over-fire).
     context separates agent schedules from hb_marketing schedules for the
     same user_id. Defaults to 'agent' so all existing callers are unaffected.
     The ON CONFLICT clause matches on (user_id, niche) which is the existing
@@ -2364,16 +2369,16 @@ def schedule_upsert(user_id: int, niche: str, frequency: str,
     c = conn.cursor()
     c.execute("""
         INSERT INTO schedules (user_id, niche, frequency, time_of_day, timezone, active, next_run, day_of_week, context)
-        VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
         ON CONFLICT(user_id, niche) DO UPDATE SET
             frequency   = excluded.frequency,
             time_of_day = excluded.time_of_day,
             timezone    = excluded.timezone,
             active      = 1,
-            next_run    = NULL,
+            next_run    = excluded.next_run,
             day_of_week = excluded.day_of_week,
             context     = excluded.context
-    """, (user_id, niche, frequency, time_of_day, timezone, day_of_week, context))
+    """, (user_id, niche, frequency, time_of_day, timezone, next_run, day_of_week, context))
     conn.commit()
     c.execute("SELECT * FROM schedules WHERE user_id = ? AND niche = ?", (user_id, niche))
     row = c.fetchone()
@@ -2430,6 +2435,32 @@ def schedule_mark_ran(schedule_id: int, next_run: str):
     )
     conn.commit()
     conn.close()
+
+
+def schedule_claim_due(schedule_id: int, expected_next_run, new_next_run: str) -> bool:
+    """
+    Atomically claim a due schedule by advancing its next_run, but only if its
+    current next_run still matches the value we read as due. Returns True if THIS
+    caller won the claim (rowcount == 1); False if another worker already advanced
+    it. Closes the find-due -> generate -> mark-ran race across processes so the
+    same schedule can never be double-fired.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    if expected_next_run is None:
+        c.execute(
+            "UPDATE schedules SET next_run = ? WHERE id = ? AND active = 1 AND next_run IS NULL",
+            (new_next_run, schedule_id),
+        )
+    else:
+        c.execute(
+            "UPDATE schedules SET next_run = ? WHERE id = ? AND active = 1 AND next_run = ?",
+            (new_next_run, schedule_id, expected_next_run),
+        )
+    won = (c.rowcount == 1)
+    conn.commit()
+    conn.close()
+    return won
 
 
 def schedule_deactivate(schedule_id: int) -> None:

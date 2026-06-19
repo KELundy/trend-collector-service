@@ -590,6 +590,16 @@ async def upsert_schedule(body: ScheduleRequest, current_user=Depends(get_curren
     role = current_user.get("role", "agent")
     if ctx == "hb_marketing" and role not in ("super_admin", "admin", "hb_marketer"):
         ctx = "agent"
+    # Compute the first/next future run so a saved schedule is never left with
+    # next_run = NULL (NULL was treated as perpetually due -> every-loop firing).
+    # Uses the same _compute_next_run as the worker (single source of cadence
+    # truth), with ignition applied so the first interval matches later runs.
+    _next_run = _compute_next_run(
+        body.frequency,
+        body.timeOfDay,
+        body.timezone,
+        ignition=_ignition_active(get_agent_setup(current_user["id"]) or {}, current_user["id"]),
+    )
     schedule = schedule_upsert(
         user_id    = current_user["id"],
         niche      = body.niche,
@@ -598,6 +608,7 @@ async def upsert_schedule(body: ScheduleRequest, current_user=Depends(get_curren
         timezone   = body.timezone,
         day_of_week= body.dayOfWeek,
         context    = ctx,
+        next_run   = _next_run,
     )
     return {"success": True, "schedule": schedule}
 
@@ -1237,12 +1248,46 @@ def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America
         return candidate.isoformat()
 
 
+# Defense-in-depth: only one scheduler loop runs per process even if the
+# startup hook fires more than once. The DB claim below is the real
+# cross-process protection; this just blocks an accidental double-spawn.
+_scheduler_started = False
+_scheduler_start_lock = threading.Lock()
+
+
 def content_scheduler_worker():
+    global _scheduler_started
+    with _scheduler_start_lock:
+        if _scheduler_started:
+            print("[Scheduler] Worker already running in this process -- second thread exiting.")
+            return
+        _scheduler_started = True
     print("[Scheduler] Worker started.")
     while True:
         try:
             due = schedules_get_due()
             if due: print(f"[Scheduler] {len(due)} schedule(s) due.")
+            # --- Atomic cross-process claim ---
+            # Advance next_run BEFORE the slow generation. An atomic conditional
+            # UPDATE (advances only if next_run still equals the value we read as
+            # due) lets exactly one worker -- across all processes -- own a given
+            # schedule. Closes the find-due -> generate -> mark-ran race that let
+            # workers double-fire, and ensures a schedule is never left
+            # perpetually due even if generation later fails.
+            from database import schedule_claim_due
+            claimed = []
+            for sched in due:
+                _nr = _compute_next_run(
+                    sched.get("frequency",   "weekly"),
+                    sched.get("time_of_day", "08:00"),
+                    sched.get("timezone",    "America/Denver"),
+                    ignition=_ignition_active(get_agent_setup(sched["user_id"]) or {}, sched["user_id"]),
+                )
+                if schedule_claim_due(sched["id"], sched.get("next_run"), _nr):
+                    claimed.append(sched)
+                else:
+                    print(f"[Scheduler] Schedule {sched['id']} already claimed by another worker -- skipping.")
+            due = claimed
             # Group by user so we send ONE notification email per user
             # regardless of how many niches are scheduled in the same window.
             # This prevents agents with multiple niches getting flooded with emails.
