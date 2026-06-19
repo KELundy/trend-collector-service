@@ -1570,6 +1570,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 content    = content_to_save,
                 compliance = compliance_to_save,
                 source     = _sched_source,
+                context    = _sched_context,
             )
             item_id  = saved_item.get("id")
             headline = content_to_save.get("headline", "Your scheduled content is ready")
