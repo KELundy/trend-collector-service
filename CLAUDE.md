@@ -13,6 +13,10 @@
 6. Never read, print, or modify .env files or any secrets/credentials.
 7. If the spec conflicts with the code's reality, or two instructions conflict, STOP and ask. Do not resolve conflicts silently.
 8. Own mistakes immediately and plainly, then fix them.
+9. Commit messages: never add a Co-Authored-By trailer or any AI-attribution line to any commit message, in any repo. There are security and crawler reasons this must not appear.
+10. Editing large or multi-line blocks: the interactive edit tool can mis-fit multi-line block replacements (it has spliced new code into the middle of old code and silently mangled blocks on this Windows setup). For any multi-line block replacement, use a Python binary read/write script that asserts exactly one match for each anchor before writing, and writes nothing if any anchor does not match exactly once. Verify after writing by reading the changed region back from disk.
+11. Non-ASCII / escape characters: the terminal can mis-render characters (a forward slash shown as a backslash; an escape like \u203a shown as its glyph). When any separator or special character looks wrong, or when writing a non-ASCII/escape character, verify at the byte level with Python repr() and isascii() rather than trusting the diff preview. Build backslashes in shell-bound scripts via chr(92) to avoid heredoc corruption.
+12. No em dashes anywhere - in code, comments, content, commit messages, or legal text. Use hyphens. (Reaffirming the existing rule for visibility.)
 
 ## Context
 - This is the backend for AutoMates (HomeBridge Group, LLC), serving SSR agent authority pages and the content platform. app.py is large - use grep to locate, view only relevant ranges, edit with precise anchors.
