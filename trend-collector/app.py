@@ -5449,6 +5449,118 @@ async def generate_image(request: Request, current_user: dict = Depends(get_curr
     }
 
 
+@app.post("/library/{item_id}/regenerate-content")
+async def regenerate_content(item_id: int, current_user: dict = Depends(get_current_user)):
+    """
+    Regenerate an existing library record's content IN PLACE, on the same row.
+    Server-enforced per-record cap (CONTENT_REGEN_LIMIT) via content_regen_count,
+    mirroring the image cap. In-place is required: the old flow created a new
+    record each regen, which would reset the counter and defeat the cap.
+    """
+    import json as _json
+    from database import get_conn as _gc
+    uid = current_user["id"]
+    CONTENT_REGEN_LIMIT = 3
+
+    # Read record + current count (server-authoritative)
+    conn = _gc()
+    row = conn.execute(
+        "SELECT niche, status, content_regen_count FROM content_library WHERE id = ? AND user_id = ?",
+        (item_id, uid)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Record not found.")
+    current_count = row["content_regen_count"] or 0
+    niche_db      = row["niche"] or ""
+
+    # Cap check - server-side, not client-bypassable
+    if current_count >= CONTENT_REGEN_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error":                   "content_regen_limit_reached",
+                "detail":                  f"You can regenerate a post up to {CONTENT_REGEN_LIMIT} times.",
+                "content_regen_count":     current_count,
+                "content_regen_remaining": 0,
+            },
+        )
+
+    # Build generation args from the user's setup (mirror the signal path)
+    conn = _gc()
+    c = conn.cursor()
+    c.execute("SELECT agent_name, brokerage FROM users WHERE id = ?", (uid,))
+    user_row = c.fetchone()
+    c.execute("SELECT setup_json FROM agent_setup WHERE user_id = ?", (uid,))
+    setup_row = c.fetchone()
+    conn.close()
+    if not user_row:
+        raise HTTPException(400, "User not found.")
+    setup = _json.loads(setup_row["setup_json"]) if setup_row and setup_row["setup_json"] else {}
+
+    niche = niche_db or (setup.get("primaryNiches") or ["Residential Buying & Selling"])[0]
+    from content_engine import NICHE_SITUATIONS, DEFAULT_SITUATIONS, generate_content_core
+    import random as _random
+    _sit_pool = NICHE_SITUATIONS.get(niche) or DEFAULT_SITUATIONS
+    situation = _random.choice(_sit_pool)
+
+    try:
+        result = generate_content_core(
+            agent_name           = user_row["agent_name"],
+            brokerage            = user_row["brokerage"],
+            market               = setup.get("market", ""),
+            niche                = niche,
+            situation            = situation,
+            persona              = setup.get("defaultPersona") or "homeowners",
+            tone                 = setup.get("tone", "Professional"),
+            length               = setup.get("length", "Standard"),
+            trends               = setup.get("trends", []),
+            brand_voice          = setup.get("brandVoice", ""),
+            short_bio            = setup.get("shortBio", ""),
+            audience             = setup.get("audienceDescription", ""),
+            words_avoid          = setup.get("wordsAvoid", ""),
+            words_prefer         = setup.get("wordsPrefer", ""),
+            mls_names            = setup.get("mlsNames", []),
+            state                = setup.get("state", ""),
+            cta_type             = setup.get("ctaType", ""),
+            cta_url              = setup.get("ctaUrl", ""),
+            cta_label            = setup.get("ctaLabel", ""),
+            origin_story         = setup.get("originStory", ""),
+            unfair_advantage     = setup.get("unfairAdvantage", ""),
+            signature_perspective= setup.get("signaturePerspective", ""),
+            not_for_client       = setup.get("notForClient", ""),
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Regeneration failed: {str(e)}")
+
+    new_content = dict(result["content"])
+    if "generated_at" in new_content:
+        from datetime import datetime as _dt
+        if isinstance(new_content["generated_at"], _dt):
+            new_content["generated_at"] = new_content["generated_at"].isoformat()
+    new_compliance = dict(result["compliance"])
+
+    # Update content + compliance in place; increment counter atomically
+    conn = _gc()
+    conn.execute(
+        """UPDATE content_library
+           SET content = ?, compliance = ?,
+               content_regen_count = COALESCE(content_regen_count, 0) + 1
+           WHERE id = ? AND user_id = ?""",
+        (_json.dumps(new_content), _json.dumps(new_compliance), item_id, uid),
+    )
+    conn.commit()
+    conn.close()
+
+    new_count = current_count + 1
+    return {
+        "content":                 new_content,
+        "compliance":              new_compliance,
+        "content_regen_count":     new_count,
+        "content_regen_remaining": CONTENT_REGEN_LIMIT - new_count,
+    }
+
+
 # ── Waitlist IP-based rate limiter ───────────────────────────────────────────
 # Prevents bot/spam abuse of the public contact form.
 # In-memory rolling window — resets on server restart, which is acceptable
