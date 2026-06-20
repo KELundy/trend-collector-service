@@ -211,6 +211,24 @@ def _build_modulation_block(modulation):
     }.get(mod, "")
 
 
+def _service_areas_rule(service_areas):
+    """
+    Selective local-area guidance. The full list stays available, but the model must
+    mention at most one or two areas, only when relevant, woven into prose. Never list
+    more than two, never print a 'serving:' label or a parenthetical dump, never recite
+    the whole list. Returns "" when no areas are set.
+    """
+    areas = [str(a).strip() for a in (service_areas or []) if a and str(a).strip()]
+    if not areas:
+        return ""
+    return ("LOCAL AREAS (use sparingly): the agent also works " + ", ".join(areas) + ". "
+            "Mention AT MOST ONE OR TWO of these specific areas, and only when it genuinely "
+            "fits the point, woven naturally into a sentence the way a real person speaks "
+            "(for example: 'over in Greenwood Village' or 'here in the south metro'). "
+            "Never list more than two. Never print a 'serving:' label or a parenthetical list "
+            "of areas. Never recite the full list.")
+
+
 def _signoff_block(agent_name, brokerage, signoff, disclaimer=""):
     """
     Return the post closing instruction (free text for the prompt rules). Clean
@@ -223,13 +241,15 @@ def _signoff_block(agent_name, brokerage, signoff, disclaimer=""):
     sign = (signoff or "").strip()
     if sign:
         base = (
-            f'End the post with the member sign-off "{sign}" on its own line, then '
+            f'Leave a blank line (a clear paragraph break) after the post body, then '
+            f'end with the member sign-off "{sign}" on its own line, then '
             f'"{disclosure}" on the final line for brokerage disclosure. '
             f'Do not use an em dash or a vertical pipe character in the closing.'
         )
     else:
         base = (
-            f'End the post on its own final line with "{disclosure}", written like a natural '
+            f'Leave a blank line (a clear paragraph break) after the post body, then end on its '
+            f'own final line with "{disclosure}", written like a natural '
             f'human sign-off. Do not use an em dash or a vertical pipe character in the closing.'
         )
     disc = (disclaimer or "").strip()
@@ -250,7 +270,8 @@ def _build_content_prompt(payload, user_id=None):
     brokerage     = profile.brokerage    or ""
     base_market   = profile.market       or "their local market"
     service_areas = profile.serviceAreas or []
-    market        = (f"{base_market} (serving: {', '.join(service_areas)})" if service_areas else base_market)
+    market        = base_market
+    service_areas_rule = _service_areas_rule(service_areas)
     brand_voice   = profile.brandVoice   or "conversational and genuine"
     short_bio     = profile.shortBio     or ""
     audience      = profile.audienceDescription or ""
@@ -436,7 +457,8 @@ def _build_content_prompt(payload, user_id=None):
 
     return (
         f"You are ghostwriting for {agent_display}, a real estate professional in {market}.\n\n"
-        "Your job is to write content that sounds exactly like a knowledgeable human being sharing "
+        + (f"{service_areas_rule}\n\n" if service_areas_rule else "")
+        + "Your job is to write content that sounds exactly like a knowledgeable human being sharing "
         "what they know — not like a marketing campaign, not like an advertisement, and absolutely "
         "not like a sales pitch.\n\n"
         f"WHO {agent_name.upper()} IS\n"
@@ -684,7 +706,8 @@ def _build_freeform_content_prompt(payload, user_id=None):
     brokerage     = profile.brokerage    or ""
     base_market   = profile.market       or "their local market"
     service_areas = profile.serviceAreas or []
-    market        = (f"{base_market} (serving: {', '.join(service_areas)})" if service_areas else base_market)
+    market        = base_market
+    service_areas_rule = _service_areas_rule(service_areas)
     brand_voice   = profile.brandVoice   or "conversational and genuine"
     short_bio     = profile.shortBio     or ""
     words_avoid   = profile.wordsAvoid   or ""
@@ -755,7 +778,8 @@ def _build_freeform_content_prompt(payload, user_id=None):
     # ── Shared opening ────────────────────────────────────────────────────────
     opening = (
         f"You are ghostwriting for {agent_display}, a real estate professional in {market}.\n\n"
-        f"WHO {agent_name.upper()} IS\n"
+        + (f"{service_areas_rule}\n\n" if service_areas_rule else "")
+        + f"WHO {agent_name.upper()} IS\n"
         + "─" * 40 + "\n"
         + bio_text
         + f"Voice: {brand_voice}\n"
@@ -3978,11 +4002,13 @@ async def local_intel(payload: LocalIntelRequest):
             "Write in this agent's specific voice. The post should feel like it could only come from them.\n"
         )
 
-    market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+    market_display = market
+    service_areas_rule = _service_areas_rule(service_areas)
     market_str     = market or "the local area"
 
     research_prompt = f"""You are a local real estate market researcher and ghostwriter for {agent_name}, a real estate professional serving {market_display}.
 
+{service_areas_rule}
 RESEARCH TASK — THREE-TIER FALLBACK:
 Search the web for information about: "{payload.location}"
 
@@ -4311,7 +4337,8 @@ def _build_video_script_prompt(topic: str, tone: str, agent_name: str,
                                 service_areas: list,
                                 user_id=None, modulation: str = "standard") -> str:
 
-    market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+    market_display = market
+    service_areas_rule = _service_areas_rule(service_areas)
 
     # Voice Phase 1 + 4 — same exemplar/steering pattern as the other builders (§2.4).
     voice_exemplar_block = _build_voice_exemplar_block(user_id, "agent", agent_name)
@@ -4344,6 +4371,7 @@ def _build_video_script_prompt(topic: str, tone: str, agent_name: str,
 
     return f"""You are writing a spoken video script for {agent_display}, a licensed real estate professional in {market_display}.
 
+{service_areas_rule}
 This is a talking-head video script — the agent will speak directly to camera. It must sound EXACTLY like {agent_name} talking, not like a polished narrator reading copy.
 
 WHO {agent_name.upper()} IS
@@ -4507,7 +4535,7 @@ async def suggest_video_topics(payload: VideoTopicsRequest):
     market   = payload.market or profile.market or "their local market"
     agent_name = profile.agentName or "the agent"
     service_areas = profile.serviceAreas or []
-    market_display = f"{market} (serving: {', '.join(service_areas)})" if service_areas else market
+    market_display = market
     short_bio = profile.shortBio or ""
     brand_voice = profile.brandVoice or "conversational and genuine"
 
