@@ -1593,6 +1593,10 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
             schedule_mark_ran(sched_id, next_run)
 
     # Send ONE consolidated notification for all successfully generated items
+    # EMERGENCY STOP (notification flood): scheduled email/SMS senders are hard
+    # disabled. Content still generates and saves; only the automatic scheduled
+    # notification is suppressed. Delete the `return` below to re-enable.
+    return
     if not saved_items:
         return
 
