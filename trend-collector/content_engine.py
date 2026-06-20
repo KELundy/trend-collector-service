@@ -51,6 +51,7 @@ class AgentProfileModel(BaseModel):
     signaturePerspective: Optional[str] = Field(None)
     notForClient:      Optional[str] = Field(None)
     signoff:           Optional[str] = Field(None)   # member-chosen post closing; clean default used when blank
+    disclaimer:        Optional[str] = Field(None)   # member compliance disclaimer, appended as final line when set
     notificationEmail: Optional[str] = Field(None)
     recruitingEnabled: Optional[bool] = Field(False)
     recruitingCta:     Optional[str]  = Field(None)
@@ -210,25 +211,34 @@ def _build_modulation_block(modulation):
     }.get(mod, "")
 
 
-def _signoff_block(agent_name, brokerage, signoff):
+def _signoff_block(agent_name, brokerage, signoff, disclaimer=""):
     """
     Return the post closing instruction (free text for the prompt rules). Clean
     default closes with "{name}, {brokerage}" on its own line: no em dash, no pipe,
     brokerage kept for legal disclosure. A member custom sign-off closes with their
-    text on its own line, then the disclosure line. Forward-only (new posts only).
+    text on its own line, then the disclosure line. When the member set a compliance
+    disclaimer, it is appended verbatim as one more final line. Forward-only.
     """
     disclosure = f"{agent_name}, {brokerage}" if brokerage else agent_name
     sign = (signoff or "").strip()
     if sign:
-        return (
+        base = (
             f'End the post with the member sign-off "{sign}" on its own line, then '
             f'"{disclosure}" on the final line for brokerage disclosure. '
             f'Do not use an em dash or a vertical pipe character in the closing.'
         )
-    return (
-        f'End the post on its own final line with "{disclosure}", written like a natural '
-        f'human sign-off. Do not use an em dash or a vertical pipe character in the closing.'
-    )
+    else:
+        base = (
+            f'End the post on its own final line with "{disclosure}", written like a natural '
+            f'human sign-off. Do not use an em dash or a vertical pipe character in the closing.'
+        )
+    disc = (disclaimer or "").strip()
+    if disc:
+        base += (
+            f' After the closing, add one more final line with this exact compliance '
+            f'disclaimer, word for word, unchanged: "{disc}".'
+        )
+    return base
 
 
 def _build_content_prompt(payload, user_id=None):
@@ -311,7 +321,7 @@ def _build_content_prompt(payload, user_id=None):
     else:
         lang_instruction = ""
 
-    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "")
+    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "", profile.disclaimer or "")
     brokerage_compliance = brokerage if brokerage else "agent's brokerage"
 
     # ── CTA / booking block — multi-method support ──────────────────────────
@@ -688,7 +698,7 @@ def _build_freeform_content_prompt(payload, user_id=None):
 
     primary_categories = ", ".join(payload.identity.primaryCategories) or "real estate"
 
-    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "")
+    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "", profile.disclaimer or "")
 
     # CTA block — reuse same logic as standard prompt
     methods = profile.ctaMethods or []
@@ -3945,7 +3955,7 @@ async def local_intel(payload: LocalIntelRequest):
     advantage    = profile.unfairAdvantage or ""
     brand_voice  = profile.brandVoice or "conversational and genuine"
 
-    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "")
+    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "", profile.disclaimer or "")
 
     if cta_url:
         cta_instruction = (
