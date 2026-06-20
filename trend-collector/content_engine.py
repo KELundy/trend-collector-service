@@ -50,6 +50,7 @@ class AgentProfileModel(BaseModel):
     unfairAdvantage:   Optional[str] = Field(None)
     signaturePerspective: Optional[str] = Field(None)
     notForClient:      Optional[str] = Field(None)
+    signoff:           Optional[str] = Field(None)   # member-chosen post closing; clean default used when blank
     notificationEmail: Optional[str] = Field(None)
     recruitingEnabled: Optional[bool] = Field(False)
     recruitingCta:     Optional[str]  = Field(None)
@@ -209,6 +210,27 @@ def _build_modulation_block(modulation):
     }.get(mod, "")
 
 
+def _signoff_block(agent_name, brokerage, signoff):
+    """
+    Return the post closing instruction (free text for the prompt rules). Clean
+    default closes with "{name}, {brokerage}" on its own line: no em dash, no pipe,
+    brokerage kept for legal disclosure. A member custom sign-off closes with their
+    text on its own line, then the disclosure line. Forward-only (new posts only).
+    """
+    disclosure = f"{agent_name}, {brokerage}" if brokerage else agent_name
+    sign = (signoff or "").strip()
+    if sign:
+        return (
+            f'End the post with the member sign-off "{sign}" on its own line, then '
+            f'"{disclosure}" on the final line for brokerage disclosure. '
+            f'Do not use an em dash or a vertical pipe character in the closing.'
+        )
+    return (
+        f'End the post on its own final line with "{disclosure}", written like a natural '
+        f'human sign-off. Do not use an em dash or a vertical pipe character in the closing.'
+    )
+
+
 def _build_content_prompt(payload, user_id=None):
     identity = payload.identity
     profile  = payload.agentProfile or AgentProfileModel()
@@ -289,12 +311,7 @@ def _build_content_prompt(payload, user_id=None):
     else:
         lang_instruction = ""
 
-    brokerage_footer = f" | {brokerage}" if brokerage else ""
-    brokerage_disclosure = (
-        f'Brokerage disclosure required: end the post with "— {agent_name}{brokerage_footer}" as a quiet footer.'
-        if brokerage else
-        f'End with "— {agent_name}" as a natural sign-off.'
-    )
+    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "")
     brokerage_compliance = brokerage if brokerage else "agent's brokerage"
 
     # ── CTA / booking block — multi-method support ──────────────────────────
@@ -518,7 +535,7 @@ def _build_content_prompt(payload, user_id=None):
         '  "headline": "The actual question a consumer would ask an AI assistant or type into search — the literal question this post answers, in a real person\'s words. One sentence, ends with a question mark.",\n'
         f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words that capture the visual scene. Use the local architecture style typical of {market} (ranch-style, craftsman, mid-century modern, or new construction — never colonial), the neighborhood feel, season, lighting, and niche context. No people, no agents. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk / Cherry Hills estate manicured lawn summer afternoon. Write only the brief, no sentences.",\n'
         f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
-        f'  "post": "A full social post in {agent_name}\'s voice. Opens with 2-3 definitive, quotable sentences that answer the headline question outright, then elaborates. Takes a real position. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
+        f'  "post": "A full social post in {agent_name}\'s voice. Opens with 2-3 definitive, quotable sentences that answer the headline question outright, then elaborates. Takes a real position. Ends with a genuine local question. Ends with the sign-off in the rules above.",\n'
         '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
         '  "script": "News-format teleprompter script with [B-ROLL] and [GREEN SCREEN] direction notes."\n'
         "}\n\n"
@@ -526,7 +543,7 @@ def _build_content_prompt(payload, user_id=None):
         "- Every value must be complete — no placeholders\n"
         "- headline MUST be phrased as a real consumer question, ending with a question mark\n"
         "- post MUST open with 2-3 definitive sentences answering that question before any elaboration\n"
-        f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
+        f'- post MUST end with the sign-off in the rules above (brokerage disclosure required)\n'
         "- post MUST end with a genuine local question (not generic)\n"
         f"- {market} must appear in the post or script\n"
         "- cta MUST include the booking URL if one was provided\n"
@@ -671,12 +688,7 @@ def _build_freeform_content_prompt(payload, user_id=None):
 
     primary_categories = ", ".join(payload.identity.primaryCategories) or "real estate"
 
-    brokerage_footer = f" | {brokerage}" if brokerage else ""
-    brokerage_disclosure = (
-        f'Brokerage disclosure required: end the post with "— {agent_name}{brokerage_footer}" as a quiet footer.'
-        if brokerage else
-        f'End with "— {agent_name}" as a natural sign-off.'
-    )
+    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "")
 
     # CTA block — reuse same logic as standard prompt
     methods = profile.ctaMethods or []
@@ -786,13 +798,13 @@ def _build_freeform_content_prompt(payload, user_id=None):
             '  "headline": "A human headline that captures the thought — not a real estate tagline. One sentence, no period.",\n'
             '  "thumbnailIdea": "A warm, personal, non-real-estate image — a quiet morning scene, an open notebook, hands around a coffee cup, a window with soft light. 6-8 descriptive words. No homes, no neighborhoods, no for-sale signs.",\n'
             f'  "hashtags": "#hashtag1 #hashtag2 (6-8 tags — personal, human, reflective — no real estate tags)",\n'
-            f'  "post": "The purely personal post. No real estate. Ends with a genuine question. Ends with: — {agent_name}{brokerage_footer}",\n'
+            f'  "post": "The purely personal post. No real estate. Ends with a genuine question. Ends with the sign-off in the rules above.",\n'
             '  "cta": "No call to action — leave this field as an empty string.",\n'
             '  "script": "A 30-45 second spoken version. Personal, reflective, genuine. No sales language. Natural pauses marked with \' / \'."\n'
             "}\n\n"
             "HARD RULES:\n"
             "- Every value must be complete — no placeholders\n"
-            f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} as a quiet sign-off\n'
+            f'- post MUST end with the sign-off in the rules above (a quiet sign-off)\n'
             "- cta MUST be an empty string — no booking links, no contact info\n"
             "- post MUST contain zero real estate language\n"
             "- No line breaks inside JSON string values\n"
@@ -852,13 +864,13 @@ def _build_freeform_content_prompt(payload, user_id=None):
             '  "headline": "A human, specific headline that captures the essence of the thought — not a real estate tagline. One sentence, no period.",\n'
             f'  "thumbnailIdea": "A specific, concrete image brief — 6-10 descriptive words. Use the local feel of {market} (ranch-style, craftsman, mid-century modern, or new construction). No people. Examples: Centennial Colorado ranch home wide lot autumn golden hour / Denver Tech Center modern condo rooftop city view dusk.",\n'
             f'  "hashtags": "#hashtag1 #hashtag2 (8-12 tags, space-separated, include {market_first_word}-specific tags)",\n'
-            f'  "post": "The full social post. Starts with the human thought. Bridges naturally to {agent_name}\'s world. Ends with a genuine local question. Ends with: — {agent_name}{brokerage_footer}",\n'
+            f'  "post": "The full social post. Starts with the human thought. Bridges naturally to {agent_name}\'s world. Ends with a genuine local question. Ends with the sign-off in the rules above.",\n'
             '  "cta": "The CTA as specified — include booking/contact URL if provided.",\n'
             '  "script": "A 45-60 second spoken version of the post. Same soul, same thought, same bridge. Sounds like a real person talking — not a news anchor. Natural pauses marked with \' / \'."\n'
             "}\n\n"
             "HARD RULES:\n"
             "- Every value must be complete — no placeholders\n"
-            f'- post MUST contain {agent_name}{brokerage_footer if brokerage else ""} — legal disclosure requirement\n'
+            f'- post MUST end with the sign-off in the rules above (brokerage disclosure required)\n'
             "- post MUST end with a genuine question (not generic)\n"
             "- No line breaks inside JSON string values — use spaces between sentences\n"
             "- Return ONLY the JSON object."
@@ -3838,7 +3850,7 @@ def generate_content_core(
     mls_names=None, content_mode="agent", state="",
     cta_type="", cta_url="", cta_label="",
     mls_data="", origin_story="", unfair_advantage="",
-    signature_perspective="", not_for_client="",
+    signature_perspective="", not_for_client="", signoff="",
 ):
     profile = AgentProfileModel(
         agentName=agent_name, brokerage=brokerage, market=market,
@@ -3854,6 +3866,7 @@ def generate_content_core(
         unfairAdvantage=unfair_advantage or None,
         signaturePerspective=signature_perspective or None,
         notForClient=not_for_client or None,
+        signoff=signoff or None,
     )
     payload = ContentRequest(
         identity       = IdentityModel(primaryCategories=[niche] if niche else []),
@@ -3932,7 +3945,7 @@ async def local_intel(payload: LocalIntelRequest):
     advantage    = profile.unfairAdvantage or ""
     brand_voice  = profile.brandVoice or "conversational and genuine"
 
-    brokerage_footer = f" | {brokerage}" if brokerage else ""
+    brokerage_disclosure = _signoff_block(agent_name, brokerage, profile.signoff or "")
 
     if cta_url:
         cta_instruction = (
@@ -4008,7 +4021,7 @@ The post must read like it was written by a {niche} specialist, not a generalist
 COMPLIANCE RULES:
 - Fair Housing Act: No language implying preference by protected class
 - NAR Article 12: Truthful only. No guaranteed outcomes
-- Brokerage disclosure: End post with — {agent_name}{brokerage_footer}
+- Brokerage disclosure: {brokerage_disclosure}
 - No specific financial predictions or guaranteed investment returns
 - post MUST end with a genuine local question
 
@@ -4025,14 +4038,14 @@ OUTPUT FORMAT — RETURN ONLY VALID JSON, NOTHING ELSE:
   "headline": "A specific headline reflecting the most local data you found. One sentence, no period.",
   "thumbnailIdea": "A specific, concrete image brief tied directly to the research findings and local market. Write 6-10 descriptive words — include the local architecture style, neighborhood character, season, and the market topic (price trends, new development, neighborhood activity). No people, no agents. Examples: 'Southmoor Park brick ranch homes quiet street spring tulips' or 'Greenwood Village luxury estate for sale sign evening light'. Write only the brief — no sentences, no explanation.",
   "hashtags": "#hashtag1 #hashtag2 (8-10 tags — include {market_str.split()[0]}-specific tags)",
-  "post": "Full social post in {agent_name}'s voice. Uses real data from research. Takes a position. Includes 📍 Sources line with real URLs from search results. Ends with genuine local question. Ends with: — {agent_name}{brokerage_footer}",
+  "post": "Full social post in {agent_name}'s voice. Uses real data from research. Takes a position. Includes 📍 Sources line with real URLs from search results. Ends with genuine local question. Ends with the sign-off in the disclosure rule above.",
   "cta": "The CTA as specified — include booking URL if provided.",
   "script": "News-anchor teleprompter script covering the research findings. Include [B-ROLL: local footage suggestion] and [GREEN SCREEN: background suggestion]."
 }}
 
 HARD RULES:
 - Use real data from your searches — never invent facts
-- post MUST contain {agent_name}{brokerage_footer if brokerage else ""}
+- post MUST end with the sign-off in the disclosure rule above
 - If data is metro or national, say so in the post — agents build trust through honesty
 - Return ONLY the JSON object"""
 
