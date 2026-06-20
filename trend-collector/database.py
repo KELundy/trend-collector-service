@@ -306,6 +306,72 @@ def init_db():
     except Exception:
         pass
 
+    # Non-destructive: add drip_time to existing schedules table (The Scheduler, Stage A).
+    # Drip distribution time-of-day, independent of generation time_of_day. When NULL,
+    # the drip path falls back to time_of_day. Generation logic is unaffected.
+    try:
+        c.execute("ALTER TABLE schedules ADD COLUMN drip_time TEXT DEFAULT NULL")
+    except Exception:
+        pass
+
+    # Distribution queue - approved content scheduled to drip to a platform on a
+    # member-chosen day/time (The Scheduler, Stage A). One row per (item, platform),
+    # kept separate from the schedules table (which drives generation) so the two
+    # cadences never read from each other. status: queued | claimed | posted |
+    # canceled | failed. scheduled_for is always a FUTURE ISO-UTC value; the worker
+    # claims a due row with an atomic conditional UPDATE so it can never double-post.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS distribution_queue (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
+            library_item_id INTEGER NOT NULL,
+            platform        TEXT NOT NULL,
+            context         TEXT NOT NULL DEFAULT 'agent',
+            scheduled_for   TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'queued',
+            claimed_at      TEXT,
+            posted_at       TEXT,
+            attempts        INTEGER DEFAULT 0,
+            last_error      TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now')),
+            UNIQUE(library_item_id, platform),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
+    # Distribution pause - per-member, per-context failsafe. paused=1 makes the drip
+    # worker skip this member's queued items for that context (agent vs hb_marketing)
+    # without canceling them. The super-admin global kill lives in admin_settings under
+    # key 'distribution_global_pause'. This governs ONLY content distribution; the
+    # warm-lead text path shares nothing with it.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS distribution_pause (
+            user_id    INTEGER NOT NULL,
+            context    TEXT NOT NULL DEFAULT 'agent',
+            paused     INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, context)
+        )
+    """)
+
+    # Batch-notify state - drives the ONE consolidated "ready for your review"
+    # notice per member-chosen batch day (The Scheduler, Stage B). Member-level (per
+    # context), separate from generation and from distribution so notification
+    # cadence cross-triggers nothing. next_fire is always FUTURE; the orchestrator
+    # claims+advances it atomically so the notice can never fire every loop (the
+    # exact failure the flood was). NOTE: sending stays gated/disabled until Stage H.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS batch_notify_state (
+            user_id    INTEGER NOT NULL,
+            context    TEXT NOT NULL DEFAULT 'agent',
+            next_fire  TEXT,
+            last_fire  TEXT,
+            last_count INTEGER DEFAULT 0,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, context)
+        )
+    """)
+
     # Local signals — hyper-local market intelligence per agent
     c.execute("""
         CREATE TABLE IF NOT EXISTS local_signals (
@@ -2518,6 +2584,9 @@ def _schedule_row(row) -> dict:
     ctx = "agent"
     try: ctx = row["context"] or "agent"
     except Exception: pass
+    dt = None
+    try: dt = row["drip_time"]
+    except Exception: pass
     return {
         "id":         row["id"],
         "userId":     row["user_id"],
@@ -2529,8 +2598,324 @@ def _schedule_row(row) -> dict:
         "lastRun":    row["last_run"],
         "nextRun":    row["next_run"],
         "dayOfWeek":  dow,
+        "dripTime":   dt,
         "context":    ctx,
     }
+
+
+# =====================================================================
+# DISTRIBUTION QUEUE + PAUSE - The Scheduler (Stage A)
+# Drip distribution of APPROVED content to platforms on member-chosen days/
+# times. Kept entirely separate from the generation `schedules` table and from
+# every notification sender, so the distribution cadence cannot cross-trigger
+# anything. No firing logic here (Stage A is data + helpers only).
+# =====================================================================
+def _distribution_row(row) -> dict:
+    if row is None:
+        return None
+    def _g(k, default=None):
+        try: return row[k]
+        except Exception: return default
+    return {
+        "id":            _g("id"),
+        "userId":        _g("user_id"),
+        "libraryItemId": _g("library_item_id"),
+        "platform":      _g("platform"),
+        "context":       _g("context") or "agent",
+        "scheduledFor":  _g("scheduled_for"),
+        "status":        _g("status"),
+        "claimedAt":     _g("claimed_at"),
+        "postedAt":      _g("posted_at"),
+        "attempts":      _g("attempts", 0),
+        "lastError":     _g("last_error") or "",
+        "createdAt":     _g("created_at"),
+    }
+
+
+def distribution_enqueue(user_id: int, library_item_id: int, platform: str,
+                         scheduled_for: str, context: str = "agent") -> dict:
+    """
+    Queue one approved library item to drip to one platform at a future time.
+    Idempotent per (library_item_id, platform): re-enqueuing the same pair updates
+    its scheduled_for/context and resets it to 'queued', but ONLY if it has not
+    already posted (the WHERE guard prevents reviving a posted row and double-
+    posting). scheduled_for must be a FUTURE ISO-UTC string (caller computes it).
+    Returns the stored row as a dict.
+    """
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO distribution_queue
+            (user_id, library_item_id, platform, context, scheduled_for, status)
+        VALUES (?, ?, ?, ?, ?, 'queued')
+        ON CONFLICT(library_item_id, platform) DO UPDATE SET
+            scheduled_for = excluded.scheduled_for,
+            context       = excluded.context,
+            status        = 'queued',
+            claimed_at    = NULL,
+            posted_at     = NULL,
+            last_error    = ''
+        WHERE distribution_queue.status != 'posted'
+    """, (user_id, library_item_id, platform, ctx, scheduled_for))
+    conn.commit()
+    c.execute(
+        "SELECT * FROM distribution_queue WHERE library_item_id = ? AND platform = ?",
+        (library_item_id, platform),
+    )
+    row = c.fetchone()
+    conn.close()
+    return _distribution_row(row) if row else None
+
+
+def distribution_get_due(now_iso: str = None, limit: int = 100) -> list:
+    """
+    Return queued rows whose scheduled_for is due (<= now), soonest first. Non-
+    mutating: the worker filters these by pause state, then claims each survivor
+    with distribution_claim_due before posting.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    now_iso = now_iso or datetime.utcnow().isoformat()
+    c.execute(
+        "SELECT * FROM distribution_queue WHERE status = 'queued' "
+        "AND scheduled_for <= ? ORDER BY scheduled_for ASC LIMIT ?",
+        (now_iso, limit),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return [_distribution_row(r) for r in rows]
+
+
+def distribution_claim_due(queue_id: int) -> bool:
+    """
+    Atomically claim one queued row for posting: advance status 'queued' ->
+    'claimed' and stamp claimed_at, only if it is STILL 'queued'. Returns True if
+    THIS caller won (rowcount == 1). Mirrors schedule_claim_due; closes the
+    find-due -> post race so a row can never be posted twice.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE distribution_queue SET status = 'claimed', claimed_at = ? "
+        "WHERE id = ? AND status = 'queued'",
+        (datetime.utcnow().isoformat(), queue_id),
+    )
+    won = (c.rowcount == 1)
+    conn.commit()
+    conn.close()
+    return won
+
+
+def distribution_mark_posted(queue_id: int, posted_at: str = None) -> None:
+    """Mark a claimed row as successfully posted."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE distribution_queue SET status = 'posted', posted_at = ? WHERE id = ?",
+        (posted_at or datetime.utcnow().isoformat(), queue_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def distribution_mark_failed(queue_id: int, error: str, give_up: bool = False) -> None:
+    """
+    Record a posting failure: increment attempts and store the error. By default
+    the row returns to 'queued' so a later loop can retry; give_up=True marks it
+    terminally 'failed' (the worker decides when the attempt cap is reached).
+    """
+    new_status = "failed" if give_up else "queued"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE distribution_queue SET status = ?, attempts = attempts + 1, "
+        "claimed_at = NULL, last_error = ? WHERE id = ?",
+        (new_status, str(error)[:500], queue_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def distribution_cancel_item(user_id: int, queue_id: int) -> bool:
+    """
+    Per-item cancel (member pulls an approved-and-scheduled item before it fires).
+    Only cancels a row the member owns that has not already posted. Returns True
+    if a row was canceled.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE distribution_queue SET status = 'canceled' "
+        "WHERE id = ? AND user_id = ? AND status IN ('queued','claimed')",
+        (queue_id, user_id),
+    )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def distribution_queue_get(user_id: int, context: str = "agent",
+                           include_done: bool = False) -> list:
+    """
+    The scheduled-queue view: rows for a member in a context, soonest first. By
+    default returns only actionable rows (queued/claimed) so the member sees what
+    is still scheduled and cancelable; include_done=True also returns posted/
+    canceled/failed for history.
+    """
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    if include_done:
+        c.execute(
+            "SELECT * FROM distribution_queue WHERE user_id = ? AND context = ? "
+            "ORDER BY scheduled_for ASC",
+            (user_id, ctx),
+        )
+    else:
+        c.execute(
+            "SELECT * FROM distribution_queue WHERE user_id = ? AND context = ? "
+            "AND status IN ('queued','claimed') ORDER BY scheduled_for ASC",
+            (user_id, ctx),
+        )
+    rows = c.fetchall()
+    conn.close()
+    return [_distribution_row(r) for r in rows]
+
+
+def distribution_pause_set(user_id: int, context: str, paused: bool) -> None:
+    """Set the per-member, per-context distribution pause failsafe."""
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO distribution_pause (user_id, context, paused, updated_at)
+           VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id, context) DO UPDATE SET
+               paused = excluded.paused, updated_at = datetime('now')""",
+        (user_id, ctx, 1 if paused else 0),
+    )
+    conn.commit()
+    conn.close()
+
+
+def distribution_pause_get(user_id: int, context: str = "agent") -> bool:
+    """Return True if this member's distribution is paused for the context."""
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT paused FROM distribution_pause WHERE user_id = ? AND context = ?",
+        (user_id, ctx),
+    )
+    row = c.fetchone()
+    conn.close()
+    return bool(row["paused"]) if row else False
+
+
+def distribution_global_pause_get() -> bool:
+    """Super-admin global distribution kill switch (governs ALL members)."""
+    return admin_setting_get("distribution_global_pause", "0") == "1"
+
+
+def distribution_global_pause_set(paused: bool) -> None:
+    """Set/clear the super-admin global distribution kill switch."""
+    admin_setting_set("distribution_global_pause", "1" if paused else "0")
+
+
+# =====================================================================
+# BATCH-NOTIFY STATE - The Scheduler (Stage B)
+# Scheduling state for the ONE consolidated "ready for your review" notification
+# per member-chosen batch day. Sending itself stays GATED/DISABLED until Stage H;
+# these helpers only schedule/claim the cadence (future-only + atomic claim) so the
+# notice can never fire every loop.
+# =====================================================================
+def _batch_notify_row(row) -> dict:
+    if row is None:
+        return None
+    def _g(k, default=None):
+        try: return row[k]
+        except Exception: return default
+    return {
+        "userId":    _g("user_id"),
+        "context":   _g("context") or "agent",
+        "nextFire":  _g("next_fire"),
+        "lastFire":  _g("last_fire"),
+        "lastCount": _g("last_count", 0),
+    }
+
+
+def batch_notify_set_next(user_id: int, context: str, next_fire: str) -> None:
+    """Seed/refresh a member's next consolidated batch-notify time (future ISO-UTC)."""
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO batch_notify_state (user_id, context, next_fire, updated_at)
+           VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id, context) DO UPDATE SET
+               next_fire = excluded.next_fire, updated_at = datetime('now')""",
+        (user_id, ctx, next_fire),
+    )
+    conn.commit()
+    conn.close()
+
+
+def batch_notify_get_due(now_iso: str = None) -> list:
+    """Return batch-notify states that are due (next_fire not null and <= now)."""
+    conn = get_conn()
+    c = conn.cursor()
+    now_iso = now_iso or datetime.utcnow().isoformat()
+    c.execute(
+        "SELECT * FROM batch_notify_state WHERE next_fire IS NOT NULL AND next_fire <= ? "
+        "ORDER BY next_fire ASC",
+        (now_iso,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return [_batch_notify_row(r) for r in rows]
+
+
+def batch_notify_claim(user_id: int, context: str, expected_next, new_next: str) -> bool:
+    """
+    Atomically claim a due batch-notify by advancing next_fire to the next batch day,
+    only if next_fire still matches the value read as due. Returns True if THIS caller
+    won. Mirrors schedule_claim_due so the consolidated notice can never double-fire.
+    """
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    if expected_next is None:
+        c.execute(
+            "UPDATE batch_notify_state SET next_fire = ? "
+            "WHERE user_id = ? AND context = ? AND next_fire IS NULL",
+            (new_next, user_id, ctx),
+        )
+    else:
+        c.execute(
+            "UPDATE batch_notify_state SET next_fire = ? "
+            "WHERE user_id = ? AND context = ? AND next_fire = ?",
+            (new_next, user_id, ctx, expected_next),
+        )
+    won = (c.rowcount == 1)
+    conn.commit()
+    conn.close()
+    return won
+
+
+def batch_notify_mark_sent(user_id: int, context: str, count: int, next_fire: str) -> None:
+    """Record a completed batch-notify pass: stamp last_fire/last_count, confirm next_fire."""
+    ctx = "hb_marketing" if context == "hb_marketing" else "agent"
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE batch_notify_state SET last_fire = ?, last_count = ?, next_fire = ?, "
+        "updated_at = datetime('now') WHERE user_id = ? AND context = ?",
+        (datetime.utcnow().isoformat(), int(count or 0), next_fire, user_id, ctx),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ─────────────────────────────────────────────

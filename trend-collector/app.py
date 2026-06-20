@@ -1248,6 +1248,215 @@ def _compute_next_run(frequency: str, time_of_day: str, timezone: str = "America
         return candidate.isoformat()
 
 
+# =====================================================================
+# CONSOLIDATED BATCH NOTIFICATION - The Scheduler (Stage B) - DORMANT/GATED
+# One calm notice per member-chosen batch day summarizing what is ready to review.
+# Replaces the per-item flood model. SENDING IS HARD-GATED below: while
+# BATCH_NOTIFY_ENABLED is False this composes a preview and sends NOTHING. This is
+# a SEPARATE path from the scheduled-generation notification whose emergency stop
+# lives at the _run_scheduled_generation_for_user `return` (~app.py:1599); that stop
+# is untouched. Notification cadence (batch day) never reads from generation or
+# distribution cadence. Not wired into any running loop in Stage B.
+# =====================================================================
+
+# Master gate. Stays False until Stage H, when the cadence is proven in production.
+BATCH_NOTIFY_ENABLED = False
+
+
+def _compute_next_batch_notify(batch_days, time_of_day="08:00", timezone="America/Denver") -> str:
+    """
+    Next UTC time (ISO, naive) the member should receive their consolidated batch
+    notification: the soonest FUTURE weekday in batch_days at time_of_day, in the
+    member's timezone. Always returns a future value (mirrors _compute_next_run's
+    future-only discipline) so the notice cannot fire every loop. batch_days is a
+    list of weekday tokens (Mon..Sun, case-insensitive); empty/invalid defaults to
+    Monday (the calm weekly default for a member who never sets a rhythm).
+    """
+    WD = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    days = set()
+    for d in (batch_days or []):
+        k = str(d).strip().lower()[:3]
+        if k in WD:
+            days.add(WD[k])
+    if not days:
+        days = {0}  # Monday default - the calm weekly cadence
+    try:
+        hour, minute = map(int, str(time_of_day).split(":"))
+    except Exception:
+        hour, minute = 8, 0
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt2
+        import datetime as _dtm
+        tz = ZoneInfo(timezone or "America/Denver")
+        now_local = _dt2.now(tz)
+        for add in range(0, 8):
+            cand = (now_local + timedelta(days=add)).replace(
+                hour=hour, minute=minute, second=0, microsecond=0)
+            if cand.weekday() in days and cand > now_local:
+                return cand.astimezone(_dtm.timezone.utc).replace(tzinfo=None).isoformat()
+        cand = (now_local + timedelta(days=7)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0)
+        return cand.astimezone(_dtm.timezone.utc).replace(tzinfo=None).isoformat()
+    except Exception:
+        now = datetime.utcnow()
+        for add in range(0, 8):
+            cand = (now + timedelta(days=add)).replace(
+                hour=hour, minute=minute, second=0, microsecond=0)
+            if cand.weekday() in days and cand > now:
+                return cand.isoformat()
+        return (now + timedelta(days=7)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0).isoformat()
+
+
+def _compose_batch_notification(user_id: int, context: str = "agent") -> dict:
+    """
+    Build the ONE consolidated summary of everything currently pending review for a
+    member in a context. Returns a payload dict (recipient + plain-English subject/
+    body + item list), or None if the member or pending items are absent. Composition
+    only - no send happens here.
+    """
+    from database import get_conn
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user_row = c.fetchone()
+    c.execute(
+        "SELECT id, niche, content FROM content_library "
+        "WHERE user_id = ? AND context = ? AND status = 'pending' ORDER BY saved_at ASC",
+        (user_id, context),
+    )
+    rows = c.fetchall()
+    conn.close()
+    if not user_row or not rows:
+        return None
+
+    items = []
+    for r in rows:
+        headline = ""
+        try:
+            data = json.loads(r["content"]) if r["content"] else {}
+            if isinstance(data, dict):
+                headline = data.get("headline", "") or ""
+        except Exception:
+            headline = ""
+        items.append({"id": r["id"], "niche": r["niche"], "headline": headline})
+
+    count = len(items)
+    agent_name = (user_row["agent_name"] or "there")
+    to_email = (user_row["notification_email"] or user_row["email"] or "")
+    phone = (user_row["phone"] or "")
+    review_url = os.getenv("FRONTEND_URL", "https://app.homebridgegroup.co") + "/?view=review"
+
+    plural = "s" if count != 1 else ""
+    subject = f"{count} piece{plural} ready for your review"
+    lines = [
+        f"Hi {agent_name},",
+        "",
+        f"You have {count} new piece{plural} ready whenever you'd like to look them over:",
+        "",
+    ]
+    for it in items[:10]:
+        lines.append(f"- {it['headline'] or it['niche']}")
+    if count > 10:
+        lines.append(f"...and {count - 10} more.")
+    lines += ["", f"Review and approve when you're ready: {review_url}"]
+    body = "\n".join(lines)
+
+    return {
+        "user_id": user_id,
+        "context": context,
+        "count": count,
+        "items": items,
+        "to_email": to_email,
+        "phone": phone,
+        "agent_name": agent_name,
+        "subject": subject,
+        "review_url": review_url,
+        "body": body,
+    }
+
+
+def _send_batch_notification(payload: dict) -> dict:
+    """
+    Single send point for the ONE consolidated batch notification per batch day.
+    HARD-GATED by BATCH_NOTIFY_ENABLED (False until Stage H): while disabled this
+    returns a preview and performs NO email or SMS send. The real send below is
+    written but UNREACHABLE while gated. This gate is separate from, and additional
+    to, the emergency return in the scheduled-generation path (~app.py:1599), which
+    remains intact. Defense in depth: two independent gates; no send in Stage B.
+    """
+    if not payload:
+        return {"sent": False, "reason": "nothing_pending"}
+    if not BATCH_NOTIFY_ENABLED:
+        return {
+            "sent": False,
+            "reason": "gated_disabled",
+            "preview": {
+                "to_email": payload.get("to_email", ""),
+                "phone": payload.get("phone", ""),
+                "subject": payload.get("subject", ""),
+                "count": payload.get("count", 0),
+            },
+        }
+    # ---- Stage H ONLY (currently unreachable: BATCH_NOTIFY_ENABLED is False) -------
+    # ONE email + at most ONE SMS per batch day. Consolidated, never per-item.
+    import asyncio
+    from social import send_approval_email, send_approval_sms
+    sent = {"email": False, "sms": False}
+    to_email = payload.get("to_email", "")
+    if to_email:
+        try:
+            asyncio.run(send_approval_email(
+                to_email, payload.get("agent_name", "there"),
+                payload.get("subject", ""), payload.get("review_url", "")))
+            sent["email"] = True
+        except Exception as e:
+            print(f"[BatchNotify] email failed: {e}")
+    phone = payload.get("phone", "")
+    if phone:
+        try:
+            asyncio.run(send_approval_sms(
+                phone, payload.get("agent_name", "there"),
+                payload.get("subject", ""), payload.get("review_url", "")))
+            sent["sms"] = True
+        except Exception as e:
+            print(f"[BatchNotify] sms failed: {e}")
+    return {"sent": True, "channels": sent}
+
+
+def run_batch_notifications_once() -> list:
+    """
+    One pass of consolidated batch notifications. For each member whose batch-notify
+    time is due, atomically claim+advance next_fire to the next batch day (so it can
+    never re-fire within the window), compose the ONE consolidated summary, and hand
+    it to the gated sender. While BATCH_NOTIFY_ENABLED is False the sender sends
+    nothing. NOT wired into any running loop in Stage B; it exists so the path is
+    complete and testable. Returns per-member results (preview while gated).
+    """
+    from database import (batch_notify_get_due, batch_notify_claim,
+                          batch_notify_mark_sent, get_agent_setup)
+    results = []
+    now_iso = datetime.utcnow().isoformat()
+    for st in batch_notify_get_due(now_iso):
+        uid = st["userId"]
+        ctx = st["context"]
+        setup = get_agent_setup(uid) or {}
+        nxt = _compute_next_batch_notify(
+            setup.get("batchDays", ["Mon"]),
+            setup.get("batchTime", "08:00"),
+            setup.get("timezone", "America/Denver"),
+        )
+        if not batch_notify_claim(uid, ctx, st["nextFire"], nxt):
+            continue  # another worker claimed it
+        payload = _compose_batch_notification(uid, ctx)
+        send_result = _send_batch_notification(payload)
+        cnt = payload["count"] if payload else 0
+        batch_notify_mark_sent(uid, ctx, cnt, nxt)
+        results.append({"user_id": uid, "context": ctx, "count": cnt, "result": send_result})
+    return results
+
+
 # Defense-in-depth: only one scheduler loop runs per process even if the
 # startup hook fires more than once. The DB claim below is the real
 # cross-process protection; this just blocks an accidental double-spawn.
