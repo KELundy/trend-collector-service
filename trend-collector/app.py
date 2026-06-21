@@ -4011,6 +4011,202 @@ async def public_agent_authority_page(slug: str, request: Request):
     })
 
 
+# =====================================================================
+# THE GLASS BOX - public indexing-experiment scoreboard (Build A)
+# Permanent, public, SSR, crawlable. Royal lab-ledger design. Reuses the
+# authority-page SSR mechanism (baked HTML + HTMLResponse + X-Robots-Tag).
+# Per-slug data in glassbox_entries; launch renders GLASSBOX_SLUG only. The live
+# CPR figure is this slug's compliance_records count (not a global count).
+# =====================================================================
+GLASSBOX_SLUG = "kevin-lundy-denver"
+# GLASSBOX_DEADLINE is retired in place (Build A): the EU AI Act countdown metric was
+# replaced by the named "Search Engines Indexing" metric. Constant kept, not rendered.
+GLASSBOX_DEADLINE = (2026, 8, 2)
+# Named search engines confirmed indexing (verifiable in webmaster tools). Others
+# (DuckDuckGo, Yahoo) are Bing-powered and covered implicitly. Add verified engines
+# here to extend the metric with no other change.
+GLASSBOX_ENGINES = ["Google", "Bing"]
+
+_GLASSBOX_CSS = """
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --royal:#3B2E8C;--royal-hover:#2F2470;--royal-accent:#B6ACE8;
+  --tint:rgba(59,46,140,.06);--tint-2:rgba(59,46,140,.10);--tint-3:rgba(59,46,140,.18);
+  --paper:#FAF9FC;--white:#FFF;--ink:#1A1A1A;--ink-2:#3A3744;--ink-3:#6B6676;--ink-4:#9A95A6;
+  --ink-royal:#17132B;--border:#E7E3F0;--r:14px;
+}
+html{-webkit-text-size-adjust:100%}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased;line-height:1.5;padding:40px 20px}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:'tnum' 1}
+.box{max-width:720px;margin:0 auto;background:var(--white);border:1px solid var(--tint-3);border-radius:var(--r);box-shadow:0 1px 0 var(--tint),0 18px 50px -28px rgba(23,19,43,.40);overflow:hidden}
+.box-head{background:var(--ink-royal);color:#fff;padding:16px 26px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--royal-accent)}
+.eyebrow b{color:#fff;font-weight:600}
+.wordmark{font-size:13px;font-weight:700;color:#fff;letter-spacing:.01em}
+.wordmark span{color:var(--royal-accent)}
+.pad{padding:30px 26px}
+.thesis{font-size:16px;line-height:1.62;color:var(--ink-2);max-width:56ch}
+.thesis b{color:var(--ink);font-weight:600}
+.specimens{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:26px 0 16px}
+.spec{background:var(--white);padding:20px 18px}
+.spec-n{font-size:38px;font-weight:700;letter-spacing:-.02em;color:var(--royal);line-height:1}
+.spec-l{font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);margin-top:9px}
+.spec-s{font-size:12px;color:var(--ink-4);margin-top:5px}
+.spec-s b{color:var(--royal);font-weight:600}
+.spec-eng{font-size:21px;font-weight:700;letter-spacing:-.01em;color:var(--royal);line-height:1.2}
+.spec-eng .dot{color:var(--ink-4);font-weight:400;margin:0 3px}
+.log-h{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:32px 0 2px;display:flex;align-items:center;gap:12px}
+.log-h::after{content:'';flex:1;height:1px;background:var(--border)}
+.row{padding:14px 0;border-bottom:1px solid var(--border);display:grid;grid-template-columns:62px 64px 1fr;gap:14px;align-items:baseline}
+.row:last-child{border-bottom:none}
+.row-day{font-size:12px;font-weight:700;color:var(--royal);letter-spacing:.02em}
+.row-date{font-size:12px;color:var(--ink-4)}
+.row-data{font-size:14px;color:var(--ink-2)}
+.row-data b{color:var(--ink);font-weight:600}
+.sep{color:var(--ink-4);padding:0 7px}
+.row-note{font-size:12.5px;color:var(--ink-3);margin-top:5px;font-style:italic}
+.empty{padding:22px 0;color:var(--ink-4);font-size:13.5px}
+.foot{padding:18px 26px;border-top:1px solid var(--border);background:var(--paper);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--ink-4)}
+.foot a{color:var(--royal);text-decoration:none;font-weight:600}
+@media(max-width:560px){body{padding:18px 12px}.specimens{grid-template-columns:1fr}.spec-n{font-size:32px}.row{grid-template-columns:52px 56px 1fr;gap:10px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+"""
+
+
+def _build_glassbox_html(slug: str) -> str:
+    import html as _html
+    from datetime import datetime as _dt
+    from database import cpr_count_for_user, glassbox_entries_for_slug
+
+    MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+    def _pretty(d):
+        try:
+            dd = _dt.strptime(d, "%Y-%m-%d")
+            return MONTHS[dd.month - 1] + " " + str(dd.day)
+        except Exception:
+            return d or ""
+
+    user = _get_agent_by_slug(slug)
+    cpr = cpr_count_for_user(user["id"]) if user else 0
+    entries = glassbox_entries_for_slug(slug)
+    latest = entries[0] if entries else None
+    google = (latest["google_indexed"] if latest else 0) or 0
+    bing = (latest["bing_indexed"] if latest else 0) or 0
+    pages = google + bing
+
+    today = _dt.utcnow()
+    engines_html = ' <span class="dot">&middot;</span> '.join(GLASSBOX_ENGINES)
+
+    first_date = None
+    if entries:
+        try:
+            first_date = _dt.strptime(entries[-1]["entry_date"], "%Y-%m-%d")
+        except Exception:
+            first_date = None
+
+    rows_html = ""
+    for e in entries:
+        try:
+            ed = _dt.strptime(e["entry_date"], "%Y-%m-%d")
+            day_n = ((ed - first_date).days + 1) if first_date else 1
+        except Exception:
+            day_n = 1
+        note = _html.escape((e["note"] or "").strip()) if e["note"] else ""
+        note_html = ('<div class="row-note">' + note + '</div>') if note else ""
+        rows_html += (
+            '<div class="row"><div class="row-day num">Day ' + str(day_n) + '</div>'
+            '<div class="row-date num">' + _pretty(e["entry_date"]) + '</div>'
+            '<div><div class="row-data num"><b>' + str(e["cpr_count_snapshot"] or 0) + '</b> records'
+            '<span class="sep">&middot;</span>G <b>' + str(e["google_indexed"] or 0) + '</b>'
+            '<span class="sep">&middot;</span>B <b>' + str(e["bing_indexed"] or 0) + '</b></div>'
+            + note_html + '</div></div>'
+        )
+    if not rows_html:
+        rows_html = '<div class="empty">The log opens with the first entry. Check back soon.</div>'
+
+    pages_sub = ('Google <b>' + str(google) + '</b> &middot; Bing <b>' + str(bing) + '</b>') if latest else 'awaiting first reading'
+    updated = _pretty(latest["entry_date"]) if latest else _pretty(today.strftime("%Y-%m-%d"))
+
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Glass Box - AutoMates</title>
+<meta name="description" content="A public experiment: AI-written, compliance-reviewed real estate content, and an open record of whether search engines index and trust it.">
+<meta property="og:title" content="The Glass Box - AutoMates">
+<meta property="og:description" content="An open record of whether AI-written, compliance-reviewed real estate content gets indexed and trusted in search.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>{_GLASSBOX_CSS}</style>
+</head><body>
+<main class="box">
+  <div class="box-head">
+    <div class="eyebrow">The Glass Box <b>/ a public experiment</b></div>
+    <div class="wordmark">Auto<span>Mates</span></div>
+  </div>
+  <div class="pad">
+    <p class="thesis">We publish AI-written, <b>compliance-reviewed</b> real estate content and document, in the open, whether search engines index and trust it. These numbers are live, pulled straight from the record. Nothing here is hidden.</p>
+    <div class="specimens">
+      <div class="spec"><div class="spec-n num">{cpr}</div><div class="spec-l">CPR Records</div><div class="spec-s">live, on the registry</div></div>
+      <div class="spec"><div class="spec-n num">{pages}</div><div class="spec-l">Pages Indexed</div><div class="spec-s">{pages_sub}</div></div>
+      <div class="spec"><div class="spec-eng">{engines_html}</div><div class="spec-l">Search Engines Indexing</div><div class="spec-s">verified in webmaster tools</div></div>
+    </div>
+    <div class="log-h">Lab Notebook</div>
+    {rows_html}
+  </div>
+  <div class="foot">
+    <div>AutoMates <span class="sep">&middot;</span> market authority for real estate professionals</div>
+    <div>Updated {updated} <span class="sep">&middot;</span> <a href="https://homebridgegroup.co">homebridgegroup.co</a></div>
+  </div>
+</main>
+</body></html>"""
+    return html
+
+
+@app.get("/glassbox")
+async def glassbox_page():
+    """Public SSR Glass Box scoreboard. Crawlable; renders GLASSBOX_SLUG."""
+    from fastapi.responses import HTMLResponse as _HTMLResponse
+    html = _build_glassbox_html(GLASSBOX_SLUG)
+    return _HTMLResponse(content=html, status_code=200, headers={
+        "Cache-Control": "public, max-age=300",
+        "X-Robots-Tag": "index, follow",
+    })
+
+
+@app.post("/admin/glassbox")
+async def admin_glassbox_log(req: dict, current_user: dict = Depends(get_current_user)):
+    """Super-admin only. Log today's indexed counts; snapshot the live CPR count."""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(403, "Super admin only.")
+    from datetime import datetime as _dtg
+    from database import cpr_count_for_user, glassbox_upsert_entry
+    user = _get_agent_by_slug(GLASSBOX_SLUG)
+    if not user:
+        raise HTTPException(404, "Glass Box slug not found.")
+    try:
+        google = int(req.get("googleIndexed") or 0)
+        bing = int(req.get("bingIndexed") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Google and Bing counts must be whole numbers.")
+    note = str(req.get("note") or "").strip()[:280]
+    cpr = cpr_count_for_user(user["id"])
+    entry_date = _dtg.utcnow().strftime("%Y-%m-%d")
+    entry = glassbox_upsert_entry(GLASSBOX_SLUG, entry_date, google, bing, cpr, note)
+    return {"ok": True, "entry": entry}
+
+
+@app.get("/admin/glassbox/recent")
+async def admin_glassbox_recent(current_user: dict = Depends(get_current_user)):
+    """Super-admin only. Recent Glass Box entries for the operator form."""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(403, "Super admin only.")
+    from database import glassbox_entries_for_slug
+    return {"slug": GLASSBOX_SLUG, "entries": glassbox_entries_for_slug(GLASSBOX_SLUG, limit=7)}
+
+
 @app.get("/public/agent/{slug}/posts/{post_slug}/page")
 async def public_agent_post_page(slug: str, post_slug: str):
     """

@@ -372,6 +372,25 @@ def init_db():
         )
     """)
 
+    # Glass Box experiment log - per-subdomain daily indexing entries (Build A).
+    # Keyed per slug so a future indexing API can populate every agent's numbers
+    # into this SAME table with no rebuild; the manual operator form writes here
+    # too, so automation supersedes it by writing to the same place. UNIQUE(slug,
+    # entry_date) means a same-day re-submit corrects the row, never duplicates.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS glassbox_entries (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug               TEXT NOT NULL,
+            entry_date         TEXT NOT NULL,
+            google_indexed     INTEGER DEFAULT 0,
+            bing_indexed       INTEGER DEFAULT 0,
+            cpr_count_snapshot INTEGER DEFAULT 0,
+            note               TEXT DEFAULT '',
+            created_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE(slug, entry_date)
+        )
+    """)
+
     # Local signals — hyper-local market intelligence per agent
     c.execute("""
         CREATE TABLE IF NOT EXISTS local_signals (
@@ -2916,6 +2935,72 @@ def batch_notify_mark_sent(user_id: int, context: str, count: int, next_fire: st
     )
     conn.commit()
     conn.close()
+
+
+# =====================================================================
+# GLASS BOX - public indexing-experiment log (Build A)
+# Per-slug daily entries. The live CPR count comes from compliance_records
+# (same source the authority page uses), not a global count.
+# =====================================================================
+def cpr_count_for_user(user_id: int) -> int:
+    """Permanent CPR count for one user (compliance_records). Survives post
+    deletion/archival - the same source the authority page reports."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) AS n FROM compliance_records WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return (row["n"] if row else 0) or 0
+
+
+def glassbox_upsert_entry(slug: str, entry_date: str, google_indexed: int,
+                          bing_indexed: int, cpr_count_snapshot: int, note: str = "") -> dict:
+    """Insert or update one day's Glass Box entry for a slug (UNIQUE(slug, entry_date))."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO glassbox_entries
+            (slug, entry_date, google_indexed, bing_indexed, cpr_count_snapshot, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug, entry_date) DO UPDATE SET
+            google_indexed     = excluded.google_indexed,
+            bing_indexed       = excluded.bing_indexed,
+            cpr_count_snapshot = excluded.cpr_count_snapshot,
+            note               = excluded.note
+    """, (slug, entry_date, int(google_indexed or 0), int(bing_indexed or 0),
+          int(cpr_count_snapshot or 0), note or ""))
+    conn.commit()
+    c.execute("SELECT * FROM glassbox_entries WHERE slug = ? AND entry_date = ?",
+              (slug, entry_date))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def glassbox_entries_for_slug(slug: str, limit: int = None) -> list:
+    """All Glass Box entries for a slug, newest first."""
+    conn = get_conn()
+    c = conn.cursor()
+    if limit:
+        c.execute("SELECT * FROM glassbox_entries WHERE slug = ? ORDER BY entry_date DESC LIMIT ?",
+                  (slug, int(limit)))
+    else:
+        c.execute("SELECT * FROM glassbox_entries WHERE slug = ? ORDER BY entry_date DESC",
+                  (slug,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def glassbox_latest_for_slug(slug: str) -> dict:
+    """Most recent Glass Box entry for a slug, or None."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM glassbox_entries WHERE slug = ? ORDER BY entry_date DESC LIMIT 1",
+              (slug,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 # ─────────────────────────────────────────────
