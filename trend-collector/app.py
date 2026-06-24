@@ -3154,7 +3154,7 @@ async def public_agent_post(slug: str, post_slug: str):
     c.execute("""
         SELECT id, niche, content, cir_id, approved_at, status
         FROM content_library
-        WHERE user_id = ? AND status IN ('approved','published')
+        WHERE user_id = ? AND status IN ('approved','published','archived')
         ORDER BY approved_at DESC
     """, (user["id"],))
     items = [dict(r) for r in c.fetchall()]
@@ -4227,7 +4227,7 @@ async def public_agent_post_page(slug: str, post_slug: str):
     c.execute("""
         SELECT id, niche, content, cir_id, approved_at, status
         FROM content_library
-        WHERE user_id = ? AND status IN ('approved','published')
+        WHERE user_id = ? AND status IN ('approved','published','archived')
         ORDER BY approved_at DESC
     """, (user["id"],))
     items = [dict(r) for r in c.fetchall()]
@@ -4607,13 +4607,21 @@ async def slug_subdomain_router(request: Request, call_next):
             post_match = _re_mw.match(r"^/posts/([^/]+)$", path)
             if post_match:
                 post_slug_val = post_match.group(1)
-                return await public_agent_post_page(subdomain, post_slug_val)
+                try:
+                    return await public_agent_post_page(subdomain, post_slug_val)
+                except HTTPException as _post_exc:
+                    from fastapi.responses import PlainTextResponse as _PTpost
+                    return _PTpost(str(_post_exc.detail), status_code=_post_exc.status_code)
 
             # /verify/{cir_id} — server-rendered verify page
             verify_match = _re_mw.match(r"^/verify/([^/]+)$", path)
             if verify_match:
                 cir_val = verify_match.group(1)
-                return await public_verify_cir_page(cir_val)
+                try:
+                    return await public_verify_cir_page(cir_val)
+                except HTTPException as _verify_exc:
+                    from fastapi.responses import PlainTextResponse as _PTverify
+                    return _PTverify(str(_verify_exc.detail), status_code=_verify_exc.status_code)
 
             # /{key}.txt — IndexNow key file (Build N). Served on every agent
             # subdomain so IndexNow can verify ownership of {slug}.homebridgegroup.co.
@@ -4623,7 +4631,11 @@ async def slug_subdomain_router(request: Request, call_next):
 
             # /sitemap.xml — per-agent sitemap
             if path == "/sitemap.xml":
-                return await public_agent_sitemap(subdomain)
+                try:
+                    return await public_agent_sitemap(subdomain)
+                except HTTPException as _sitemap_exc:
+                    from fastapi.responses import PlainTextResponse as _PTsitemap
+                    return _PTsitemap(str(_sitemap_exc.detail), status_code=_sitemap_exc.status_code)
 
             # /robots.txt — already handled globally, pass through
             if path == "/robots.txt":
@@ -4631,7 +4643,11 @@ async def slug_subdomain_router(request: Request, call_next):
 
             # Root and anything else — serve the authority page
             if path == "/" or path == "":
-                return await public_agent_authority_page(subdomain, request)
+                try:
+                    return await public_agent_authority_page(subdomain, request)
+                except HTTPException as _auth_exc:
+                    from fastapi.responses import PlainTextResponse as _PTauth
+                    return _PTauth(str(_auth_exc.detail), status_code=_auth_exc.status_code)
 
     # Not a slug subdomain request — proceed normally
     return await call_next(request)
