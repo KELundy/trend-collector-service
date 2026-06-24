@@ -3028,6 +3028,7 @@ async def public_agent_profile(slug: str):
         "designations":  setup.get("designations",[]),
         "service_areas": setup.get("serviceAreas",[]),
         "website":       setup.get("websiteUrl",""),
+        "profile_links": setup.get("profileLinks",[]),
         "cta_url":       setup.get("ctaUrl",""),
         "cta_label":     setup.get("ctaLabel",""),
         "state":         setup.get("state",""),
@@ -3554,6 +3555,23 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
         schema["areaServed"] = [{"@type": "City", "name": a} for a in areas]
     if d.get("market"):
         schema["homeLocation"] = {"@type": "Place", "name": d["market"]}
+    # sameAs: external profile URLs (LinkedIn, brokerage profile, personal site).
+    # Defensive: accept dict items with a "url" key or plain strings; keep only
+    # already-absolute http(s) URLs; skip the lone </script> JSON-LD injection
+    # vector; dedupe while preserving order. Scheme enforcement is added on the
+    # Settings save side in Step 2; here we emit only valid absolute URLs.
+    same_as = []
+    for _link in d.get("profile_links", []):
+        _url = (_link.get("url", "") if isinstance(_link, dict) else _link) or ""
+        _url = str(_url).strip()
+        if not (_url.startswith("https://") or _url.startswith("http://")):
+            continue
+        if "</" in _url:
+            continue
+        if _url not in same_as:
+            same_as.append(_url)
+    if same_as:
+        schema["sameAs"] = same_as
     creds = []
     if desigs:
         creds = [{"@type": "EducationalOccupationalCredential", "name": x} for x in desigs]
