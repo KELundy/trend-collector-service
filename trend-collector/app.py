@@ -3366,9 +3366,9 @@ _AUTHORITY_CSS = """
 :root{
   --bg:#F8F7F5;--white:#FFF;--ink:#1A1A1A;--ink-2:#2E2E2E;
   --ink-3:#4A4540;--ink-4:#7A7470;--border:#E8E4DE;
-  --gold:#A67C2E;--gold-on-dark:#C8963C;--gold-dim:rgba(166,124,46,.10);--gold-mid:rgba(166,124,46,.25);
+  --gold:#3B2E8C;--gold-on-dark:#B6ACE8;--gold-dim:rgba(59,46,140,.10);--gold-mid:rgba(59,46,140,.25);
   --green:#1A7A4A;--green-dim:rgba(26,122,74,.08);--green-mid:rgba(26,122,74,.18);
-  --amber:#b45309;--nav:#101620;
+  --amber:#b45309;--nav:#241C57;
   --shadow:0 2px 16px rgba(0,0,0,.06);--r:12px;
 }
 html{scroll-behavior:smooth}
@@ -3377,14 +3377,14 @@ a{text-decoration:none;color:inherit}
 .top-bar{background:var(--nav);height:52px;padding:0 40px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
 .tb-logo{font-size:15px;font-weight:700;color:#fff;letter-spacing:.01em}
 .tb-logo span{color:var(--gold-on-dark)}
-.tb-cta{font-size:12px;font-weight:600;color:var(--gold-on-dark);border:1px solid rgba(200,150,60,.35);padding:6px 16px;border-radius:999px;transition:all .2s}
+.tb-cta{font-size:12px;font-weight:600;color:var(--gold-on-dark);border:1px solid rgba(182,172,232,.35);padding:6px 16px;border-radius:999px;transition:all .2s}
 .tb-cta:hover{background:var(--gold-on-dark);color:#fff}
 @media(max-width:600px){.top-bar{padding:0 20px}}
 .hero{background:var(--nav);padding:72px 40px 64px}
 .hero-inner{max-width:960px;margin:0 auto;display:grid;grid-template-columns:1fr auto;gap:48px;align-items:start}
 @media(max-width:680px){.hero-inner{grid-template-columns:1fr}.hero-badge-col{display:none}.hero{padding:52px 20px 44px}}
-.hero-eyebrow{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:rgba(200,150,60,.9);margin-bottom:18px;display:flex;align-items:center;gap:10px}
-.hero-eyebrow::before{content:'';width:24px;height:1px;background:rgba(200,150,60,.6)}
+.hero-eyebrow{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:rgba(182,172,232,.9);margin-bottom:18px;display:flex;align-items:center;gap:10px}
+.hero-eyebrow::before{content:'';width:24px;height:1px;background:rgba(182,172,232,.6)}
 .hero-name{font-family:'Outfit','DM Sans',sans-serif;font-size:clamp(42px,6vw,72px);font-weight:700;line-height:.95;letter-spacing:-.025em;color:#fff;margin-bottom:14px}
 .hero-role{font-size:16px;color:rgba(255,255,255,.45);margin-bottom:6px;font-weight:300}
 .hero-market{font-size:13px;color:rgba(255,255,255,.3);margin-bottom:22px}
@@ -3453,7 +3453,7 @@ a{text-decoration:none;color:inherit}
 .tf-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.35);margin-bottom:5px}
 .tf-headline{font-family:'Outfit','DM Sans',sans-serif;font-size:20px;color:#fff;margin-bottom:4px}
 .tf-sub{font-size:13px;color:rgba(255,255,255,.45);line-height:1.5}
-.tf-cta{font-size:13px;font-weight:600;color:var(--gold);border:1px solid rgba(200,150,60,.4);padding:10px 22px;border-radius:999px;white-space:nowrap}
+.tf-cta{font-size:13px;font-weight:600;color:var(--gold);border:1px solid rgba(182,172,232,.4);padding:10px 22px;border-radius:999px;white-space:nowrap}
 .tf-cta:hover{background:var(--gold);color:#fff}
 @media(max-width:600px){.trust-footer{padding:28px 24px;flex-direction:column}}
 /* Verify page styles */
@@ -3786,7 +3786,7 @@ def _build_authority_page_html(d: dict, slug: str) -> str:
     # unwatermarked — a real, viewable demo page.
     _robots_content = "noindex,nofollow" if d.get("is_demo") else "index,follow"
     _sample_banner = (
-        '<div style="position:fixed;top:0;left:0;right:0;z-index:99999;background:#A67C2E;color:#fff;'
+        '<div style="position:fixed;top:0;left:0;right:0;z-index:99999;background:#3B2E8C;color:#fff;'
         'text-align:center;font-size:12px;font-weight:700;letter-spacing:.08em;padding:6px 12px;">'
         'SAMPLE &mdash; PREVIEW ONLY &middot; Illustrative AutoMates authority page</div>'
         if d.get("is_ghost") else ""
