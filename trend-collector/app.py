@@ -4091,6 +4091,198 @@ body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--pap
 """
 
 
+def registry_agents() -> list:
+    """
+    Build the public registry list: one dict per qualifying agent.
+    Qualifying = role 'agent', active, has a live slug, and at least one
+    permanent CPR (compliance_records) on file. The CPR count comes from
+    cpr_count_for_user (the same source the authority page reports); market
+    and niches come from the agent_setup JSON blob. Sorted by CPR count
+    descending, then name ascending as a tiebreaker.
+    """
+    from database import get_conn, cpr_count_for_user
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT u.id, u.agent_name, u.agent_slug
+           FROM users u
+           WHERE u.role = 'agent'
+             AND u.is_active = 1
+             AND u.agent_slug IS NOT NULL
+             AND u.agent_slug != ''
+             AND EXISTS (SELECT 1 FROM compliance_records cr WHERE cr.user_id = u.id)"""
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    agents = []
+    for r in rows:
+        uid = r["id"]
+        try:
+            setup = get_agent_setup(uid) or {}
+        except Exception:
+            # Skip any agent whose setup load fails - never break the page.
+            continue
+        agents.append({
+            "name":   r["agent_name"] or "",
+            "slug":   r["agent_slug"] or "",
+            "cpr":    cpr_count_for_user(uid),
+            "market": setup.get("market", ""),
+            "niches": setup.get("primaryNiches", []),
+        })
+
+    agents.sort(key=lambda a: (-a["cpr"], a["name"].lower()))
+    return agents
+
+
+def _build_registry_html(agents: list) -> str:
+    """
+    Server-side rendered public registry page. Lists every qualifying agent
+    (from registry_agents()) with name, market, specialties, and CPR count,
+    each linking to their authority page. Fully baked HTML - no client JS is
+    needed for content, so crawlers see everything. Royal palette, inline CSS.
+    """
+    import json as _json_reg
+
+    # ---- Agent cards (fully server-rendered) ----
+    cards = ""
+    for a in agents:
+        name   = _esc_html(a.get("name", ""))
+        market = _esc_html(a.get("market", ""))
+        slug   = _esc_html(a.get("slug", ""))
+        cpr    = int(a.get("cpr", 0) or 0)
+        url    = f"https://{slug}.homebridgegroup.co"
+
+        niches = [n for n in (a.get("niches") or []) if n]
+        pills_html = ""
+        if niches:
+            pill_spans = "".join(
+                f'<span class="pill">{_esc_html(n)}</span>' for n in niches[:6]
+            )
+            pills_html = f'<div class="pills">{pill_spans}</div>'
+
+        market_html = f'<div class="card-market">{market}</div>' if market else ""
+        cpr_word = "record on file" if cpr == 1 else "records on file"
+
+        cards += f"""
+      <a class="card" href="{url}">
+        <div class="card-main">
+          <div class="card-name">{name}</div>
+          {market_html}
+          {pills_html}
+        </div>
+        <div class="card-cpr"><span class="cpr-n num">{cpr}</span><span class="cpr-l">{cpr_word}</span></div>
+      </a>"""
+
+    if agents:
+        body_inner = f'<div class="cards">{cards}</div>'
+    else:
+        body_inner = (
+            '<div class="empty">The registry is growing. Verified professionals '
+            'will appear here as they put their work on record.</div>'
+        )
+
+    # ---- JSON-LD: CollectionPage + ItemList of RealEstateAgent ----
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": "The Certified Provenance Registry",
+        "description": "The public record of licensed real estate professionals who put their work on record, reviewed and verified before publication.",
+        "url": "https://api.homebridgegroup.co/registry",
+    }
+    if agents:
+        items = []
+        for i, a in enumerate(agents):
+            slug = a.get("slug", "")
+            agent_obj = {
+                "@type": "RealEstateAgent",
+                "name": a.get("name", ""),
+                "url": f"https://{slug}.homebridgegroup.co",
+            }
+            if a.get("market"):
+                agent_obj["areaServed"] = {"@type": "Place", "name": a["market"]}
+            niches = [n for n in (a.get("niches") or []) if n]
+            if niches:
+                agent_obj["knowsAbout"] = niches
+            items.append({"@type": "ListItem", "position": i + 1, "item": agent_obj})
+        schema["mainEntity"] = {
+            "@type": "ItemList",
+            "numberOfItems": len(items),
+            "itemListElement": items,
+        }
+    schema_json = _json_reg.dumps(schema, ensure_ascii=False, indent=2)
+    # Defensive: keep a stray "</script>" in agent data from breaking out of the
+    # JSON-LD block. "<\/" is a valid JSON escape for "/" and renders identically.
+    schema_json = schema_json.replace("</", "<\\/")
+
+    # ---- Inline CSS (plain string so literal braces need no f-string escaping) ----
+    css = """
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --royal:#3B2E8C;--royal-hover:#2F2470;--royal-deep:#241C57;--royal-accent:#B6ACE8;
+  --tint:rgba(59,46,140,.06);--tint-2:rgba(59,46,140,.10);--tint-3:rgba(59,46,140,.18);
+  --paper:#FAF9FC;--white:#FFF;--ink:#1A1A1A;--ink-2:#3A3744;--ink-3:#6B6676;--ink-4:#9A95A6;
+  --border:#E7E3F0;--r:14px;
+}
+html{-webkit-text-size-adjust:100%}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased;line-height:1.5;padding:40px 20px}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:'tnum' 1}
+.wrap{max-width:760px;margin:0 auto}
+.head{text-align:center;margin-bottom:34px}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--royal);margin-bottom:12px}
+.title{font-size:30px;font-weight:700;color:var(--royal-deep);letter-spacing:-.01em;line-height:1.2}
+.subtitle{font-size:15px;color:var(--ink-3);margin-top:12px;max-width:560px;margin-left:auto;margin-right:auto}
+.cards{display:flex;flex-direction:column;gap:12px}
+.card{display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--white);border:1px solid var(--tint-3);border-radius:var(--r);padding:18px 22px;text-decoration:none;color:inherit;box-shadow:0 1px 0 var(--tint);transition:border-color .15s,box-shadow .15s,transform .15s}
+.card:hover{border-color:var(--royal-accent);box-shadow:0 10px 30px -18px rgba(36,28,87,.5);transform:translateY(-1px)}
+.card-main{min-width:0}
+.card-name{font-size:18px;font-weight:700;color:var(--royal-deep);letter-spacing:-.01em}
+.card-market{font-size:13px;color:var(--ink-3);margin-top:2px}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pill{font-size:11px;font-weight:600;color:var(--royal);background:var(--tint-2);border:1px solid var(--tint-3);border-radius:999px;padding:3px 10px}
+.card-cpr{flex-shrink:0;text-align:center;display:flex;flex-direction:column;align-items:center;background:var(--tint);border:1px solid var(--tint-3);border-radius:12px;padding:12px 16px;min-width:96px}
+.cpr-n{font-size:26px;font-weight:700;color:var(--royal);line-height:1}
+.cpr-l{font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-4);margin-top:5px}
+.empty{text-align:center;background:var(--white);border:1px dashed var(--tint-3);border-radius:var(--r);padding:40px 24px;color:var(--ink-3);font-size:15px}
+.foot{text-align:center;margin-top:34px;font-size:12px;color:var(--ink-4)}
+.foot a{color:var(--royal);text-decoration:none;font-weight:600}
+@media(max-width:560px){
+  body{padding:24px 14px}
+  .title{font-size:24px}
+  .card{flex-direction:column;align-items:stretch}
+  .card-cpr{flex-direction:row;justify-content:center;gap:8px;min-width:0;padding:8px 14px}
+  .cpr-n{font-size:20px}
+  .cpr-l{margin-top:0}
+}
+"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>The Certified Provenance Registry | AutoMates</title>
+<meta name="description" content="The public record of licensed real estate professionals who put their work on record, reviewed and verified before publication.">
+<link rel="canonical" href="https://api.homebridgegroup.co/registry">
+<meta name="robots" content="index,follow">
+<style>{css}</style>
+<script type="application/ld+json">{schema_json}</script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">AutoMates</div>
+      <h1 class="title">The Certified Provenance Registry</h1>
+      <p class="subtitle">The public record of licensed real estate professionals who put their work on record, reviewed and verified before publication.</p>
+    </div>
+    {body_inner}
+    <div class="foot"><a href="https://homebridgegroup.co">What is AutoMates? &rarr;</a></div>
+  </div>
+</body>
+</html>"""
+    return html
+
+
 def _build_glassbox_html(slug: str) -> str:
     import html as _html
     from datetime import datetime as _dt
@@ -4192,6 +4384,30 @@ async def glassbox_page():
         "Cache-Control": "public, max-age=300",
         "X-Robots-Tag": "index, follow",
     })
+
+
+@app.get("/registry")
+async def registry_page():
+    """Public SSR Certified Provenance Registry. Crawlable; lists qualifying agents."""
+    from fastapi.responses import HTMLResponse as _HTMLResponse
+    try:
+        agents = registry_agents()
+        html = _build_registry_html(agents)
+        return _HTMLResponse(content=html, status_code=200, headers={
+            "Cache-Control": "public, max-age=300",
+            "X-Robots-Tag": "index, follow",
+        })
+    except Exception as _reg_exc:
+        print(f"[Registry] render error: {_reg_exc}")
+        _err_html = (
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+            "<title>Registry temporarily unavailable</title></head>"
+            "<body><p>The registry is temporarily unavailable. "
+            "Please try again shortly.</p></body></html>"
+        )
+        return _HTMLResponse(content=_err_html, status_code=500, headers={
+            "Cache-Control": "no-store",
+        })
 
 
 @app.post("/admin/glassbox")
