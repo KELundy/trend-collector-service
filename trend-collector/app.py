@@ -5134,7 +5134,7 @@ async def list_all_users(current_user: dict = Depends(get_current_user)):
     c    = conn.cursor()
     c.execute("""
         SELECT id, email, agent_name, brokerage, role, is_licensed,
-               staff_type, plan, sub_status, created_at, is_active
+               staff_type, plan, sub_status, created_at, is_active, is_demo
         FROM users
         ORDER BY created_at DESC
     """)
@@ -5154,6 +5154,7 @@ async def list_all_users(current_user: dict = Depends(get_current_user)):
             "is_licensed": bool(r.get("is_licensed", 1)),
             "staff_type":  r.get("staff_type"),
             "is_active":   bool(r.get("is_active", 1)),
+            "is_demo":     bool(r.get("is_demo", 0)),
             "created_at":  r["created_at"],
         }
         if is_super:
@@ -5881,6 +5882,32 @@ async def set_user_active(request: Request, current_user: dict = Depends(get_cur
     conn.commit()
     conn.close()
     return {"ok": True, "user_id": target_id, "is_active": is_active}
+
+
+@app.post("/admin/set-demo")
+async def set_user_demo(request: Request, current_user: dict = Depends(get_current_user)):
+    """Super admin only — mark or unmark any user as a Sample/Demo account (is_demo)."""
+    _require_super_admin(current_user)
+    body      = await request.json()
+    target_id = int(body.get("user_id", 0))
+    is_demo   = 1 if body.get("is_demo") else 0
+    if not target_id:
+        raise HTTPException(400, "user_id required.")
+    from database import get_conn as _gc
+    conn = _gc()
+    c    = conn.cursor()
+    c.execute("SELECT role FROM users WHERE id = ?", (target_id,))
+    row  = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "User not found.")
+    if target_id == current_user["id"] or row["role"] == "super_admin":
+        conn.close()
+        raise HTTPException(400, "Cannot mark a super_admin or your own account as a sample.")
+    c.execute("UPDATE users SET is_demo = ? WHERE id = ?", (is_demo, target_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "user_id": target_id, "is_demo": is_demo}
 
 
 @app.post("/admin/delete-user")
