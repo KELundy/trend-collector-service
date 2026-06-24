@@ -4106,10 +4106,11 @@ def registry_agents() -> list:
     c.execute(
         """SELECT u.id, u.agent_name, u.agent_slug
            FROM users u
-           WHERE u.role = 'agent'
-             AND u.is_active = 1
+           WHERE u.is_active = 1
              AND u.agent_slug IS NOT NULL
              AND u.agent_slug != ''
+             AND u.is_demo = 0
+             AND u.ghost_expires_at IS NULL
              AND EXISTS (SELECT 1 FROM compliance_records cr WHERE cr.user_id = u.id)"""
     )
     rows = c.fetchall()
