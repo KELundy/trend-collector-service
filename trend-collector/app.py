@@ -833,6 +833,7 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
             unfair_advantage     = setup.get("unfairAdvantage", ""),
             signature_perspective= setup.get("signaturePerspective", ""),
             not_for_client       = setup.get("notForClient", ""),
+            user_id              = user_id,
         )
 
         content_to_save = dict(result["content"])
@@ -1564,6 +1565,7 @@ def _run_scheduled_generation(sched: dict):
             words_prefer= setup.get("wordsPrefer", ""),
             mls_names   = setup.get("mlsNames", []),
             state       = setup.get("state", ""),
+            user_id     = sched["user_id"],
         )
 
         # ── FIX: strip non-serializable fields before saving ──────────────
@@ -1761,6 +1763,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 unfair_advantage     = setup.get("unfairAdvantage", ""),
                 signature_perspective= setup.get("signaturePerspective", ""),
                 not_for_client       = setup.get("notForClient", ""),
+                user_id              = user_id,
             )
 
             content_to_save = dict(result["content"])
@@ -6262,6 +6265,7 @@ async def regenerate_content(item_id: int, current_user: dict = Depends(get_curr
             unfair_advantage     = setup.get("unfairAdvantage", ""),
             signature_perspective= setup.get("signaturePerspective", ""),
             not_for_client       = setup.get("notForClient", ""),
+            user_id              = uid,
         )
     except Exception as e:
         raise HTTPException(502, f"Regeneration failed: {str(e)}")

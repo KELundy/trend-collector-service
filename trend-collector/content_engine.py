@@ -3885,6 +3885,7 @@ def generate_content_core(
     cta_type="", cta_url="", cta_label="",
     mls_data="", origin_story="", unfair_advantage="",
     signature_perspective="", not_for_client="", signoff="",
+    user_id=None,
 ):
     profile = AgentProfileModel(
         agentName=agent_name, brokerage=brokerage, market=market,
@@ -3914,7 +3915,7 @@ def generate_content_core(
     )
     client = _get_anthropic_client()
     mode   = (content_mode or "agent").lower()
-    prompt = _build_b2b_content_prompt(payload) if mode == "b2b" else _build_content_prompt(payload)
+    prompt = _build_b2b_content_prompt(payload, user_id=user_id) if mode == "b2b" else _build_content_prompt(payload, user_id=user_id)
     response = client.messages.create(
         model="claude-sonnet-4-6", max_tokens=1800,
         messages=[{"role": "user", "content": prompt}],
