@@ -1032,6 +1032,7 @@ def migrate_content_library_columns():
         # member_answer value; there is no manual/admin/backfill path.
         ("origin_type",           "TEXT DEFAULT 'engine_draft'"),
         ("answer_ref",            "INTEGER DEFAULT NULL"),
+        ("length",                "TEXT DEFAULT 'medium'"),
     ]
     for col, coltype in columns:
         try:
@@ -2179,7 +2180,8 @@ def library_save(user_id: int, niche: str, content: dict,
                  compliance: dict, source: str = "manual",
                  context: str = "agent",
                  origin_type: str = "engine_draft",
-                 answer_ref: int = None) -> dict:
+                 answer_ref: int = None,
+                 length: str = "medium") -> dict:
     conn = get_conn()
     c = conn.cursor()
     if context not in ("agent", "hb_marketing"):
@@ -2203,8 +2205,8 @@ def library_save(user_id: int, niche: str, content: dict,
     c.execute("""
         INSERT INTO content_library
             (user_id, niche, status, content, draft_content, compliance, source, saved_at, context,
-             origin_type, answer_ref)
-        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+             origin_type, answer_ref, length)
+        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         user_id, niche,
         content_json,
@@ -2214,6 +2216,7 @@ def library_save(user_id: int, niche: str, content: dict,
         datetime.utcnow().isoformat(),
         context,
         origin_type, answer_ref,
+        length if length else "medium",
     ))
     conn.commit()
     item_id = c.lastrowid

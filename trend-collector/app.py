@@ -333,6 +333,12 @@ def r2_backup_worker():
         _time.sleep(BACKUP_INTERVAL)
 
 
+def _coerce_length(val) -> str:
+    """Normalize any length input to a recognized value. Unknown/None/"Standard" -> "medium"."""
+    v = str(val or "").lower().strip()
+    return v if v in ("short", "medium", "long") else "medium"
+
+
 def _run_r2_backup(db_path, bucket, endpoint_url, access_key, secret_key, retain_days):
     """
     Execute one backup cycle:
@@ -479,9 +485,12 @@ async def save_to_library(payload: dict, current_user=Depends(get_current_user))
     content    = payload.get("content", {})
     compliance = payload.get("compliance", {})
     source     = payload.get("source", "manual")
+    # length comes from payload or defaults to medium; coerce unrecognized values
+    _length = str(payload.get("length", "medium")).lower().strip()
+    if _length not in ("short", "medium", "long"): _length = "medium"
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
-    item = library_save(user_id=current_user["id"], niche=niche, content=content, compliance=compliance, source=source, context=_ctx)
+    item = library_save(user_id=current_user["id"], niche=niche, content=content, compliance=compliance, source=source, context=_ctx, length=_length)
     return {"success": True, "item": item}
 
 
@@ -851,6 +860,7 @@ async def generate_from_signal(body: GenerateFromSignalRequest, current_user=Dep
             content    = content_to_save,
             compliance = compliance_to_save,
             source     = "signal",
+            length     = _coerce_length(setup.get("length")),
         )
 
         # Record generation against backstop counter (Opus N9 fix)
@@ -1589,6 +1599,7 @@ def _run_scheduled_generation(sched: dict):
             content    = content_to_save,
             compliance = compliance_to_save,
             source     = "scheduled",
+            length     = _coerce_length(setup.get("length")),
         )
         print(f"[Scheduler] ✓ Saved scheduled content item {saved_item.get('id')} for user {user_id} / '{niche}'")
 
@@ -1783,6 +1794,7 @@ def _run_scheduled_generation_for_user(user_id: int, scheds: list):
                 compliance = compliance_to_save,
                 source     = _sched_source,
                 context    = _sched_context,
+                length     = _coerce_length(setup.get("length")),
             )
             item_id  = saved_item.get("id")
             headline = content_to_save.get("headline", "Your scheduled content is ready")
@@ -6201,7 +6213,7 @@ async def regenerate_content(item_id: int, current_user: dict = Depends(get_curr
     # Read record + current count (server-authoritative)
     conn = _gc()
     row = conn.execute(
-        "SELECT niche, status, content_regen_count FROM content_library WHERE id = ? AND user_id = ?",
+        "SELECT niche, status, content_regen_count, length FROM content_library WHERE id = ? AND user_id = ?",
         (item_id, uid)
     ).fetchone()
     conn.close()
@@ -6249,7 +6261,7 @@ async def regenerate_content(item_id: int, current_user: dict = Depends(get_curr
             situation            = situation,
             persona              = setup.get("defaultPersona") or "homeowners",
             tone                 = setup.get("tone", "Professional"),
-            length               = setup.get("length", "Standard"),
+            length               = _coerce_length(row["length"]),
             trends               = setup.get("trends", []),
             brand_voice          = setup.get("brandVoice", ""),
             short_bio            = setup.get("shortBio", ""),
