@@ -305,10 +305,12 @@ def _build_content_prompt(payload, user_id=None):
     _length_val = (payload.length or "medium").lower().strip()
     if _length_val == "short":
         length_text = (
-            "LENGTH — SHORT FORM: 50-80 words MAXIMUM. This is a scroll-stopper, not an article. "
-            "One sharp observation or human moment. Maximum 3 sentences. No lists, no headers, no breakdown sections. "
-            "Write like a text message from a smart friend — immediate, specific, human. "
-            "If it takes more than 20 seconds to read, it is too long. Cut ruthlessly.\n"
+            "LENGTH IS THE HARDEST CONSTRAINT: write between 400 and 600 CHARACTERS total. "
+            "Not words, characters. This is roughly 60 to 90 words, two to four short sentences, no more. "
+            "Treat going over 600 characters as a failure of the task. Count as you write and stop early rather than late. "
+            "This is a single scroll-stopping thought: one sharp observation or one human moment. "
+            "No lists, no headers, no sections, no wind-up and no summary. Open on the point and end on it. "
+            "If a sentence is not essential, delete it. Brevity is the entire job here.\n"
         )
     elif _length_val == "long":
         length_text = (
